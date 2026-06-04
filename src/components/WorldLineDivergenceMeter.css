@@ -506,3 +506,62 @@
     animation: none !important;
   }
 }
+
+.wl-active-thin-glow,
+.wl-active-thin-body,
+.wl-active-thin-core,
+.wl-previous-thin-glyph path {
+  fill: none;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+.wl-active-thin-glow {
+  stroke: rgba(255, 68, 8, calc(0.58 * var(--wl-glow)));
+  stroke-width: 9;
+  opacity: 0.66;
+}
+
+.wl-active-thin-body {
+  stroke: rgba(255, 112, 22, 0.9);
+  stroke-width: 4.4;
+  opacity: 0.82;
+  filter:
+    drop-shadow(0 0 3px rgba(255, 84, 8, calc(0.66 * var(--wl-glow))))
+    drop-shadow(0 0 9px rgba(255, 46, 0, calc(0.42 * var(--wl-glow))));
+  animation: wl-hot-flicker 2.4s infinite steps(26);
+}
+
+.wl-active-thin-core {
+  stroke: rgba(255, 226, 116, 0.72);
+  stroke-width: 1.4;
+  opacity: 0.82;
+  mix-blend-mode: screen;
+}
+
+.wl-previous-thin-glyph path {
+  stroke: rgba(255, 55, 12, 0.34);
+  stroke-width: 4.4;
+  filter: blur(1.2px);
+  animation: wl-burn-out 620ms ease-out both;
+}
+
+.worldline-meter.is-burst .wl-active-thin-body {
+  animation:
+    wl-hot-flicker 2.4s infinite steps(26),
+    wl-final-thin-flare 760ms ease-out;
+}
+
+@keyframes wl-final-thin-flare {
+  0% {
+    stroke-width: 4.4;
+  }
+
+  26% {
+    stroke-width: 6.2;
+  }
+
+  100% {
+    stroke-width: 4.4;
+  }
+}

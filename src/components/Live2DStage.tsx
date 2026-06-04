@@ -31,6 +31,18 @@ const LIVE2D_SCRIPTS = [
 
 const MODEL_URL = "/live2dmodels/steinsGateKurisuNew/kurisu.model3.json";
 const RANDOM_MOTIONS = ["neutral", "random1", "random2", "random3", "random4", "random5"];
+const VALID_EMOTIONS = new Set([
+  "neutral",
+  "anger",
+  "joy",
+  "sadness",
+  "shy",
+  "shy2",
+  "smile1",
+  "smile2",
+  "surprise",
+  "unhappy"
+]);
 const EMOTION_ALIASES: Record<string, string> = {
   smile: "smile1"
 };
@@ -69,7 +81,9 @@ function loadScript(src: string): Promise<void> {
 }
 
 function normalizeEmotion(emotion: string): string {
-  return EMOTION_ALIASES[emotion] ?? emotion;
+  const key = emotion.trim().toLowerCase();
+  const normalized = EMOTION_ALIASES[key] ?? key;
+  return VALID_EMOTIONS.has(normalized) ? normalized : "neutral";
 }
 
 export const Live2DStage = forwardRef<Live2DStageHandle, Live2DStageProps>(
@@ -96,6 +110,10 @@ export const Live2DStage = forwardRef<Live2DStageHandle, Live2DStageProps>(
         const normalized = normalizeEmotion(emotion);
         try {
           model.motion(normalized, 0, pixi.live2d.MotionPriority.NORMAL);
+        } catch {
+          // Expressions can still be available even if a motion group fails.
+        }
+        try {
           model.expression(normalized);
         } catch {
           return;

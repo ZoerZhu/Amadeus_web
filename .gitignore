@@ -29,6 +29,12 @@ __pycache__/
 
 # Runtime data
 backend/runtime/
+generated_docs/*
+!generated_docs/.gitkeep
+agent_state/*
+!agent_state/.gitkeep
+agent_uploads/*
+!agent_uploads/.gitkeep
 
 # Browser and test artifacts
 .playwright-mcp/

@@ -4,7 +4,7 @@ import os
 from pathlib import Path
 from uuid import UUID
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -24,6 +24,12 @@ from .personas import get_persona, list_personas
 from .providers import PROVIDER_PRESETS
 from .runtime_config import effective_voice_settings
 from .storage import DEFAULT_USER_ID, PostgresStorage
+from .uploads.file_upload_service import (
+    UploadConflictError,
+    UploadTooLargeError,
+    UploadValidationError,
+    save_uploaded_text_file,
+)
 from .voice_service import AUDIO_DIR, clone_kurisu_voice, synthesize_for_persona
 
 
@@ -101,6 +107,30 @@ async def agent_invoke(request: AgentInvokeRequest) -> dict:
     return await invoke_agent_request(request)
 
 
+@app.post("/api/files/upload")
+async def upload_file(
+    file: UploadFile = File(...),
+    device: str = Form("host"),
+    overwrite: bool = Form(False),
+) -> dict:
+    try:
+        uploaded = await save_uploaded_text_file(file, device=device, overwrite=overwrite)
+    except UploadConflictError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    except UploadTooLargeError as error:
+        raise HTTPException(status_code=413, detail=str(error)) from error
+    except UploadValidationError as error:
+        raise HTTPException(status_code=415, detail=str(error)) from error
+    return {
+        "ok": True,
+        "summary": f"已上传 {uploaded['filename']} 到 {uploaded['path']}，可交给 file_reader 读取。",
+        "file": uploaded,
+        "data": {
+            "file": uploaded,
+        },
+    }
+
+
 @app.get("/api/settings")
 async def get_settings() -> dict:
     settings = await require_storage().get_settings(DEFAULT_USER_ID)
@@ -140,6 +170,14 @@ async def conversation(conversation_id: UUID) -> dict:
     if item is None:
         raise HTTPException(status_code=404, detail="Conversation not found")
     return {"conversation": item}
+
+
+@app.delete("/api/conversations/{conversation_id}")
+async def delete_conversation(conversation_id: UUID) -> dict:
+    deleted = await require_storage().delete_conversation(user_id=DEFAULT_USER_ID, conversation_id=conversation_id)
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    return {"ok": True}
 
 
 @app.post("/api/chat/stream")

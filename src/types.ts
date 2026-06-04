@@ -14,6 +14,7 @@ export interface ChatMessage {
   role: ChatRole;
   content: string;
   thinking?: string;
+  toolEvents?: ToolTraceEvent[];
   streaming?: boolean;
   createdAt?: string;
 }
@@ -89,10 +90,48 @@ export interface AgentInvokeResponse {
   data: Record<string, unknown>;
 }
 
+export type UploadDevice = "host" | "mobile";
+
+export interface UploadedFileInfo {
+  device: UploadDevice;
+  date: string;
+  textType: string;
+  originalFilename: string;
+  filename: string;
+  path: string;
+  contentType: string;
+  sizeBytes: number;
+  uploadedAt: string;
+  readableByFileReader: boolean;
+}
+
+export interface FileUploadResponse {
+  ok: boolean;
+  summary: string;
+  file: UploadedFileInfo;
+  data: {
+    file: UploadedFileInfo;
+  };
+}
+
+export type ToolTraceStatus = "started" | "completed" | "failed";
+
+export interface ToolTraceEvent {
+  id: string;
+  name: string;
+  status: ToolTraceStatus;
+  arguments?: Record<string, unknown>;
+  summary?: string;
+  resultPreview?: string;
+  result?: unknown;
+  error?: string;
+}
+
 export type StreamEvent =
   | { event: "status"; payload: { phase: string; provider?: string; model?: string } }
   | { event: "content"; payload: { text: string } }
   | { event: "thinking"; payload: { text: string } }
+  | { event: "tool"; payload: ToolTraceEvent }
   | { event: "emotion"; payload: { emotion: string; live2dEmotion: string } }
   | { event: "audio"; payload: { url: string; index?: number; text?: string; syncText?: boolean } }
   | { event: "voice_error"; payload: { message: string; index?: number } }

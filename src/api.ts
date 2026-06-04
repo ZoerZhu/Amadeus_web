@@ -5,10 +5,12 @@ import type {
   ChatMode,
   ConversationDetail,
   ConversationSummary,
+  FileUploadResponse,
   ModelSettings,
   ProviderPreset,
   StoredSettings,
   StreamEvent,
+  UploadDevice,
   VoiceSettings
 } from "./types";
 
@@ -124,6 +126,16 @@ export async function fetchConversation(id: string): Promise<ConversationDetail>
   return data.conversation;
 }
 
+export async function deleteConversation(id: string): Promise<void> {
+  const response = await fetch(`/api/conversations/${encodeURIComponent(id)}`, {
+    method: "DELETE"
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(data.detail || `conversation delete ${response.status}`);
+  }
+}
+
 export async function fetchAgentCapabilities(): Promise<AgentInvokeResponse> {
   const response = await fetch("/api/agent/capabilities");
   const data = await response.json().catch(() => ({}));
@@ -151,6 +163,29 @@ export async function invokeAgent(request: Partial<AgentInvokeRequest>): Promise
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
     throw new Error(data.detail || `agent ${response.status}`);
+  }
+  return data;
+}
+
+export async function uploadAgentFile(options: {
+  file: File;
+  device?: UploadDevice;
+  overwrite?: boolean;
+  signal?: AbortSignal;
+}): Promise<FileUploadResponse> {
+  const form = new FormData();
+  form.append("file", options.file, options.file.name);
+  form.append("device", options.device ?? "host");
+  form.append("overwrite", String(options.overwrite ?? false));
+
+  const response = await fetch("/api/files/upload", {
+    method: "POST",
+    body: form,
+    signal: options.signal
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(data.detail || `file upload ${response.status}`);
   }
   return data;
 }

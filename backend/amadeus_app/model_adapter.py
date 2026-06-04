@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 from .domain import ChatMode, ModelProviderPreset, ModelSettings
 
 
@@ -7,7 +9,7 @@ def build_chat_payload(
     settings: ModelSettings,
     provider: ModelProviderPreset,
     mode: ChatMode,
-    messages: list[dict[str, str]],
+    messages: list[dict[str, Any]],
     *,
     tools: list[dict] | None = None,
     stream: bool = True,

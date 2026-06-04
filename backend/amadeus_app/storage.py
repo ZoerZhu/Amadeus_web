@@ -228,6 +228,19 @@ class PostgresStorage:
         payload["messages"] = [_serialize_message(row) for row in messages]
         return payload
 
+    async def delete_conversation(self, *, user_id: str, conversation_id: UUID) -> bool:
+        pool = self.require_pool()
+        row = await pool.fetchrow(
+            """
+            DELETE FROM conversations
+            WHERE id = $1 AND user_id = $2
+            RETURNING id
+            """,
+            conversation_id,
+            user_id,
+        )
+        return row is not None
+
     async def add_message(
         self,
         *,

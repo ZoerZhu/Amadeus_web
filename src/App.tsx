@@ -1,15 +1,19 @@
 import { FormEvent, PointerEvent as ReactPointerEvent, useEffect, useMemo, useRef, useState } from "react";
-import type { CSSProperties, MouseEvent as ReactMouseEvent, ReactNode } from "react";
+import type { CSSProperties, ReactNode } from "react";
 import {
   Bell,
   BookOpenText,
   Bot,
   Brain,
+  CheckCircle2,
   ChevronLeft,
   ChevronRight,
+  CircleDashed,
   CircleStop,
   Clock3,
   Copy,
+  Download,
+  ExternalLink,
   KeyRound,
   Menu,
   MessageCircle,
@@ -23,14 +27,18 @@ import {
   Settings,
   SlidersHorizontal,
   Sparkles,
+  Trash2,
   UserRound,
   Volume2,
   VolumeX,
+  Wrench,
+  XCircle,
   Zap
 } from "lucide-react";
 import {
   cloneVoice,
   createConversation,
+  deleteConversation,
   fetchConversation,
   fetchProviders,
   fetchSettings,
@@ -39,10 +47,7 @@ import {
   streamChat,
   synthesizeVoice
 } from "./api";
-import {
-  WorldLineDivergenceMeter,
-  type WorldLineMeterHandle
-} from "./components/WorldLineDivergenceMeter";
+import { BootLoader } from "./components/BootLoader";
 import { Live2DStage, type Live2DStageHandle } from "./components/Live2DStage";
 import type {
   ApiChatMessage,
@@ -54,12 +59,13 @@ import type {
   ProviderPreset,
   StoredSettings,
   StreamEvent,
+  ToolTraceEvent,
   VoiceSettings
 } from "./types";
 
 const STORAGE_KEY = "amadeus-web-settings-v1";
 const PERSONA_ID = "kurisu_amadeus";
-const LEFT_SIDEBAR_WIDTH = 316;
+const LEFT_SIDEBAR_WIDTH = 372;
 const SETTINGS_SIDEBAR_WIDTH = 388;
 const PANEL_GAP = 14;
 const EDGE_MARGIN = 18;
@@ -91,6 +97,35 @@ type AudioQueueItem = {
   assistantId?: string;
   displayText?: string;
   index?: number;
+};
+type ToolResultLink = {
+  title: string;
+  url: string;
+  domain?: string;
+  snippet?: string;
+};
+type MarkdownBlock =
+  | { type: "paragraph"; lines: string[] }
+  | { type: "heading"; level: number; text: string }
+  | { type: "orderedList" | "unorderedList"; items: string[] }
+  | { type: "code"; text: string };
+
+const TOOL_EVENT_LOG_PREFIX = "__AMADEUS_TOOL_EVENT__";
+const DISPLAY_EMOTIONS = new Set(["neutral", "anger", "joy", "sadness", "shy", "smile", "surprise", "unhappy"]);
+const LIVE2D_EMOTIONS = new Set([
+  "neutral",
+  "anger",
+  "joy",
+  "sadness",
+  "shy",
+  "shy2",
+  "smile1",
+  "smile2",
+  "surprise",
+  "unhappy"
+]);
+const LIVE2D_EMOTION_ALIASES: Record<string, string> = {
+  smile: "smile1"
 };
 
 function createId(): string {
@@ -148,6 +183,206 @@ function buildConversationTitle(text: string): string {
   return title.length > 32 ? `${title.slice(0, 32)}...` : title;
 }
 
+function sanitizeFilename(value: string): string {
+  const name = value.replace(/[\\/:*?"<>|]/g, " ").replace(/\s+/g, " ").trim();
+  return (name || "conversation").slice(0, 80);
+}
+
+function formatExportTime(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return value;
+  }
+  return date.toLocaleString("zh-CN", {
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit"
+  });
+}
+
+function conversationToMarkdown(conversation: ConversationDetail): string {
+  const lines = [
+    `# ${conversation.title}`,
+    "",
+    `- Persona: ${conversation.personaId}`,
+    `- Mode: ${conversation.mode}`,
+    `- Created: ${formatExportTime(conversation.createdAt)}`,
+    `- Updated: ${formatExportTime(conversation.updatedAt)}`,
+    ""
+  ];
+
+  for (const message of conversation.messages) {
+    const role = message.role === "assistant" ? "Kurisu Amadeus" : "User";
+    lines.push(`## ${role} · ${formatExportTime(message.createdAt)}`, "");
+    if (message.thinking?.trim()) {
+      lines.push("### Thinking", "", message.thinking.trim(), "");
+    }
+    lines.push(message.content.trim() || "(empty)", "");
+  }
+  return lines.join("\n").trimEnd() + "\n";
+}
+
+function downloadText(filename: string, text: string, mimeType = "text/markdown;charset=utf-8") {
+  const url = URL.createObjectURL(new Blob([text], { type: mimeType }));
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
+
+function parseMarkdownBlocks(text: string): MarkdownBlock[] {
+  const lines = text.replace(/\r\n/g, "\n").split("\n");
+  const blocks: MarkdownBlock[] = [];
+  let index = 0;
+
+  while (index < lines.length) {
+    const line = lines[index];
+    if (!line.trim()) {
+      index += 1;
+      continue;
+    }
+
+    if (line.trimStart().startsWith("```")) {
+      const code: string[] = [];
+      index += 1;
+      while (index < lines.length && !lines[index].trimStart().startsWith("```")) {
+        code.push(lines[index]);
+        index += 1;
+      }
+      index += 1;
+      blocks.push({ type: "code", text: code.join("\n") });
+      continue;
+    }
+
+    const heading = /^(#{1,3})\s+(.+)$/.exec(line.trim());
+    if (heading) {
+      blocks.push({ type: "heading", level: heading[1].length, text: heading[2] });
+      index += 1;
+      continue;
+    }
+
+    const ordered = /^\s*\d+[.)]\s+(.+)$/.exec(line);
+    const unordered = /^\s*[-*]\s+(.+)$/.exec(line);
+    if (ordered || unordered) {
+      const type = ordered ? "orderedList" : "unorderedList";
+      const marker = ordered ? /^\s*\d+[.)]\s+(.+)$/ : /^\s*[-*]\s+(.+)$/;
+      const items: string[] = [];
+      while (index < lines.length) {
+        const item = marker.exec(lines[index]);
+        if (!item) {
+          if (lines[index].trim() && /^\s+/.test(lines[index]) && items.length > 0) {
+            items[items.length - 1] += `\n${lines[index].trim()}`;
+            index += 1;
+            continue;
+          }
+          break;
+        }
+        items.push(item[1].trim());
+        index += 1;
+      }
+      blocks.push({ type, items });
+      continue;
+    }
+
+    const paragraph: string[] = [];
+    while (index < lines.length && lines[index].trim()) {
+      if (/^(#{1,3})\s+/.test(lines[index].trim()) || /^\s*(?:\d+[.)]|[-*])\s+/.test(lines[index])) {
+        break;
+      }
+      paragraph.push(lines[index]);
+      index += 1;
+    }
+    blocks.push({ type: "paragraph", lines: paragraph });
+  }
+
+  return blocks;
+}
+
+function renderInlineMarkdown(text: string, keyPrefix: string): ReactNode[] {
+  const nodes: ReactNode[] = [];
+  const pattern = /\[([^\]]+)]\((https?:\/\/[^\s)]+)\)|`([^`]+)`|\*\*([^*]+)\*\*/g;
+  let cursor = 0;
+  let match: RegExpExecArray | null;
+
+  while ((match = pattern.exec(text)) !== null) {
+    if (match.index > cursor) {
+      nodes.push(text.slice(cursor, match.index));
+    }
+    if (match[1] && match[2]) {
+      nodes.push(
+        <a href={match[2]} key={`${keyPrefix}-link-${match.index}`} rel="noreferrer" target="_blank">
+          {match[1]}
+        </a>
+      );
+    } else if (match[3]) {
+      nodes.push(<code key={`${keyPrefix}-code-${match.index}`}>{match[3]}</code>);
+    } else if (match[4]) {
+      nodes.push(<strong key={`${keyPrefix}-strong-${match.index}`}>{match[4]}</strong>);
+    }
+    cursor = match.index + match[0].length;
+  }
+
+  if (cursor < text.length) {
+    nodes.push(text.slice(cursor));
+  }
+  return nodes;
+}
+
+function renderMarkdownText(text: string, keyPrefix: string): ReactNode[] {
+  return text.split("\n").flatMap((line, index) => {
+    const nodes = renderInlineMarkdown(line, `${keyPrefix}-${index}`);
+    return index === 0 ? nodes : [<br key={`${keyPrefix}-br-${index}`} />, ...nodes];
+  });
+}
+
+function renderMarkdownContent(text: string): ReactNode {
+  const blocks = parseMarkdownBlocks(text);
+  if (blocks.length === 0) {
+    return <div className="animated-text markdown-content">{text}</div>;
+  }
+  return (
+    <div className="animated-text markdown-content">
+      {blocks.map((block, index) => {
+        const key = `md-${index}`;
+        if (block.type === "heading") {
+          const Tag = (`h${Math.min(block.level + 2, 4)}` as keyof JSX.IntrinsicElements);
+          return <Tag key={key}>{renderMarkdownText(block.text, key)}</Tag>;
+        }
+        if (block.type === "orderedList") {
+          return (
+            <ol key={key}>
+              {block.items.map((item, itemIndex) => (
+                <li key={`${key}-${itemIndex}`}>{renderMarkdownText(item, `${key}-${itemIndex}`)}</li>
+              ))}
+            </ol>
+          );
+        }
+        if (block.type === "unorderedList") {
+          return (
+            <ul key={key}>
+              {block.items.map((item, itemIndex) => (
+                <li key={`${key}-${itemIndex}`}>{renderMarkdownText(item, `${key}-${itemIndex}`)}</li>
+              ))}
+            </ul>
+          );
+        }
+        if (block.type === "code") {
+          return <pre key={key}>{block.text}</pre>;
+        }
+        if (block.type === "paragraph") {
+          return <p key={key}>{renderMarkdownText(block.lines.join("\n"), key)}</p>;
+        }
+        return null;
+      })}
+    </div>
+  );
+}
+
 function formatHistoryTime(value: string): string {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) {
@@ -170,6 +405,274 @@ function formatMessageTime(value?: string): string {
     hour: "2-digit",
     minute: "2-digit"
   });
+}
+
+function normalizeDisplayEmotion(value?: string): string {
+  const emotion = value?.trim().toLowerCase() ?? "";
+  if (emotion === "smile1" || emotion === "smile2") {
+    return "smile";
+  }
+  return DISPLAY_EMOTIONS.has(emotion) ? emotion : "neutral";
+}
+
+function normalizeLive2dEmotion(...values: Array<string | undefined>): string {
+  for (const value of values) {
+    const emotion = value?.trim().toLowerCase() ?? "";
+    const aliased = LIVE2D_EMOTION_ALIASES[emotion] ?? emotion;
+    if (LIVE2D_EMOTIONS.has(aliased)) {
+      return aliased;
+    }
+  }
+  return "neutral";
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function asString(value: unknown): string {
+  return typeof value === "string" ? value.trim() : "";
+}
+
+function parseJsonValue(value?: string): unknown {
+  if (!value?.trim()) {
+    return undefined;
+  }
+  try {
+    return JSON.parse(value);
+  } catch {
+    return undefined;
+  }
+}
+
+function normalizeToolTraceEvent(value: unknown): ToolTraceEvent | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+  const status = value.status;
+  if (status !== "started" && status !== "completed" && status !== "failed") {
+    return null;
+  }
+  const name = asString(value.name);
+  if (!name) {
+    return null;
+  }
+  const event: ToolTraceEvent = {
+    id: asString(value.id) || `stored-${name}`,
+    name,
+    status
+  };
+  if (isRecord(value.arguments)) {
+    event.arguments = value.arguments;
+  }
+  if (typeof value.summary === "string") {
+    event.summary = value.summary;
+  }
+  if (typeof value.resultPreview === "string") {
+    event.resultPreview = value.resultPreview;
+  }
+  if ("result" in value) {
+    event.result = value.result;
+  }
+  if (typeof value.error === "string") {
+    event.error = value.error;
+  }
+  return event;
+}
+
+function parseStoredToolEvent(line: string): ToolTraceEvent | null {
+  const text = line.trim();
+  if (!text.startsWith(TOOL_EVENT_LOG_PREFIX)) {
+    return null;
+  }
+  return normalizeToolTraceEvent(parseJsonValue(text.slice(TOOL_EVENT_LOG_PREFIX.length).trim()));
+}
+
+function mergeToolEvents(events: ToolTraceEvent[]): ToolTraceEvent[] {
+  const merged = new Map<string, ToolTraceEvent>();
+  for (const event of events) {
+    const key = event.id || event.name;
+    merged.set(key, { ...(merged.get(key) ?? {}), ...event });
+  }
+  return Array.from(merged.values());
+}
+
+function extractToolEventsFromThinking(text: string): ToolTraceEvent[] {
+  const storedEvents = text
+    .split(/\r?\n/)
+    .map((line) => parseStoredToolEvent(line))
+    .filter((event): event is ToolTraceEvent => Boolean(event));
+  if (storedEvents.length > 0) {
+    return mergeToolEvents(storedEvents);
+  }
+
+  const eventsByName = new Map<string, ToolTraceEvent>();
+  for (const match of text.matchAll(/调用工具\s+([\w.-]+)。/g)) {
+    const name = match[1];
+    eventsByName.set(name, {
+      id: `thinking-${name}`,
+      name,
+      status: "started",
+      summary: "工具调用已记录在思考过程中。"
+    });
+  }
+  for (const match of text.matchAll(/工具\s+([\w.-]+)\s+完成：([^。\n]+)。+/g)) {
+    const name = match[1];
+    eventsByName.set(name, {
+      id: `thinking-${name}`,
+      name,
+      status: "completed",
+      summary: match[2]
+    });
+  }
+  for (const match of text.matchAll(/工具\s+([\w.-]+)\s+失败：([^。\n]+)。+/g)) {
+    const name = match[1];
+    eventsByName.set(name, {
+      id: `thinking-${name}`,
+      name,
+      status: "failed",
+      error: match[2]
+    });
+  }
+  return Array.from(eventsByName.values());
+}
+
+function stripToolEventLines(text: string): string {
+  return text
+    .replace(new RegExp(`^\\s*${TOOL_EVENT_LOG_PREFIX}\\s+.*(?:\\n|$)`, "gm"), "")
+    .replace(/调用工具\s+[\w.-]+。/g, "")
+    .replace(/工具\s+[\w.-]+\s+完成：[^。\n]+。+/g, "")
+    .replace(/工具\s+[\w.-]+\s+失败：[^。\n]+。+/g, "")
+    .replace(/^\s*(?:em\s*otion|emotion)\s*:\s*[\w.-]+\s*$/gim, "")
+    .replace(/\[emotion:\w+]\s*/gi, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+function normalizeThinkingText(text: string): string {
+  let normalized = text
+    .replace(/\r\n/g, "\n")
+    .replace(/([^\n])\n(?!\n)/g, "$1 ")
+    .replace(/([A-Za-z0-9])\s+([_.:/-])\s*([A-Za-z0-9])/g, "$1$2$3")
+    .replace(/([A-Za-z0-9])([_.:/-])\s+([A-Za-z0-9])/g, "$1$2$3")
+    .replace(/([A-Za-z0-9_])\s+(_[A-Za-z0-9])/g, "$1$2")
+    .replace(/(\d)\s+(\d)/g, "$1$2")
+    .replace(/(\d)\s*:\s*(\d)/g, "$1:$2")
+    .replace(/([“‘（《])\s+/g, "$1")
+    .replace(/\s+([”’）》])/g, "$1")
+    .replace(/[ \t]{2,}/g, " ");
+
+  for (let index = 0; index < 4; index += 1) {
+    normalized = normalized
+      .replace(/([\u3400-\u9fff])\s+([\u3400-\u9fff])/g, "$1$2")
+      .replace(/([\u3400-\u9fff])\s+(\d)/g, "$1$2")
+      .replace(/(\d)\s+([\u3400-\u9fff])/g, "$1$2")
+      .replace(/([\u3400-\u9fff])\s+([，。！？；：、])/g, "$1$2")
+      .replace(/([，。！？；：、])\s+([\u3400-\u9fff])/g, "$1$2");
+  }
+
+  return normalized.trim();
+}
+
+function getToolResultRoot(item: ToolTraceEvent): unknown {
+  if (item.result !== undefined) {
+    return item.result;
+  }
+  return parseJsonValue(item.resultPreview) ?? item.resultPreview;
+}
+
+function getToolResultData(item: ToolTraceEvent): unknown {
+  const root = getToolResultRoot(item);
+  if (isRecord(root) && "data" in root) {
+    return root.data;
+  }
+  return root;
+}
+
+function getToolResultText(item: ToolTraceEvent): string {
+  const root = getToolResultRoot(item);
+  const data = getToolResultData(item);
+  if (isRecord(data)) {
+    const answer = asString(data.answer);
+    if (answer) {
+      return answer;
+    }
+    const text = asString(data.text) || asString(data.content) || asString(data.result);
+    if (text) {
+      return text;
+    }
+  }
+  if (isRecord(root)) {
+    const summary = asString(root.summary) || asString(root.error);
+    if (summary) {
+      return summary;
+    }
+    try {
+      return JSON.stringify(root, null, 2);
+    } catch {
+      return "";
+    }
+  }
+  return asString(root) || item.resultPreview || "";
+}
+
+function extractToolResultLinks(item: ToolTraceEvent): ToolResultLink[] {
+  const root = getToolResultRoot(item);
+  const data = getToolResultData(item);
+  const links: ToolResultLink[] = [];
+  const seen = new Set<string>();
+
+  const addLink = (value: unknown) => {
+    if (!isRecord(value)) {
+      return;
+    }
+    const url = asString(value.url) || asString(value.link) || asString(value.href);
+    if (!/^https?:\/\//i.test(url) || seen.has(url)) {
+      return;
+    }
+    seen.add(url);
+    const evidence = Array.isArray(value.evidence) && isRecord(value.evidence[0]) ? asString(value.evidence[0].quote) : "";
+    links.push({
+      title: asString(value.title) || asString(value.name) || asString(value.displayUrl) || url,
+      url,
+      domain: asString(value.domain) || asString(value.displayUrl),
+      snippet: asString(value.snippet) || asString(value.contentSummary) || evidence
+    });
+  };
+
+  const visitList = (value: unknown) => {
+    if (Array.isArray(value)) {
+      value.forEach(addLink);
+    }
+  };
+
+  if (isRecord(data)) {
+    visitList(data.results);
+    visitList(data.sources);
+    visitList(data.candidates);
+    visitList(data.links);
+  }
+  if (isRecord(root)) {
+    visitList(root.results);
+    visitList(root.sources);
+    visitList(root.links);
+  }
+  if (Array.isArray(data)) {
+    data.forEach(addLink);
+  }
+  return links;
+}
+
+function stripToolResultTextFromThinking(text: string, events: ToolTraceEvent[]): string {
+  let output = normalizeThinkingText(text);
+  for (const event of events) {
+    const resultText = normalizeThinkingText(getToolResultText(event));
+    if (resultText.length < 48) {
+      continue;
+    }
+    output = output.split(resultText).join("");
+  }
+  return output.replace(/\s{3,}/g, " ").trim();
 }
 
 function compactLabel(value: string, fallback: string): string {
@@ -198,14 +701,6 @@ function getChatMaxWidth(menuOpen: boolean, configOpen: boolean): number {
   }
   const available = window.innerWidth - getLeftOccupiedWidth(menuOpen, configOpen) - EDGE_MARGIN;
   return clamp(available, CHAT_MIN_WIDTH, CHAT_MAX_WIDTH);
-}
-
-function generateWorldLineValue(): string {
-  const base = 1.048596;
-  if (Math.random() > 0.82) {
-    return `${Math.floor(Math.random() * 2)}.${Math.random().toString().slice(2, 8).padEnd(6, "0")}`;
-  }
-  return (base + (Math.random() - 0.5) * 0.00018).toFixed(6);
 }
 
 export default function App() {
@@ -240,8 +735,6 @@ export default function App() {
   const [live2dError, setLive2dError] = useState("");
   const [minimumBootElapsed, setMinimumBootElapsed] = useState(false);
   const [enteredApp, setEnteredApp] = useState(false);
-  const [loadingValue, setLoadingValue] = useState("1.048596");
-  const bootMeterRef = useRef<WorldLineMeterHandle | null>(null);
   const live2dRef = useRef<Live2DStageHandle | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
@@ -267,20 +760,6 @@ export default function App() {
   }, [conversations, historySearch]);
   const live2dLoadResolved = live2dReady || Boolean(live2dError);
   const loadingReady = minimumBootElapsed && live2dLoadResolved;
-  const bootPhase = live2dError
-    ? "LIVE2D LINK FAILURE"
-    : loadingReady
-      ? "WORLD LINE STABILIZED"
-      : live2dReady
-        ? "MINIMUM BOOT SEQUENCE"
-        : "SYNCHRONIZING LIVE2D MODEL";
-  const bootDetail = live2dError
-    ? live2dError
-    : loadingReady
-      ? "模型已载入，点击进入对话。"
-      : live2dReady
-        ? "模型已就绪，正在稳定时间线。"
-        : "正在加载 Live2D 运行时与 Kurisu 模型。";
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -288,23 +767,6 @@ export default function App() {
     }, MIN_BOOT_DURATION_MS);
     return () => window.clearTimeout(timer);
   }, []);
-
-  useEffect(() => {
-    if (loadingReady) {
-      setLoadingValue("1.048596");
-      const timer = window.setTimeout(() => {
-        bootMeterRef.current?.shiftTo("1.048596", {
-          transition: "burn"
-        });
-      }, 80);
-      return () => window.clearTimeout(timer);
-    }
-
-    const interval = window.setInterval(() => {
-      setLoadingValue(generateWorldLineValue());
-    }, 1800);
-    return () => window.clearInterval(interval);
-  }, [loadingReady]);
 
   useEffect(() => {
     fetchProviders()
@@ -480,6 +942,42 @@ export default function App() {
     }
   }
 
+  async function exportConversationItem(conversation: ConversationSummary) {
+    try {
+      const item = await fetchConversation(conversation.id);
+      const stamp = new Date().toISOString().slice(0, 10);
+      downloadText(`${sanitizeFilename(item.title)}-${stamp}.md`, conversationToMarkdown(item));
+      setStatus("exported");
+    } catch (error) {
+      setStorageError(error instanceof Error ? error.message : "conversation export failed");
+      setStatus("export failed");
+    }
+  }
+
+  async function deleteConversationItem(conversation: ConversationSummary) {
+    if (isStreaming) {
+      return;
+    }
+    const confirmed = window.confirm(`删除聊天记录“${conversation.title}”？此操作会从数据库中删除，不能撤销。`);
+    if (!confirmed) {
+      return;
+    }
+    try {
+      await deleteConversation(conversation.id);
+      setConversations((prev) => prev.filter((item) => item.id !== conversation.id));
+      if (conversation.id === currentConversationId) {
+        stopAudioPlayback();
+        setCurrentConversationId(null);
+        setMessages([]);
+        setInput("");
+      }
+      setStatus("deleted");
+    } catch (error) {
+      setStorageError(error instanceof Error ? error.message : "conversation delete failed");
+      setStatus("delete failed");
+    }
+  }
+
   function startNewConversation() {
     abortRef.current?.abort();
     stopAudioPlayback();
@@ -530,6 +1028,24 @@ export default function App() {
             }
           : message
       )
+    );
+  }
+
+  function appendAssistantToolEvent(id: string, toolEvent: ToolTraceEvent) {
+    setMessages((prev) =>
+      prev.map((message) => {
+        if (message.id !== id) {
+          return message;
+        }
+        const existingEvents = message.toolEvents ?? [];
+        const found = existingEvents.some((item) => item.id === toolEvent.id);
+        return {
+          ...message,
+          toolEvents: found
+            ? existingEvents.map((item) => (item.id === toolEvent.id ? { ...item, ...toolEvent } : item))
+            : [...existingEvents, toolEvent]
+        };
+      })
     );
   }
 
@@ -734,9 +1250,13 @@ export default function App() {
       appendAssistantDelta(assistantId, { thinking: event.payload.text });
       return;
     }
+    if (event.event === "tool") {
+      appendAssistantToolEvent(assistantId, event.payload);
+      return;
+    }
     if (event.event === "emotion") {
-      setCurrentEmotion(event.payload.emotion);
-      live2dRef.current?.playEmotion(event.payload.live2dEmotion);
+      setCurrentEmotion(normalizeDisplayEmotion(event.payload.emotion));
+      live2dRef.current?.playEmotion(normalizeLive2dEmotion(event.payload.live2dEmotion, event.payload.emotion));
       return;
     }
     if (event.event === "audio") {
@@ -875,6 +1395,7 @@ export default function App() {
     const pointerId = event.pointerId;
     const target = event.currentTarget;
     target.setPointerCapture(pointerId);
+    document.documentElement.classList.add("is-chat-resizing");
 
     const move = (moveEvent: PointerEvent) => {
       const maxWidth = getChatMaxWidth(menuOpen, configOpen);
@@ -883,37 +1404,152 @@ export default function App() {
     };
 
     const up = () => {
-      target.releasePointerCapture(pointerId);
+      if (target.hasPointerCapture(pointerId)) {
+        target.releasePointerCapture(pointerId);
+      }
+      document.documentElement.classList.remove("is-chat-resizing");
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerup", up);
+      window.removeEventListener("pointercancel", up);
     };
 
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", up);
-  }
-
-  function startChatMouseResize(event: ReactMouseEvent<HTMLButtonElement>) {
-    event.preventDefault();
-
-    const move = (moveEvent: MouseEvent) => {
-      const maxWidth = getChatMaxWidth(menuOpen, configOpen);
-      const nextWidth = window.innerWidth - moveEvent.clientX - EDGE_MARGIN;
-      setChatWidth(clamp(nextWidth, CHAT_MIN_WIDTH, maxWidth));
-    };
-
-    const up = () => {
-      window.removeEventListener("mousemove", move);
-      window.removeEventListener("mouseup", up);
-    };
-
-    window.addEventListener("mousemove", move);
-    window.addEventListener("mouseup", up);
+    window.addEventListener("pointercancel", up);
   }
 
   const settingsOffset = menuOpen ? EDGE_MARGIN + LEFT_SIDEBAR_WIDTH + PANEL_GAP : EDGE_MARGIN;
   const chatMaxWidth = getChatMaxWidth(menuOpen, configOpen);
   const clampedChatWidth = clamp(chatWidth, CHAT_MIN_WIDTH, chatMaxWidth);
   const currentConversation = conversations.find((conversation) => conversation.id === currentConversationId);
+
+  function renderThinkingPanel(message: ChatMessage) {
+    const rawThinking = (message.thinking ?? "").trim();
+    const liveToolEvents = message.toolEvents ?? [];
+    const parsedToolEvents = extractToolEventsFromThinking(rawThinking);
+    const toolEvents = mergeToolEvents([...parsedToolEvents, ...liveToolEvents]);
+    const thinking = stripToolResultTextFromThinking(stripToolEventLines(rawThinking), toolEvents);
+    if (!thinking && toolEvents.length === 0) {
+      return null;
+    }
+    return (
+      <details className="thinking-card" open={message.streaming || Boolean(thinking) || toolEvents.length > 0}>
+        <summary>
+          <span className="thinking-summary-title">
+            <span className="thinking-dot" />
+            思考过程
+          </span>
+          <span className="thinking-summary-action">
+            <span className="label-open">收起</span>
+            <span className="label-closed">展开</span>
+          </span>
+        </summary>
+        <div className="thinking-card-body">
+          {thinking && <p className="thinking-text">{thinking}</p>}
+          {toolEvents.length > 0 && (
+            <div className="tool-trace-list" aria-label="工具调用过程">
+              {toolEvents.map((item) => renderToolTraceItem(item))}
+            </div>
+          )}
+        </div>
+      </details>
+    );
+  }
+
+  function renderToolTraceItem(item: ToolTraceEvent) {
+    const args = formatToolArguments(item.arguments);
+    const detail = item.error || item.summary || item.resultPreview || "等待工具返回结果";
+    const links = extractToolResultLinks(item);
+    const resultText = getToolResultText(item);
+    const hasResultDetails = item.status === "completed" && (links.length > 0 || resultText.trim().length > 0);
+    return (
+      <div className={`tool-trace-item is-${item.status}`} key={item.id}>
+        <span className="tool-trace-icon">{toolTraceIcon(item)}</span>
+        <div className="tool-trace-body">
+          <div className="tool-trace-head">
+            <span>{toolTraceTitle(item)}</span>
+            <small>{toolTraceStatus(item.status)}</small>
+          </div>
+          <p>{detail}</p>
+          {args && <code>{args}</code>}
+          {hasResultDetails && (
+            <details className="tool-result-details">
+              <summary>
+                <span>来源与返回结果</span>
+                <small>{links.length > 0 ? `${links.length} 个链接` : "返回文本"}</small>
+              </summary>
+              <div className="tool-result-content">
+                {links.length > 0 && (
+                  <div className="tool-result-links">
+                    {links.map((link, index) => (
+                      <a className="tool-result-link" href={link.url} target="_blank" rel="noreferrer" key={link.url}>
+                        <span className="tool-result-link-index">{index + 1}</span>
+                        <span className="tool-result-link-copy">
+                          <strong>{link.title}</strong>
+                          {link.domain && <small>{link.domain}</small>}
+                          {link.snippet && <em>{link.snippet}</em>}
+                        </span>
+                        <ExternalLink size={13} />
+                      </a>
+                    ))}
+                  </div>
+                )}
+                {resultText.trim() && <pre className="tool-result-text">{resultText.trim()}</pre>}
+              </div>
+            </details>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  function toolTraceIcon(item: ToolTraceEvent) {
+    if (item.status === "failed") {
+      return <XCircle size={14} />;
+    }
+    if (item.status === "completed") {
+      return <CheckCircle2 size={14} />;
+    }
+    if (item.name.includes("search")) {
+      return <Search size={14} />;
+    }
+    if (item.name.includes("reader") || item.name.includes("doc")) {
+      return <BookOpenText size={14} />;
+    }
+    return item.status === "started" ? <CircleDashed size={14} /> : <Wrench size={14} />;
+  }
+
+  function toolTraceTitle(item: ToolTraceEvent): string {
+    if (item.status === "started") {
+      return `调用 ${item.name}`;
+    }
+    if (item.status === "failed") {
+      return `${item.name} 调用失败`;
+    }
+    return `${item.name} 已完成`;
+  }
+
+  function toolTraceStatus(status: ToolTraceEvent["status"]): string {
+    if (status === "started") {
+      return "进行中";
+    }
+    if (status === "failed") {
+      return "失败";
+    }
+    return "完成";
+  }
+
+  function formatToolArguments(value?: Record<string, unknown>): string {
+    if (!value || Object.keys(value).length === 0) {
+      return "";
+    }
+    try {
+      const text = JSON.stringify(value, null, 2);
+      return text.length > 360 ? `${text.slice(0, 340).trimEnd()}\n...` : text;
+    } catch {
+      return "";
+    }
+  }
 
   function renderMessageBubble(message: ChatMessage, surface: "floating" | "panel") {
     const isAssistant = message.role === "assistant";
@@ -931,13 +1567,8 @@ export default function App() {
       >
         {isAssistant && <div className="bubble-agent-name">Kurisu Amadeus</div>}
         <div className={`${surface === "floating" ? "float-bubble" : "message-bubble"} ${isAssistant ? "is-assistant" : "is-user"}`}>
-          {surface === "panel" && message.thinking && (
-            <details className="thinking-block">
-              <summary>thinking</summary>
-              <p>{message.thinking}</p>
-            </details>
-          )}
-          <p className="animated-text">{content}</p>
+          {isAssistant && renderThinkingPanel(message)}
+          {renderMarkdownContent(content)}
         </div>
         <div className="bubble-meta">
           <time dateTime={message.createdAt}>{formatMessageTime(message.createdAt)}</time>
@@ -1120,16 +1751,41 @@ export default function App() {
               </button>
             )}
             {filteredConversations.map((conversation) => (
-              <button
-                className={`history-item ${conversation.id === currentConversationId ? "is-current" : ""}`}
-                disabled={isStreaming}
+              <div
+                className={`history-row ${conversation.id === currentConversationId ? "is-current" : ""}`}
                 key={conversation.id}
-                onClick={() => void openConversation(conversation.id)}
-                type="button"
               >
-                <span>{conversation.title}</span>
-                <small>{conversation.id === currentConversationId ? status : formatHistoryTime(conversation.updatedAt)}</small>
-              </button>
+                <button
+                  className="history-item"
+                  disabled={isStreaming}
+                  onClick={() => void openConversation(conversation.id)}
+                  type="button"
+                >
+                  <span>{conversation.title}</span>
+                  <small>{conversation.id === currentConversationId ? status : formatHistoryTime(conversation.updatedAt)}</small>
+                </button>
+                <div className="history-actions" aria-label={`${conversation.title} 操作`}>
+                  <button
+                    className="history-icon-button"
+                    onClick={() => void exportConversationItem(conversation)}
+                    title="导出"
+                    type="button"
+                    aria-label={`导出 ${conversation.title}`}
+                  >
+                    <Download size={14} />
+                  </button>
+                  <button
+                    className="history-icon-button is-danger"
+                    disabled={isStreaming}
+                    onClick={() => void deleteConversationItem(conversation)}
+                    title="删除"
+                    type="button"
+                    aria-label={`删除 ${conversation.title}`}
+                  >
+                    <Trash2 size={14} />
+                  </button>
+                </div>
+              </div>
             ))}
           </section>
 
@@ -1379,7 +2035,6 @@ export default function App() {
       <aside className={`chat-panel glass-panel ${chatOpen ? "is-open" : ""}`} aria-hidden={!chatOpen}>
         <button
           className="resize-handle"
-          onMouseDown={startChatMouseResize}
           onPointerDown={startChatResize}
           type="button"
           aria-label="调整聊天栏宽度"
@@ -1440,58 +2095,7 @@ export default function App() {
         </form>
       </aside>
 
-      {!enteredApp && (
-        <section
-          className={[
-            "boot-overlay",
-            loadingReady ? "is-ready" : "is-loading"
-          ].join(" ")}
-          aria-live="polite"
-          onClick={() => {
-            if (loadingReady) {
-              setEnteredApp(true);
-            }
-          }}
-        >
-          <div className="boot-panel glass-panel">
-            <div className="boot-meter-shell">
-              <WorldLineDivergenceMeter
-                ref={bootMeterRef}
-                value={loadingValue}
-                transition={loadingReady ? "burn" : "worldline"}
-                settleDirection="right-to-left"
-                duration={loadingReady ? 900 : 1900}
-                stagger={105}
-                scrambleRate={38}
-                tubeScale={0.92}
-                glow={loadingReady ? 1.25 : 1.12}
-                ghostOpacity={1}
-              />
-            </div>
-            <div className="boot-copy">
-              <span className="eyebrow">Amadeus Boot Sequence</span>
-              <h2>{bootPhase}</h2>
-              <p>{bootDetail}</p>
-            </div>
-            <div className="boot-progress" aria-hidden="true">
-              <span className={live2dLoadResolved ? "is-done" : ""} />
-              <span className={minimumBootElapsed ? "is-done" : ""} />
-              <span className={loadingReady ? "is-done" : ""} />
-            </div>
-            <button
-              className="boot-enter-button"
-              disabled={!loadingReady}
-              onClick={(event) => {
-                event.stopPropagation();
-                setEnteredApp(true);
-              }}
-              type="button"
-            >
-              {loadingReady ? "点击进入" : "同步中"}
-            </button>
-          </div>
-        </section>
-      )}
+      {!enteredApp && <BootLoader ready={loadingReady} onEnter={() => setEnteredApp(true)} />}
     </main>
   );
 }

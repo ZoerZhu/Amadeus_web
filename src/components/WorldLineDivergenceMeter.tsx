@@ -46,7 +46,7 @@ const DIGITS: Digit[] = ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"];
 
 /**
  * 坐标系按参考图比例设计：viewBox = 180 x 460
- * 每个数字使用一组 stroke，而不是字体。
+ * 主数字 stroke：只负责粗亮的主体数字。
  */
 const DIGIT_STROKES: Record<Digit, string[]> = {
   "0": [
@@ -54,21 +54,20 @@ const DIGIT_STROKES: Record<Digit, string[]> = {
   ],
 
   "1": [
-    "M43 130 C58 104 78 84 103 75",
+    // 原来撇从 M43 130 开始，太长；这里改短，只保留上方短撇。
+    "M67 105 C78 91 91 80 103 75",
     "M103 75 L103 382",
     "M36 152 H137",
   ],
 
   "2": [
-    "M43 108 C56 85 83 73 108 81 C134 89 146 116 137 145 C130 166 114 188 92 216 L45 333",
-    "M39 153 H142",
-    "M45 333 H139",
+    "M42 151 C33 116 50 83 91 79 C128 77 149 105 141 145 C136 168 116 195 94 222 L42 333",
+    "M42 333 H140",
   ],
 
   "3": [
-    "M45 82 H139 L93 186",
-    "M45 230 H118",
-    "M93 186 C130 188 148 214 143 259 C137 318 98 350 43 338",
+    "M43 82 H141 L94 187",
+    "M94 187 C130 189 148 214 143 258 C137 318 99 350 43 338",
   ],
 
   "4": [
@@ -77,19 +76,16 @@ const DIGIT_STROKES: Record<Digit, string[]> = {
   ],
 
   "5": [
-    "M139 83 H56 L48 207",
-    "M48 207 C72 190 115 191 135 221 C156 253 143 319 96 340 C72 351 48 345 35 333",
-    "M45 244 H137",
+    "M139 83 H56 C50 122 45 171 49 208",
+    "M49 208 C73 191 116 193 136 222 C158 252 143 319 96 340 C73 351 49 346 35 333",
   ],
 
   "6": [
-    "M125 77 C78 124 48 184 45 259 C43 318 73 363 111 350 C151 337 154 269 119 242 C86 218 47 235 43 291",
-    "M45 249 H135",
+    "M125 77 C83 119 53 178 45 258 C39 319 71 363 111 350 C151 337 154 269 119 242 C87 219 49 235 44 291",
   ],
 
   "7": [
     "M42 82 H142 L76 346",
-    "M39 152 H132",
   ],
 
   "8": [
@@ -100,6 +96,55 @@ const DIGIT_STROKES: Record<Digit, string[]> = {
   "9": [
     "M90 78 C54 78 36 118 39 168 C42 214 64 234 96 226 C127 218 143 181 137 132 C133 101 116 78 90 78",
     "M123 219 L75 345",
+  ],
+};
+
+/**
+ * 细十字辅助阴极线。
+ * 只在 2 / 3 / 5 / 6 / 7 / 8 / 9 激活时显示。
+ * 这些线单独渲染，避免被主数字 stroke-width 放粗。
+ */
+const DIGIT_THIN_STROKES: Record<Digit, string[]> = {
+  "0": [],
+
+  "1": [],
+
+  "2": [
+    "M39 153 H143",
+    "M90 84 V337",
+  ],
+
+  "3": [
+    "M43 249 H139",
+    "M90 84 V337",
+  ],
+
+  "4": [],
+
+  "5": [
+    "M43 249 H139",
+    "M90 84 V337",
+  ],
+
+  "6": [
+    "M43 249 H139",
+    "M90 84 V337",
+  ],
+
+  "7": [
+    "M40 153 H134",
+    "M90 84 V337",
+  ],
+
+  "8": [
+    "M42 153 H138",
+    "M42 249 H138",
+    "M90 80 V382",
+  ],
+
+  "9": [
+    "M42 153 H138",
+    "M90 84 V337",
   ],
 };
 
@@ -210,8 +255,15 @@ const NixieTube = memo(function NixieTube({
 
   const isDot = symbol === ".";
   const activeStrokes = isDot ? [] : DIGIT_STROKES[symbol];
+  const activeThinStrokes = isDot ? [] : DIGIT_THIN_STROKES[symbol];
+
   const previousStrokes =
     previous && previous !== "." && previous !== symbol ? DIGIT_STROKES[previous] : null;
+
+  const previousThinStrokes =
+    previous && previous !== "." && previous !== symbol
+      ? DIGIT_THIN_STROKES[previous]
+      : null;
 
   const showPrevious = visualMode === "burn" && previousStrokes;
 
@@ -312,11 +364,21 @@ const NixieTube = memo(function NixieTube({
         <TubeMesh />
 
         {showPrevious && (
-          <g className="wl-previous-glyph">
-            {previousStrokes.map((d, index) => (
-              <path key={`prev-${index}`} d={d} />
-            ))}
-          </g>
+          <>
+            <g className="wl-previous-glyph">
+              {previousStrokes.map((d, index) => (
+                <path key={`prev-${index}`} d={d} />
+              ))}
+            </g>
+
+            {!!previousThinStrokes?.length && (
+              <g className="wl-previous-thin-glyph">
+                {previousThinStrokes.map((d, index) => (
+                  <path key={`prev-thin-${index}`} d={d} />
+                ))}
+              </g>
+            )}
+          </>
         )}
 
         {!isDot && (
@@ -341,6 +403,31 @@ const NixieTube = memo(function NixieTube({
 
             {activeStrokes.map((d, index) => (
               <path key={`active-body-${index}`} className="wl-active-body" d={d} />
+            ))}
+
+            {activeThinStrokes.map((d, index) => (
+              <path
+                key={`active-thin-glow-${index}`}
+                className="wl-active-thin-glow"
+                d={d}
+                filter={`url(#${glowId})`}
+              />
+            ))}
+
+            {activeThinStrokes.map((d, index) => (
+              <path
+                key={`active-thin-body-${index}`}
+                className="wl-active-thin-body"
+                d={d}
+              />
+            ))}
+
+            {activeThinStrokes.map((d, index) => (
+              <path
+                key={`active-thin-core-${index}`}
+                className="wl-active-thin-core"
+                d={d}
+              />
             ))}
 
             {activeStrokes.map((d, index) => (

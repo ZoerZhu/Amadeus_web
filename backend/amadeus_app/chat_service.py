@@ -5,10 +5,12 @@ import json
 import os
 import unicodedata
 from dataclasses import dataclass
-from typing import AsyncGenerator
+from typing import Any, AsyncGenerator
+from uuid import uuid4
 
 import httpx
 
+from .agent_registry import tool_registry
 from .domain import ChatStreamRequest, ModelProviderPreset, ModelSettings, VoiceSettings
 from .model_adapter import build_chat_payload, should_read_reasoning
 from .personas import PersonaPreset, build_system_prompt, get_persona
@@ -39,6 +41,7 @@ def env_int(name: str, default: int) -> int:
 
 VALID_EMOTIONS = {"neutral", "anger", "joy", "sadness", "shy", "smile", "surprise", "unhappy"}
 LIVE2D_EMOTION_ALIASES = {"smile": "smile1"}
+TOOL_EVENT_LOG_PREFIX = "__AMADEUS_TOOL_EVENT__ "
 SPEECH_SEGMENT_TARGET_CHAR_COUNT = env_int("AMADEUS_SPEECH_SEGMENT_TARGET_CHARS", 30)
 SPEECH_SEGMENT_MAX_CHAR_COUNT = env_int("AMADEUS_SPEECH_SEGMENT_MAX_CHARS", 55)
 SPEECH_SEGMENT_HARD_BREAK_MIN_CHAR_COUNT = env_int("AMADEUS_SPEECH_SEGMENT_HARD_BREAK_MIN_CHARS", 20)
@@ -46,6 +49,9 @@ SPEECH_PREPARE_CONCURRENCY = 1
 SPEECH_TTS_MAX_ATTEMPTS = 2
 SPEECH_HARD_BREAKS = {"。", "！", "？", "!", "?", "；", ";", "\n"}
 SPEECH_SOFT_BREAKS = {"，", ",", "、", " ", "：", ":"}
+CHAT_TOOL_MAX_ROUNDS = env_int("AMADEUS_CHAT_TOOL_MAX_ROUNDS", 4)
+CHAT_TOOL_RESULT_MAX_CHARS = env_int("AMADEUS_CHAT_TOOL_RESULT_MAX_CHARS", 12000)
+CHAT_TOOL_EVENT_PREVIEW_CHARS = env_int("AMADEUS_CHAT_TOOL_EVENT_PREVIEW_CHARS", 900)
 
 
 @dataclass
@@ -61,6 +67,32 @@ class PreparedLocalVoiceSegment:
     index: int
     pcm: bytes = b""
     error: str = ""
+
+
+@dataclass
+class ModelToolCall:
+    id: str
+    name: str
+    arguments: str
+    index: int = 0
+
+
+@dataclass
+class ModelTurn:
+    content: str
+    tool_calls: list[ModelToolCall]
+    finish_reason: str = ""
+
+
+@dataclass
+class ExecutedToolCall:
+    call: ModelToolCall
+    ok: bool
+    summary: str
+    content: str
+    arguments: dict[str, Any]
+    error: str = ""
+    result_payload: dict[str, Any] | None = None
 
 
 class SpeechSegmentBuffer:
@@ -582,8 +614,7 @@ class ChatStreamState:
         events: list[tuple[str, dict]] = []
         self.raw_buffer += cleaned
         if not self.emotion_fired:
-            match = EMOTION_RE.search(self.raw_buffer)
-            if match:
+            for match in EMOTION_RE.finditer(self.raw_buffer):
                 emotion = match.group(1).lower()
                 if emotion in VALID_EMOTIONS:
                     events.append(
@@ -595,7 +626,8 @@ class ChatStreamState:
                             },
                         )
                     )
-                self.emotion_fired = True
+                    self.emotion_fired = True
+                    break
 
         next_display_text = strip_emotion_tags_for_display(self.raw_buffer).lstrip("\r\n")
         if next_display_text.startswith(self.displayed_buffer):
@@ -618,6 +650,295 @@ def resolve_chat_settings(request: ChatStreamRequest) -> tuple[ModelProviderPres
     provider = get_provider(settings.provider_name)
     settings = effective_model_settings(settings, provider)
     return provider, settings
+
+
+def chat_tool_schemas() -> list[dict]:
+    schemas: list[dict] = []
+    for tool in tool_registry.list_tools():
+        if tool.permission != "safe" or tool.handler is None:
+            continue
+        schemas.append(
+            {
+                "type": "function",
+                "function": {
+                    "name": tool.name,
+                    "description": tool.description,
+                    "parameters": tool.parameters,
+                },
+            }
+        )
+    return schemas
+
+
+async def stream_model_turn(
+    *,
+    client: httpx.AsyncClient,
+    endpoint: str,
+    headers: dict[str, str],
+    payload: dict[str, Any],
+    mode: str,
+) -> AsyncGenerator[tuple[str, Any], None]:
+    content_parts: list[str] = []
+    tool_call_chunks: dict[int, dict[str, Any]] = {}
+    finish_reason = ""
+
+    async with client.stream("POST", endpoint, headers=headers, json=payload) as response:
+        if response.status_code < 200 or response.status_code >= 300:
+            body = await response.aread()
+            raise RuntimeError(f"HTTP {response.status_code} {body.decode('utf-8', 'ignore')[:500]}")
+
+        async for line in response.aiter_lines():
+            line = line.strip()
+            if not line.startswith("data:"):
+                continue
+            data = line.removeprefix("data:").strip()
+            if not data or data == "[DONE]":
+                continue
+            try:
+                item = json.loads(data)
+            except json.JSONDecodeError:
+                continue
+            choice = (item.get("choices") or [{}])[0]
+            finish_reason = str(choice.get("finish_reason") or finish_reason or "")
+            delta = choice.get("delta") or {}
+            if should_read_reasoning(mode):
+                reasoning = delta.get("reasoning_content") or delta.get("reasoning") or ""
+                reasoning = clean_display_text(clean_stream_chunk(str(reasoning)))
+                if reasoning:
+                    yield ("thinking", reasoning)
+
+            content = delta.get("content") or ""
+            if content:
+                content_parts.append(str(content))
+            accept_tool_call_delta(tool_call_chunks, delta)
+
+    yield (
+        "result",
+        ModelTurn(
+            content="".join(content_parts),
+            tool_calls=build_model_tool_calls(tool_call_chunks),
+            finish_reason=finish_reason,
+        ),
+    )
+
+
+def accept_tool_call_delta(tool_call_chunks: dict[int, dict[str, Any]], delta: dict[str, Any]) -> None:
+    for chunk in delta.get("tool_calls") or []:
+        try:
+            index = int(chunk.get("index", len(tool_call_chunks)))
+        except (TypeError, ValueError):
+            index = len(tool_call_chunks)
+        current = tool_call_chunks.setdefault(
+            index,
+            {
+                "id": "",
+                "type": "function",
+                "function": {"name": "", "arguments": ""},
+            },
+        )
+        if chunk.get("id"):
+            current["id"] = str(chunk["id"])
+        if chunk.get("type"):
+            current["type"] = str(chunk["type"])
+        function = chunk.get("function") or {}
+        current_function = current.setdefault("function", {"name": "", "arguments": ""})
+        if function.get("name"):
+            current_function["name"] = f"{current_function.get('name', '')}{function['name']}"
+        if "arguments" in function:
+            current_function["arguments"] = f"{current_function.get('arguments', '')}{function.get('arguments') or ''}"
+
+
+def build_model_tool_calls(tool_call_chunks: dict[int, dict[str, Any]]) -> list[ModelToolCall]:
+    calls: list[ModelToolCall] = []
+    for index in sorted(tool_call_chunks):
+        item = tool_call_chunks[index]
+        function = item.get("function") or {}
+        name = str(function.get("name") or "").strip()
+        if not name:
+            continue
+        calls.append(
+            ModelToolCall(
+                id=str(item.get("id") or f"tool_{index}_{uuid4().hex[:8]}"),
+                name=name,
+                arguments=str(function.get("arguments") or ""),
+                index=index,
+            )
+        )
+    return calls
+
+
+async def execute_model_tool_call(call: ModelToolCall) -> ExecutedToolCall:
+    try:
+        arguments = parse_tool_arguments(call.arguments)
+    except Exception as error:
+        message = str(error) or error.__class__.__name__
+        return ExecutedToolCall(
+            call=call,
+            ok=False,
+            summary=f"{call.name} 参数解析失败：{message}",
+            content=json.dumps({"ok": False, "error": message}, ensure_ascii=False),
+            arguments={},
+            error=message,
+            result_payload={"ok": False, "error": message},
+        )
+    tool = tool_registry.get(call.name)
+    if tool is None or tool.handler is None:
+        return ExecutedToolCall(
+            call=call,
+            ok=False,
+            summary=f"未知工具：{call.name}",
+            content=json.dumps({"ok": False, "error": f"Unknown tool: {call.name}"}, ensure_ascii=False),
+            arguments=arguments,
+            error=f"Unknown tool: {call.name}",
+            result_payload={"ok": False, "error": f"Unknown tool: {call.name}"},
+        )
+    if tool.permission != "safe":
+        return ExecutedToolCall(
+            call=call,
+            ok=False,
+            summary=f"工具需要确认，当前未执行：{call.name}",
+            content=json.dumps({"ok": False, "error": "Tool requires confirmation"}, ensure_ascii=False),
+            arguments=arguments,
+            error="Tool requires confirmation",
+            result_payload={"ok": False, "error": "Tool requires confirmation"},
+        )
+
+    try:
+        result = await tool.handler(arguments)
+        summary = str(result.get("summary") or f"{call.name} 执行完成。")
+        payload = {
+            "ok": True,
+            "summary": summary,
+            "data": result.get("data", {}),
+        }
+        return ExecutedToolCall(
+            call=call,
+            ok=True,
+            summary=summary,
+            content=truncate_json(payload, CHAT_TOOL_RESULT_MAX_CHARS),
+            arguments=arguments,
+            result_payload=payload,
+        )
+    except Exception as error:
+        message = str(error) or error.__class__.__name__
+        return ExecutedToolCall(
+            call=call,
+            ok=False,
+            summary=f"{call.name} 执行失败：{message}",
+            content=json.dumps({"ok": False, "error": message}, ensure_ascii=False),
+            arguments=arguments,
+            error=message,
+            result_payload={"ok": False, "error": message},
+        )
+
+
+def parse_tool_arguments(raw_arguments: str) -> dict[str, Any]:
+    text = raw_arguments.strip()
+    if not text:
+        return {}
+    try:
+        value = json.loads(text)
+    except json.JSONDecodeError as error:
+        raise ValueError(f"工具参数不是合法 JSON：{error}") from error
+    if not isinstance(value, dict):
+        raise ValueError("工具参数必须是 JSON object")
+    return value
+
+
+def safe_parse_tool_arguments(raw_arguments: str) -> dict[str, Any]:
+    try:
+        return parse_tool_arguments(raw_arguments)
+    except Exception:
+        return {}
+
+
+def append_tool_messages(messages: list[dict[str, Any]], turn: ModelTurn, executed: list[ExecutedToolCall]) -> None:
+    messages.append(
+        {
+            "role": "assistant",
+            "content": turn.content or "",
+            "tool_calls": [
+                {
+                    "id": item.call.id,
+                    "type": "function",
+                    "function": {
+                        "name": item.call.name,
+                        "arguments": item.call.arguments or "{}",
+                    },
+                }
+                for item in executed
+            ],
+        }
+    )
+    for item in executed:
+        messages.append(
+            {
+                "role": "tool",
+                "tool_call_id": item.call.id,
+                "name": item.call.name,
+                "content": item.content,
+            }
+        )
+
+
+def tool_event_payload(
+    call: ModelToolCall,
+    *,
+    status: str,
+    arguments: dict[str, Any] | None = None,
+    summary: str = "",
+    result: str = "",
+    result_payload: dict[str, Any] | None = None,
+    error: str = "",
+) -> dict[str, Any]:
+    payload = {
+        "id": call.id,
+        "name": call.name,
+        "status": status,
+        "arguments": arguments or {},
+        "summary": summary,
+        "resultPreview": truncate_text(result, CHAT_TOOL_EVENT_PREVIEW_CHARS),
+        "error": error,
+    }
+    if result_payload is not None:
+        payload["result"] = result_payload
+    return payload
+
+
+def tool_thinking_line(payload: dict[str, Any]) -> str:
+    status = payload.get("status")
+    name = payload.get("name") or "tool"
+    if status == "started":
+        return f"调用工具 {name}。"
+    if status == "completed":
+        return f"工具 {name} 完成：{ensure_sentence(payload.get('summary') or '已返回结果')}"
+    if status == "failed":
+        return f"工具 {name} 失败：{ensure_sentence(payload.get('error') or payload.get('summary') or 'unknown')}"
+    return f"工具 {name} 状态：{status}。"
+
+
+def tool_event_log_line(payload: dict[str, Any]) -> str:
+    return TOOL_EVENT_LOG_PREFIX + json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+
+
+def ensure_sentence(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return "。"
+    if text[-1] in {"。", ".", "!", "！", "?", "？"}:
+        return text
+    return f"{text}。"
+
+
+def truncate_json(payload: dict[str, Any], limit: int) -> str:
+    text = json.dumps(payload, ensure_ascii=False)
+    return truncate_text(text, limit)
+
+
+def truncate_text(text: str, limit: int) -> str:
+    if len(text) <= limit:
+        return text
+    return text[: max(0, limit - 20)].rstrip() + "\n...[truncated]"
 
 
 async def stream_chat(
@@ -674,63 +995,110 @@ async def stream_chat(
         return
 
     endpoint = f"{settings.base_url.rstrip('/')}/chat/completions"
-    payload_messages = [{"role": "system", "content": build_system_prompt(persona, request.mode)}]
+    payload_messages: list[dict[str, Any]] = [{"role": "system", "content": build_system_prompt(persona, request.mode)}]
     payload_messages.extend(
         {"role": message.role, "content": message.content}
         for message in request.messages[-12:]
         if message.content.strip() and message.role in {"user", "assistant"}
     )
-    payload = build_chat_payload(settings, provider, request.mode, payload_messages, stream=True)
     headers = {"Content-Type": "application/json", "Accept": "text/event-stream"}
     if settings.api_key:
         headers["Authorization"] = f"Bearer {settings.api_key}"
 
     state = ChatStreamState()
+    thinking_log: list[str] = []
+    tools = chat_tool_schemas()
     voice_stream = build_voice_coordinator(
         persona=persona,
         voice_settings=voice_settings,
         model_settings=settings,
         provider=provider,
     )
-    yield sse("status", {"phase": "connecting", "provider": provider.name, "model": payload["model"]})
+    initial_payload = build_chat_payload(settings, provider, request.mode, payload_messages, tools=tools, stream=True)
+    yield sse("status", {"phase": "connecting", "provider": provider.name, "model": initial_payload["model"]})
     for voice_event in voice_stream.startup_events():
         yield voice_event
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(None, connect=20.0, read=None)) as client:
-            async with client.stream("POST", endpoint, headers=headers, json=payload) as response:
-                if response.status_code < 200 or response.status_code >= 300:
-                    body = await response.aread()
-                    yield sse(
-                        "error",
-                        {"message": f"HTTP {response.status_code} {body.decode('utf-8', 'ignore')[:500]}"},
-                    )
-                    return
+            final_turn: ModelTurn | None = None
+            for round_index in range(CHAT_TOOL_MAX_ROUNDS + 1):
+                use_tools = tools if round_index < CHAT_TOOL_MAX_ROUNDS else None
+                payload = build_chat_payload(
+                    settings,
+                    provider,
+                    request.mode,
+                    payload_messages,
+                    tools=use_tools,
+                    stream=True,
+                )
+                yield sse("status", {"phase": "streaming" if round_index == 0 else "finalizing"})
+                turn: ModelTurn | None = None
+                async for event_kind, event_payload in stream_model_turn(
+                    client=client,
+                    endpoint=endpoint,
+                    headers=headers,
+                    payload=payload,
+                    mode=request.mode,
+                ):
+                    if event_kind == "thinking":
+                        thinking_text = str(event_payload)
+                        thinking_log.append(thinking_text)
+                        yield sse("thinking", {"text": thinking_text})
+                    elif event_kind == "result":
+                        turn = event_payload
 
-                yield sse("status", {"phase": "streaming"})
-                async for line in response.aiter_lines():
-                    line = line.strip()
-                    if not line.startswith("data:"):
-                        continue
-                    data = line.removeprefix("data:").strip()
-                    if not data or data == "[DONE]":
-                        continue
-                    try:
-                        item = json.loads(data)
-                    except json.JSONDecodeError:
-                        continue
-                    choice = (item.get("choices") or [{}])[0]
-                    delta = choice.get("delta") or {}
-                    if should_read_reasoning(request.mode):
-                        reasoning = delta.get("reasoning_content") or delta.get("reasoning") or ""
-                        reasoning = clean_display_text(clean_stream_chunk(str(reasoning)))
-                        if reasoning:
-                            yield sse("thinking", {"text": reasoning})
-                    content = delta.get("content") or ""
-                    async for output_event in _emit_generated_events(
-                        state.accept_content(str(content)),
-                        voice_stream=voice_stream,
-                    ):
-                        yield output_event
+                if turn is None:
+                    final_turn = ModelTurn(content="", tool_calls=[], finish_reason="")
+                    break
+
+                if turn.tool_calls and round_index < CHAT_TOOL_MAX_ROUNDS:
+                    if turn.content.strip():
+                        intermediate = f"模型在工具调用前形成了中间说明：{turn.content.strip()}"
+                        thinking_log.append(intermediate)
+                        yield sse("thinking", {"text": f"\n{intermediate}\n"})
+
+                    executed_calls: list[ExecutedToolCall] = []
+                    yield sse("status", {"phase": "tools"})
+                    for call in turn.tool_calls:
+                        started_payload = tool_event_payload(
+                            call,
+                            status="started",
+                            arguments=safe_parse_tool_arguments(call.arguments),
+                        )
+                        thinking_log.append(tool_thinking_line(started_payload))
+                        thinking_log.append(tool_event_log_line(started_payload))
+                        yield sse("tool", started_payload)
+
+                        executed = await execute_model_tool_call(call)
+                        executed_calls.append(executed)
+                        completed_payload = tool_event_payload(
+                            call,
+                            status="completed" if executed.ok else "failed",
+                            arguments=executed.arguments,
+                            summary=executed.summary,
+                            result=executed.content,
+                            result_payload=executed.result_payload,
+                            error=executed.error,
+                        )
+                        thinking_log.append(tool_thinking_line(completed_payload))
+                        thinking_log.append(tool_event_log_line(completed_payload))
+                        yield sse("tool", completed_payload)
+
+                    append_tool_messages(payload_messages, turn, executed_calls)
+                    continue
+
+                final_turn = turn
+                break
+
+            final_text = (final_turn.content if final_turn is not None else "").strip()
+            if not final_text:
+                final_text = "工具调用已完成，但模型没有返回可展示的最终回答。"
+
+            async for output_event in _emit_generated_events(
+                state.accept_content(final_text),
+                voice_stream=voice_stream,
+            ):
+                yield output_event
     except httpx.ConnectError as error:
         voice_stream.cancel()
         yield sse("error", {"message": f"连接模型服务失败：{error}"})
@@ -756,6 +1124,7 @@ async def stream_chat(
                 conversation_id=stored_conversation_id,
                 role="assistant",
                 content=state.displayed_buffer,
+                thinking="\n".join(item for item in thinking_log if item.strip()),
             )
         except Exception as error:
             yield sse("error", {"message": f"写入助手消息失败：{error}"})

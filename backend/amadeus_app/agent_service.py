@@ -8,8 +8,11 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from .agent_registry import ToolDefinition, tool_registry
+from .doc_writer.doc_writer_agent import run_doc_writer_agent
 from .domain import AgentInvokeRequest
+from .file_tools.file_reader import run_file_reader
 from .search.web_search_agent import run_web_search_agent
+from .todo_task.todo_task_agent import run_todo_task_agent
 
 
 AGENTS = [
@@ -31,12 +34,33 @@ AGENTS = [
         "inputModes": ["text", "json"],
         "outputModes": ["summary", "sources", "warnings"],
     },
+    {
+        "name": "doc_writer_agent",
+        "description": "LangGraph 文档写作图：规划文档、按需调用 web_search_agent、生成 Markdown 并写入受控目录。",
+        "inputModes": ["text", "json"],
+        "outputModes": ["markdown", "file", "summary"],
+    },
+    {
+        "name": "file_reader_agent",
+        "description": "安全读取工作区内文本文件，支持 read/list/stat，默认屏蔽密钥、依赖目录和构建产物。",
+        "inputModes": ["text", "json"],
+        "outputModes": ["file_content", "directory_entries", "metadata"],
+    },
+    {
+        "name": "todo_task_agent",
+        "description": "LangGraph 待办任务图：规划任务、拆解子任务、持久化 JSON 任务状态，并支持列表、更新、完成、阻塞和归档。",
+        "inputModes": ["text", "json"],
+        "outputModes": ["tasks", "summary", "metadata"],
+    },
 ]
 
 CALCULATE_RE = re.compile(r"[0-9][0-9\s+\-*/().%]*[0-9)]")
 TIME_KEYWORDS = ("几点", "时间", "当前时间", "现在", "today", "time", "date")
 MATH_KEYWORDS = ("计算", "算", "加", "减", "乘", "除", "calculate", "math")
 SEARCH_KEYWORDS = ("搜索", "查询", "查一下", "查找", "检索", "search", "web", "资料", "来源")
+DOC_WRITER_KEYWORDS = ("写文档", "编写文档", "生成文档", "起草", "markdown", "md", "document", "doc", "write")
+FILE_READER_KEYWORDS = ("读文件", "读取文件", "查看文件", "列目录", "文件列表", "file", "read file", "list files", "stat file")
+TODO_TASK_KEYWORDS = ("待办", "todo", "任务列表", "创建任务", "新增任务", "任务规划", "任务拆解", "task list", "todo list")
 
 
 async def invoke_agent_request(request: AgentInvokeRequest) -> dict[str, Any]:
@@ -63,6 +87,18 @@ def capabilities_response() -> dict[str, Any]:
             "protocol": {
                 "actions": ["query_capabilities", "call_tool", "call_agent"],
                 "targetTypes": ["tool", "agent", "auto"],
+            },
+            "fileUpload": {
+                "endpoint": "/api/files/upload",
+                "method": "POST",
+                "contentType": "multipart/form-data",
+                "fields": {
+                    "file": "required UploadFile",
+                    "device": "host | mobile",
+                    "overwrite": "boolean, default false",
+                },
+                "storagePattern": "agent_uploads/{device}/{yyyy-mm-dd}/{textType}/{originalFilename}",
+                "nextStep": "Use returned file.path with file_reader.",
             },
             "limits": {
                 "highRiskToolsEnabled": False,
@@ -96,7 +132,17 @@ async def call_tool(request: AgentInvokeRequest) -> dict[str, Any]:
 
 async def call_agent(request: AgentInvokeRequest) -> dict[str, Any]:
     target = (request.target or "auto").strip()
-    if target not in {"", "auto", "local_agent", "mobile_agent", "simple_agent", "web_search_agent"}:
+    if target not in {
+        "",
+        "auto",
+        "local_agent",
+        "mobile_agent",
+        "simple_agent",
+        "web_search_agent",
+        "doc_writer_agent",
+        "file_reader_agent",
+        "todo_task_agent",
+    }:
         return error_response(
             f"Unknown agent: {target}",
             data={"availableAgents": AGENTS},
@@ -134,6 +180,12 @@ async def call_agent(request: AgentInvokeRequest) -> dict[str, Any]:
 
 
 def resolve_agent_name(request: AgentInvokeRequest) -> str:
+    if request.target == "todo_task_agent":
+        return "todo_task_agent"
+    if request.target == "file_reader_agent":
+        return "file_reader_agent"
+    if request.target == "doc_writer_agent":
+        return "doc_writer_agent"
     if request.target == "web_search_agent":
         return "web_search_agent"
     if request.target in {"local_agent", "mobile_agent", "simple_agent"}:
@@ -151,6 +203,12 @@ def build_tool_args(request: AgentInvokeRequest) -> dict[str, Any]:
         args["intent"] = request.intent
     if request.intent and "query" not in args and request.target in {"web_search", "web_search_agent"}:
         args["query"] = request.intent
+    if request.intent and "instruction" not in args and request.target in {"doc_writer", "doc_writer_agent"}:
+        args["instruction"] = request.intent
+    if request.intent and "path" not in args and request.target in {"file_reader", "file_reader_agent"}:
+        path = infer_path_from_text(request.intent)
+        if path:
+            args["path"] = path
     if "expression" not in args:
         expression = infer_expression(request.intent)
         if expression:
@@ -172,8 +230,31 @@ def infer_tool_name(request: AgentInvokeRequest) -> str:
     ).lower()
     if any(keyword in text for keyword in ("capabilities", "能力", "工具列表")):
         return "describe_capabilities"
+    if target == "file_reader_agent" or any(keyword in text for keyword in FILE_READER_KEYWORDS):
+        return "file_reader"
+    if request.payload.get("path") and str(request.payload.get("action", "")).lower() in {"read", "list", "stat"}:
+        return "file_reader"
+    if target == "doc_writer_agent" or any(keyword in text for keyword in DOC_WRITER_KEYWORDS):
+        return "doc_writer"
     if target == "web_search_agent" or any(keyword in text for keyword in SEARCH_KEYWORDS):
         return "web_search"
+    if target == "todo_task_agent" or any(keyword in text for keyword in TODO_TASK_KEYWORDS):
+        return "todo_task"
+    if str(request.payload.get("action", "")).lower() in {
+        "create",
+        "plan",
+        "list",
+        "get",
+        "update",
+        "start",
+        "complete",
+        "block",
+        "archive",
+        "delete",
+        "add_note",
+        "summary",
+    } and any(key in request.payload for key in {"tasks", "task", "taskId", "id", "status", "priority", "project"}):
+        return "todo_task"
     if any(keyword in text for keyword in TIME_KEYWORDS):
         return "get_current_time"
     if any(keyword in text for keyword in MATH_KEYWORDS) or infer_expression(request.intent):
@@ -188,6 +269,13 @@ def infer_expression(intent: str) -> str:
     if not match:
         return ""
     return match.group(0).strip()
+
+
+def infer_path_from_text(text: str) -> str:
+    match = re.search(r"([\w./\\-]+\.[A-Za-z0-9_]+)", text)
+    if match:
+        return match.group(1).strip()
+    return ""
 
 
 def error_response(message: str, *, data: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -250,6 +338,18 @@ async def describe_capabilities(args: dict[str, Any]) -> dict[str, Any]:
 
 async def web_search(args: dict[str, Any]) -> dict[str, Any]:
     return await run_web_search_agent(args)
+
+
+async def doc_writer(args: dict[str, Any]) -> dict[str, Any]:
+    return await run_doc_writer_agent(args)
+
+
+async def file_reader(args: dict[str, Any]) -> dict[str, Any]:
+    return await run_file_reader(args)
+
+
+async def todo_task(args: dict[str, Any]) -> dict[str, Any]:
+    return await run_todo_task_agent(args)
 
 
 BIN_OPS = {
@@ -369,6 +469,171 @@ def register_builtin_tools() -> None:
                 "required": ["query"],
             },
             handler=web_search,
+        )
+    )
+    tool_registry.register(
+        ToolDefinition(
+            name="doc_writer",
+            description="调用 LangGraph doc_writer_agent，基础版生成 Markdown 文档，可按需调用 web_search_agent，并写入 generated_docs 等受控目录。",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string", "description": "文档标题"},
+                    "topic": {"type": "string", "description": "文档主题"},
+                    "instruction": {"type": "string", "description": "写作需求或任务说明"},
+                    "format": {"type": "string", "enum": ["md"], "description": "当前基础版仅支持 md"},
+                    "audience": {"type": "string", "description": "目标读者"},
+                    "tone": {"type": "string", "description": "写作语气"},
+                    "sections": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "章节标题列表",
+                    },
+                    "keyPoints": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "核心要点",
+                    },
+                    "content": {"type": "string", "description": "已有草稿或素材"},
+                    "useWebSearch": {
+                        "oneOf": [{"type": "boolean"}, {"type": "string", "enum": ["auto", "true", "false"]}],
+                        "description": "是否调用 web_search_agent，可为 true/false/auto",
+                    },
+                    "searchQuery": {"type": "string", "description": "检索查询词"},
+                    "sources": {
+                        "type": "array",
+                        "items": {"type": "object"},
+                        "description": "手动提供的来源列表",
+                    },
+                    "save": {"type": "boolean", "description": "是否保存到文件，默认 true"},
+                    "outputPath": {"type": "string", "description": "工作区内相对输出目录或 .md 文件路径"},
+                    "fileName": {"type": "string", "description": "输出文件名"},
+                    "overwrite": {"type": "boolean", "description": "是否覆盖已存在文件，默认 false"},
+                    "frontMatter": {"type": "boolean", "description": "是否生成 YAML front matter"},
+                },
+            },
+            handler=doc_writer,
+        )
+    )
+    tool_registry.register(
+        ToolDefinition(
+            name="file_reader",
+            description="安全读取工作区内文本文件，支持读取文件、列目录和查看元信息；禁止读取 .env、.git、node_modules、.venv 等敏感路径。",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": ["read", "list", "stat"],
+                        "description": "读取动作：read 读取文本文件，list 列目录，stat 查看元信息",
+                    },
+                    "path": {"type": "string", "description": "工作区内相对路径，默认 ."},
+                    "startLine": {"type": "integer", "minimum": 1, "description": "读取起始行，仅 read 有效"},
+                    "endLine": {"type": "integer", "minimum": 1, "description": "读取结束行，仅 read 有效"},
+                    "maxBytes": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 1048576,
+                        "description": "最多读取字节数，默认 131072",
+                    },
+                    "includeLineNumbers": {"type": "boolean", "description": "是否在 content 中加入行号"},
+                    "recursive": {"type": "boolean", "description": "是否递归列目录，仅 list 有效"},
+                    "includeHidden": {"type": "boolean", "description": "是否展示隐藏文件，受敏感路径限制约束"},
+                    "maxEntries": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 1000,
+                        "description": "目录最多返回条目数，默认 200",
+                    },
+                },
+            },
+            handler=file_reader,
+        )
+    )
+    tool_registry.register(
+        ToolDefinition(
+            name="todo_task",
+            description="调用 LangGraph todo_task_agent，管理工作区内 JSON 待办任务；支持 create/plan/list/get/update/start/complete/block/archive/add_note/summary。",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "action": {
+                        "type": "string",
+                        "enum": [
+                            "create",
+                            "plan",
+                            "list",
+                            "get",
+                            "update",
+                            "start",
+                            "complete",
+                            "block",
+                            "archive",
+                            "delete",
+                            "add_note",
+                            "summary",
+                        ],
+                        "description": "待办任务动作；delete 需要 confirmDelete=true",
+                    },
+                    "title": {"type": "string", "description": "创建任务或计划父任务标题"},
+                    "task": {"type": "string", "description": "单个任务标题"},
+                    "tasks": {
+                        "type": "array",
+                        "items": {
+                            "oneOf": [
+                                {"type": "string"},
+                                {
+                                    "type": "object",
+                                    "properties": {
+                                        "title": {"type": "string"},
+                                        "description": {"type": "string"},
+                                        "priority": {"type": "string", "enum": ["low", "medium", "high", "urgent"]},
+                                        "status": {"type": "string"},
+                                        "tags": {"type": "array", "items": {"type": "string"}},
+                                        "project": {"type": "string"},
+                                        "dueAt": {"type": "string"},
+                                    },
+                                },
+                            ]
+                        },
+                        "description": "批量创建任务；plan 动作下可作为子任务列表",
+                    },
+                    "steps": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "plan 动作用于拆解子任务",
+                    },
+                    "id": {"type": "string", "description": "任务 ID"},
+                    "taskId": {"type": "string", "description": "任务 ID，等同 id"},
+                    "matchTitle": {"type": "string", "description": "没有 ID 时按标题片段匹配任务；多命中会拒绝"},
+                    "description": {"type": "string", "description": "任务说明"},
+                    "status": {
+                        "type": "string",
+                        "enum": ["todo", "in_progress", "blocked", "done", "archived"],
+                        "description": "任务状态",
+                    },
+                    "priority": {
+                        "type": "string",
+                        "enum": ["low", "medium", "high", "urgent"],
+                        "description": "任务优先级",
+                    },
+                    "tags": {"type": "array", "items": {"type": "string"}, "description": "标签"},
+                    "project": {"type": "string", "description": "项目或分组"},
+                    "dueAt": {"type": "string", "description": "截止时间，建议 ISO 8601"},
+                    "note": {"type": "string", "description": "备注；block/add_note 时常用"},
+                    "filters": {"type": "object", "description": "list 过滤条件"},
+                    "query": {"type": "string", "description": "list 文本搜索条件"},
+                    "includeArchived": {"type": "boolean", "description": "list 是否包含归档任务"},
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 200},
+                    "storePath": {
+                        "type": "string",
+                        "description": "工作区内 .json 存储路径，默认 agent_state/todo_tasks.json",
+                    },
+                    "confirmDelete": {"type": "boolean", "description": "硬删除确认，delete 动作必填 true"},
+                    "deleteSubtasks": {"type": "boolean", "description": "delete 时是否同时删除子任务"},
+                },
+            },
+            handler=todo_task,
         )
     )
 

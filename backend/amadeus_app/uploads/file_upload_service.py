@@ -9,7 +9,13 @@ from typing import Any
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
-from ..file_tools.file_reader import DENIED_FILE_NAMES, DENIED_SUFFIXES, TEXT_SUFFIXES
+from ..file_tools.file_reader import (
+    DENIED_FILE_NAMES,
+    DENIED_SUFFIXES,
+    READABLE_DOCUMENT_SUFFIXES,
+    TEXT_SUFFIXES,
+    UPLOAD_DOCUMENT_SUFFIXES,
+)
 
 
 WorkspacePath = Path(__file__).resolve().parents[3]
@@ -60,6 +66,11 @@ TEXT_TYPE_BY_SUFFIX = {
     ".sh": "shell",
     ".ps1": "shell",
     ".bat": "shell",
+    ".pdf": "pdf",
+    ".doc": "word_legacy",
+    ".docx": "word",
+    ".xls": "excel_legacy",
+    ".xlsx": "excel",
 }
 TEXT_TYPE_BY_MIME = {
     "application/json": "json",
@@ -74,6 +85,11 @@ TEXT_TYPE_BY_MIME = {
     "text/xml": "xml",
     "text/css": "stylesheet",
     "text/plain": "plain_text",
+    "application/pdf": "pdf",
+    "application/msword": "word_legacy",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "word",
+    "application/vnd.ms-excel": "excel_legacy",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "excel",
 }
 
 
@@ -111,7 +127,7 @@ async def save_uploaded_text_file(
     target_dir.mkdir(parents=True, exist_ok=True)
     temp_path = target_dir / f".{filename}.{uuid4().hex}.tmp"
     size = await write_upload_to_temp(file, temp_path)
-    if not looks_like_text(temp_path):
+    if should_validate_text_content(filename) and not looks_like_text(temp_path):
         temp_path.unlink(missing_ok=True)
         raise UploadValidationError(f"Uploaded file content is not text-like: {filename}")
 
@@ -130,7 +146,7 @@ async def save_uploaded_text_file(
         "contentType": content_type or mimetypes.guess_type(filename)[0] or "text/plain",
         "sizeBytes": size,
         "uploadedAt": current_time_iso(),
-        "readableByFileReader": True,
+        "readableByFileReader": is_readable_by_file_reader(filename),
     }
 
 
@@ -199,7 +215,7 @@ def classify_text_type(filename: str, content_type: str) -> str:
     suffix = Path(filename).suffix.lower()
     if suffix in TEXT_TYPE_BY_SUFFIX:
         return TEXT_TYPE_BY_SUFFIX[suffix]
-    if lower_name not in TEXT_SUFFIXES and suffix not in TEXT_SUFFIXES:
+    if lower_name not in TEXT_SUFFIXES and suffix not in TEXT_SUFFIXES and suffix not in UPLOAD_DOCUMENT_SUFFIXES:
         guessed = mimetypes.guess_type(filename)[0] or ""
         if not guessed.startswith("text/") and guessed not in TEXT_TYPE_BY_MIME:
             return ""
@@ -212,6 +228,15 @@ def classify_text_type(filename: str, content_type: str) -> str:
     if guessed.startswith("text/") or content_type.startswith("text/"):
         return "plain_text"
     return "other_text"
+
+
+def should_validate_text_content(filename: str) -> bool:
+    return Path(filename).suffix.lower() not in UPLOAD_DOCUMENT_SUFFIXES
+
+
+def is_readable_by_file_reader(filename: str) -> bool:
+    suffix = Path(filename).suffix.lower()
+    return suffix not in UPLOAD_DOCUMENT_SUFFIXES or suffix in READABLE_DOCUMENT_SUFFIXES
 
 
 def looks_like_text(path: Path) -> bool:

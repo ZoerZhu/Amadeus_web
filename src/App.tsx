@@ -1,5 +1,5 @@
-import { FormEvent, PointerEvent as ReactPointerEvent, useEffect, useMemo, useRef, useState } from "react";
-import type { CSSProperties, ReactNode } from "react";
+import { PointerEvent as ReactPointerEvent, useEffect, useMemo, useRef, useState } from "react";
+import type { ChangeEvent, CSSProperties, DragEvent as ReactDragEvent, FormEvent, ReactNode } from "react";
 import {
   Bell,
   BookOpenText,
@@ -45,7 +45,8 @@ import {
   listConversations,
   saveSettings,
   streamChat,
-  synthesizeVoice
+  synthesizeVoice,
+  uploadAgentFile
 } from "./api";
 import { BootLoader } from "./components/BootLoader";
 import { Live2DStage, type Live2DStageHandle } from "./components/Live2DStage";
@@ -60,6 +61,7 @@ import type {
   StoredSettings,
   StreamEvent,
   ToolTraceEvent,
+  UploadedFileInfo,
   VoiceSettings
 } from "./types";
 
@@ -90,6 +92,46 @@ const DEFAULT_VOICE_SETTINGS: VoiceSettings = {
   speed: 1,
   gain: 0
 };
+const ACCEPTED_UPLOAD_TYPES = [
+  ".txt",
+  ".md",
+  ".markdown",
+  ".json",
+  ".jsonl",
+  ".yaml",
+  ".yml",
+  ".toml",
+  ".ini",
+  ".cfg",
+  ".conf",
+  ".csv",
+  ".tsv",
+  ".py",
+  ".pyi",
+  ".ts",
+  ".tsx",
+  ".js",
+  ".jsx",
+  ".css",
+  ".html",
+  ".xml",
+  ".sql",
+  ".sh",
+  ".ps1",
+  ".bat",
+  ".pdf",
+  ".doc",
+  ".docx",
+  ".xls",
+  ".xlsx",
+  "text/*",
+  "application/json",
+  "application/pdf",
+  "application/msword",
+  "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  "application/vnd.ms-excel",
+  "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+].join(",");
 
 type ConfigSection = "profile" | "model" | "voice" | "interface";
 type AudioQueueItem = {
@@ -233,6 +275,33 @@ function downloadText(filename: string, text: string, mimeType = "text/markdown;
   link.click();
   link.remove();
   URL.revokeObjectURL(url);
+}
+
+function uploadedFilePromptLine(file: { originalFilename: string; path: string; textType: string }): string {
+  return `已上传文件：${file.originalFilename}\n路径：${file.path}\n类型：${file.textType}\n请在需要时调用 file_reader 读取并参考这个文件。`;
+}
+
+function composeMessageText(text: string, files: UploadedFileInfo[]): string {
+  const content = text.trim();
+  const fileText = files.map(uploadedFilePromptLine).join("\n\n");
+  if (content && fileText) {
+    return `${content}\n\n${fileText}`;
+  }
+  return content || fileText;
+}
+
+function uploadTypeLabel(file: UploadedFileInfo): string {
+  const suffix = file.filename.split(".").pop()?.toLowerCase() ?? "";
+  if (["pdf", "doc", "docx", "xls", "xlsx"].includes(suffix)) {
+    return "文档";
+  }
+  if (file.textType.includes("code")) {
+    return "代码";
+  }
+  if (file.textType.includes("csv") || file.textType.includes("excel")) {
+    return "表格";
+  }
+  return "文档";
 }
 
 function parseMarkdownBlocks(text: string): MarkdownBlock[] {
@@ -715,7 +784,9 @@ export default function App() {
   const [mode, setMode] = useState<ChatMode>(stored.mode);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
+  const [uploadedFiles, setUploadedFiles] = useState<UploadedFileInfo[]>([]);
   const [historySearch, setHistorySearch] = useState("");
+  const [uploadPanelOpen, setUploadPanelOpen] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [configOpen, setConfigOpen] = useState(false);
   const [chatOpen, setChatOpen] = useState(false);
@@ -731,6 +802,7 @@ export default function App() {
   const [isStreaming, setIsStreaming] = useState(false);
   const [speaking, setSpeaking] = useState(false);
   const [voiceBusy, setVoiceBusy] = useState(false);
+  const [uploadBusy, setUploadBusy] = useState(false);
   const [live2dReady, setLive2dReady] = useState(false);
   const [live2dError, setLive2dError] = useState("");
   const [minimumBootElapsed, setMinimumBootElapsed] = useState(false);
@@ -747,7 +819,7 @@ export default function App() {
   const saveSettingsTimerRef = useRef<number | null>(null);
 
   const selectedProvider = providers.find((provider) => provider.name === modelSettings.providerName);
-  const canSend = input.trim().length > 0 && !isStreaming;
+  const canSend = (input.trim().length > 0 || uploadedFiles.length > 0) && !isStreaming;
   const visibleMessages = messages.filter((message) => message.content || message.streaming).slice(-8);
   const filteredConversations = useMemo(() => {
     const keyword = historySearch.trim().toLowerCase();
@@ -970,6 +1042,7 @@ export default function App() {
         setCurrentConversationId(null);
         setMessages([]);
         setInput("");
+        setUploadedFiles([]);
       }
       setStatus("deleted");
     } catch (error) {
@@ -984,6 +1057,7 @@ export default function App() {
     setCurrentConversationId(null);
     setMessages([]);
     setInput("");
+    setUploadedFiles([]);
     setStatus("idle");
     setIsStreaming(false);
     setChatOpen(true);
@@ -1213,6 +1287,123 @@ export default function App() {
     }
   }
 
+  async function uploadFiles(files: File[]) {
+    if (files.length === 0) {
+      return;
+    }
+
+    setUploadBusy(true);
+    try {
+      const uploaded: UploadedFileInfo[] = [];
+      for (let index = 0; index < files.length; index += 1) {
+        const file = files[index];
+        setStatus(files.length > 1 ? `upload ${index + 1}/${files.length}` : "upload");
+        const response = await uploadAgentFile({
+          file,
+          device: "host",
+          overwrite: true
+        });
+        uploaded.push(response.file);
+      }
+      setUploadedFiles((prev) => {
+        const byPath = new Map(prev.map((file) => [file.path, file]));
+        uploaded.forEach((file) => byPath.set(file.path, file));
+        return Array.from(byPath.values());
+      });
+      setUploadPanelOpen(false);
+      setStatus(files.length > 1 ? `uploaded ${files.length}` : "uploaded");
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "upload failed");
+    } finally {
+      setUploadBusy(false);
+    }
+  }
+
+  async function handleFileSelection(event: ChangeEvent<HTMLInputElement>) {
+    const files = Array.from(event.currentTarget.files ?? []);
+    event.currentTarget.value = "";
+    await uploadFiles(files);
+  }
+
+  function handleUploadDrop(event: ReactDragEvent<HTMLDivElement>) {
+    event.preventDefault();
+    if (uploadBusy) {
+      return;
+    }
+    void uploadFiles(Array.from(event.dataTransfer.files ?? []));
+  }
+
+  function toggleUploadPanel() {
+    if (uploadBusy) {
+      return;
+    }
+    setUploadPanelOpen((open) => {
+      const nextOpen = !open;
+      setStatus(nextOpen ? "select file" : "idle");
+      return nextOpen;
+    });
+  }
+
+  function removeUploadedFile(path: string) {
+    setUploadedFiles((prev) => prev.filter((file) => file.path !== path));
+  }
+
+  function renderUploadedFiles() {
+    if (uploadedFiles.length === 0) {
+      return null;
+    }
+    return (
+      <div className="upload-attachment-tray" aria-label="已上传文件">
+        {uploadedFiles.map((file) => (
+          <div className="upload-attachment-card" key={file.path}>
+            <div className="upload-attachment-icon">
+              <BookOpenText size={17} />
+            </div>
+            <div className="upload-attachment-copy">
+              <strong title={file.originalFilename}>{file.originalFilename}</strong>
+              <span>{uploadTypeLabel(file)}</span>
+            </div>
+            <button
+              className="upload-attachment-remove"
+              onClick={() => removeUploadedFile(file.path)}
+              type="button"
+              aria-label={`移除 ${file.originalFilename}`}
+              title="移除"
+            >
+              <XCircle size={17} />
+            </button>
+          </div>
+        ))}
+      </div>
+    );
+  }
+
+  function renderUploadPanel() {
+    if (!uploadPanelOpen) {
+      return null;
+    }
+    return (
+      <div className="upload-popover glass-panel" onDragOver={(event) => event.preventDefault()} onDrop={handleUploadDrop}>
+        <div className="upload-popover-head">
+          <strong>上传文件</strong>
+          <span>{uploadBusy ? "上传中" : "文本 / 代码 / 数据"}</span>
+        </div>
+        <div className="upload-drop-zone">
+          <span>拖拽文件到这里</span>
+          <small>或使用下方文件选择</small>
+        </div>
+        <input
+          className="upload-native-input"
+          type="file"
+          multiple
+          accept={ACCEPTED_UPLOAD_TYPES}
+          disabled={uploadBusy}
+          onChange={handleFileSelection}
+        />
+      </div>
+    );
+  }
+
   async function playAssistantMessage(message: ChatMessage) {
     const text = message.content.trim();
     if (!text || message.role !== "assistant") {
@@ -1286,7 +1477,7 @@ export default function App() {
 
   async function sendMessage(event?: FormEvent) {
     event?.preventDefault();
-    const text = input.trim();
+    const text = composeMessageText(input, uploadedFiles);
     if (!text || isStreaming) {
       return;
     }
@@ -1315,6 +1506,8 @@ export default function App() {
     };
     setMessages((prev) => [...prev, userMessage, assistantMessage]);
     setInput("");
+    setUploadedFiles([]);
+    setUploadPanelOpen(false);
     setCurrentEmotion("neutral");
     live2dRef.current?.playEmotion("neutral");
 
@@ -1983,8 +2176,17 @@ export default function App() {
         <div className="floating-messages" ref={floatingMessageRef}>
           {visibleMessages.map((message) => renderMessageBubble(message, "floating"))}
         </div>
-        <form className="floating-composer glass-panel" onSubmit={sendMessage}>
-          <button className="round-tool" onClick={startNewConversation} type="button" aria-label="新建">
+        <form className={`floating-composer glass-panel ${uploadedFiles.length > 0 ? "has-attachments" : ""}`} onSubmit={sendMessage}>
+          {renderUploadPanel()}
+          {renderUploadedFiles()}
+          <button
+            className={`round-tool upload-trigger ${uploadPanelOpen ? "is-active" : ""} ${uploadBusy ? "is-busy" : ""}`}
+            disabled={uploadBusy}
+            onClick={toggleUploadPanel}
+            type="button"
+            aria-label="上传文件"
+            title="上传文件"
+          >
             <Plus size={20} />
           </button>
           <input
@@ -2060,7 +2262,9 @@ export default function App() {
           {messages.map((message) => renderMessageBubble(message, "panel"))}
         </div>
 
-        <form className="composer" onSubmit={sendMessage}>
+        <form className={`composer ${uploadedFiles.length > 0 ? "has-attachments" : ""}`} onSubmit={sendMessage}>
+          {renderUploadPanel()}
+          {renderUploadedFiles()}
           <textarea
             value={input}
             onChange={(event) => setInput(event.target.value)}
@@ -2074,14 +2278,26 @@ export default function App() {
             rows={3}
           />
           <div className="composer-actions">
-            <button
-              className={`text-icon-button ${voiceSettings.autoPlay ? "is-active" : ""}`}
-              onClick={toggleAutoVoice}
-              type="button"
-            >
-              {voiceSettings.autoPlay ? <Volume2 size={16} /> : <VolumeX size={16} />}
-              语音
-            </button>
+            <div className="composer-left-actions">
+              <button
+                className={`round-tool composer-upload upload-trigger ${uploadPanelOpen ? "is-active" : ""} ${uploadBusy ? "is-busy" : ""}`}
+                disabled={uploadBusy}
+                onClick={toggleUploadPanel}
+                type="button"
+                aria-label="上传文件"
+                title="上传文件"
+              >
+                <Plus size={18} />
+              </button>
+              <button
+                className={`text-icon-button ${voiceSettings.autoPlay ? "is-active" : ""}`}
+                onClick={toggleAutoVoice}
+                type="button"
+              >
+                {voiceSettings.autoPlay ? <Volume2 size={16} /> : <VolumeX size={16} />}
+                语音
+              </button>
+            </div>
             {isStreaming ? (
               <button className="send-button" onClick={stopStreaming} type="button">
                 <CircleStop size={18} />

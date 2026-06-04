@@ -72,6 +72,19 @@ TEXT_SUFFIXES = {
     ".bat",
     ".gitignore",
 }
+UPLOAD_DOCUMENT_SUFFIXES = {
+    ".pdf",
+    ".doc",
+    ".docx",
+    ".xls",
+    ".xlsx",
+}
+READABLE_DOCUMENT_SUFFIXES = {
+    ".pdf",
+    ".docx",
+    ".xls",
+    ".xlsx",
+}
 
 
 async def run_file_reader(args: dict[str, Any]) -> dict[str, Any]:
@@ -122,11 +135,9 @@ def read_file(
         raise FileNotFoundError(relative_path(path))
     if not path.is_file():
         raise ValueError("file_reader read action requires a file path")
-    ensure_allowed_text_file(path)
+    ensure_readable_file(path)
     size = path.stat().st_size
-    read_bytes = path.read_bytes()[:max_bytes]
-    truncated_by_bytes = size > len(read_bytes)
-    text, encoding = decode_text(read_bytes)
+    text, encoding, truncated = extract_readable_text(path, max_bytes=max_bytes)
     lines = text.splitlines()
     total_lines = len(lines)
 
@@ -151,7 +162,7 @@ def read_file(
         "endLine": end,
         "lineCount": len(selected),
         "totalLineCount": total_lines,
-        "truncated": truncated_by_bytes,
+        "truncated": truncated,
         "content": "\n".join(selected),
     }
 
@@ -226,7 +237,7 @@ def stat_path(path: Path) -> dict[str, Any]:
         "sizeBytes": stat.st_size if path.is_file() else 0,
         "modifiedAt": modified_time(stat.st_mtime),
         "mimeType": mimetypes.guess_type(path.name)[0] or "",
-        "readableAsText": path.is_file() and is_text_file(path),
+        "readableAsText": path.is_file() and is_readable_file(path),
     }
 
 
@@ -259,6 +270,15 @@ def ensure_allowed_text_file(path: Path) -> None:
         raise ValueError(f"file_reader only reads text-like files; unsupported suffix: {path.suffix or path.name}")
 
 
+def ensure_readable_file(path: Path) -> None:
+    suffix = path.suffix.lower()
+    if is_text_file(path) or suffix in READABLE_DOCUMENT_SUFFIXES:
+        return
+    if suffix == ".doc":
+        raise ValueError("file_reader can store .doc uploads, but reading legacy Word .doc requires converting it to .docx or text first")
+    raise ValueError(f"file_reader cannot read unsupported suffix: {path.suffix or path.name}")
+
+
 def is_text_file(path: Path) -> bool:
     name = path.name.lower()
     suffix = path.suffix.lower()
@@ -266,6 +286,125 @@ def is_text_file(path: Path) -> bool:
         return True
     guessed = mimetypes.guess_type(path.name)[0] or ""
     return guessed.startswith("text/")
+
+
+def is_readable_file(path: Path) -> bool:
+    return is_text_file(path) or path.suffix.lower() in READABLE_DOCUMENT_SUFFIXES
+
+
+def extract_readable_text(path: Path, *, max_bytes: int) -> tuple[str, str, bool]:
+    if is_text_file(path):
+        size = path.stat().st_size
+        read_bytes = path.read_bytes()[:max_bytes]
+        text, encoding = decode_text(read_bytes)
+        return text, encoding, size > len(read_bytes)
+
+    suffix = path.suffix.lower()
+    if suffix == ".pdf":
+        return extract_pdf_text(path, max_chars=max_bytes)
+    if suffix == ".docx":
+        return extract_docx_text(path, max_chars=max_bytes)
+    if suffix == ".xlsx":
+        return extract_xlsx_text(path, max_chars=max_bytes)
+    if suffix == ".xls":
+        return extract_xls_text(path, max_chars=max_bytes)
+    raise ValueError(f"file_reader cannot read unsupported suffix: {path.suffix or path.name}")
+
+
+def limit_text(text: str, *, max_chars: int) -> tuple[str, bool]:
+    if len(text) <= max_chars:
+        return text, False
+    return text[:max_chars].rstrip(), True
+
+
+def extract_pdf_text(path: Path, *, max_chars: int) -> tuple[str, str, bool]:
+    try:
+        from pypdf import PdfReader
+    except Exception as error:
+        raise RuntimeError("读取 PDF 需要安装 pypdf，请运行 pip install pypdf。") from error
+
+    reader = PdfReader(str(path))
+    parts: list[str] = []
+    for index, page in enumerate(reader.pages, start=1):
+        text = page.extract_text() or ""
+        if text.strip():
+            parts.append(f"--- Page {index} ---\n{text.strip()}")
+        if sum(len(part) for part in parts) > max_chars:
+            break
+    text, truncated = limit_text("\n\n".join(parts), max_chars=max_chars)
+    return text, "pdf-text", truncated
+
+
+def extract_docx_text(path: Path, *, max_chars: int) -> tuple[str, str, bool]:
+    try:
+        from docx import Document
+    except Exception as error:
+        raise RuntimeError("读取 DOCX 需要安装 python-docx，请运行 pip install python-docx。") from error
+
+    document = Document(str(path))
+    parts = [paragraph.text for paragraph in document.paragraphs if paragraph.text.strip()]
+    for table_index, table in enumerate(document.tables, start=1):
+        rows = []
+        for row in table.rows:
+            cells = [cell.text.strip().replace("\n", " ") for cell in row.cells]
+            rows.append("\t".join(cells))
+        if rows:
+            parts.append(f"--- Table {table_index} ---\n" + "\n".join(rows))
+    text, truncated = limit_text("\n\n".join(parts), max_chars=max_chars)
+    return text, "docx-text", truncated
+
+
+def extract_xlsx_text(path: Path, *, max_chars: int) -> tuple[str, str, bool]:
+    try:
+        from openpyxl import load_workbook
+    except Exception as error:
+        raise RuntimeError("读取 XLSX 需要安装 openpyxl，请运行 pip install openpyxl。") from error
+
+    workbook = load_workbook(str(path), read_only=True, data_only=True)
+    parts: list[str] = []
+    try:
+        for sheet in workbook.worksheets:
+            rows: list[str] = [f"--- Sheet: {sheet.title} ---"]
+            for row in sheet.iter_rows(values_only=True):
+                values = ["" if value is None else str(value) for value in row]
+                if any(value.strip() for value in values):
+                    rows.append("\t".join(values).rstrip())
+                if sum(len(part) for part in parts) + sum(len(item) for item in rows) > max_chars:
+                    break
+            parts.append("\n".join(rows))
+            if sum(len(part) for part in parts) > max_chars:
+                break
+    finally:
+        workbook.close()
+    text, truncated = limit_text("\n\n".join(parts), max_chars=max_chars)
+    return text, "xlsx-text", truncated
+
+
+def extract_xls_text(path: Path, *, max_chars: int) -> tuple[str, str, bool]:
+    try:
+        import xlrd
+    except Exception as error:
+        raise RuntimeError("读取 XLS 需要安装 xlrd，请运行 pip install xlrd。") from error
+
+    workbook = xlrd.open_workbook(str(path), on_demand=True)
+    parts: list[str] = []
+    try:
+        for sheet_name in workbook.sheet_names():
+            sheet = workbook.sheet_by_name(sheet_name)
+            rows: list[str] = [f"--- Sheet: {sheet_name} ---"]
+            for row_index in range(sheet.nrows):
+                values = [str(sheet.cell_value(row_index, col_index)) for col_index in range(sheet.ncols)]
+                if any(value.strip() for value in values):
+                    rows.append("\t".join(values).rstrip())
+                if sum(len(part) for part in parts) + sum(len(item) for item in rows) > max_chars:
+                    break
+            parts.append("\n".join(rows))
+            if sum(len(part) for part in parts) > max_chars:
+                break
+    finally:
+        workbook.release_resources()
+    text, truncated = limit_text("\n\n".join(parts), max_chars=max_chars)
+    return text, "xls-text", truncated
 
 
 def decode_text(data: bytes) -> tuple[str, str]:

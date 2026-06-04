@@ -36,9 +36,9 @@ AGENTS = [
     },
     {
         "name": "doc_writer_agent",
-        "description": "LangGraph 文档写作图：规划文档、按需调用 web_search_agent、生成 Markdown 并写入受控目录。",
+        "description": "LangGraph 文档写作图：规划文档、按需调用 web_search_agent，并导出 md、txt、docx、csv、xlsx 到受控目录。",
         "inputModes": ["text", "json"],
-        "outputModes": ["markdown", "file", "summary"],
+        "outputModes": ["markdown", "text", "docx", "csv", "xlsx", "file", "summary"],
     },
     {
         "name": "file_reader_agent",
@@ -58,7 +58,22 @@ CALCULATE_RE = re.compile(r"[0-9][0-9\s+\-*/().%]*[0-9)]")
 TIME_KEYWORDS = ("几点", "时间", "当前时间", "现在", "today", "time", "date")
 MATH_KEYWORDS = ("计算", "算", "加", "减", "乘", "除", "calculate", "math")
 SEARCH_KEYWORDS = ("搜索", "查询", "查一下", "查找", "检索", "search", "web", "资料", "来源")
-DOC_WRITER_KEYWORDS = ("写文档", "编写文档", "生成文档", "起草", "markdown", "md", "document", "doc", "write")
+DOC_WRITER_KEYWORDS = (
+    "写文档",
+    "编写文档",
+    "生成文档",
+    "起草",
+    "markdown",
+    "md",
+    "docx",
+    "txt",
+    "xlsx",
+    "csv",
+    "表格",
+    "document",
+    "doc",
+    "write",
+)
 FILE_READER_KEYWORDS = ("读文件", "读取文件", "查看文件", "列目录", "文件列表", "file", "read file", "list files", "stat file")
 TODO_TASK_KEYWORDS = ("待办", "todo", "任务列表", "创建任务", "新增任务", "任务规划", "任务拆解", "task list", "todo list")
 
@@ -474,14 +489,18 @@ def register_builtin_tools() -> None:
     tool_registry.register(
         ToolDefinition(
             name="doc_writer",
-            description="调用 LangGraph doc_writer_agent，基础版生成 Markdown 文档，可按需调用 web_search_agent，并写入 generated_docs 等受控目录。",
+            description="调用 LangGraph doc_writer_agent，生成 md、txt、docx、csv、xlsx 文档，可按需调用 web_search_agent，并写入 generated_docs 等受控目录。",
             parameters={
                 "type": "object",
                 "properties": {
                     "title": {"type": "string", "description": "文档标题"},
                     "topic": {"type": "string", "description": "文档主题"},
                     "instruction": {"type": "string", "description": "写作需求或任务说明"},
-                    "format": {"type": "string", "enum": ["md"], "description": "当前基础版仅支持 md"},
+                    "format": {
+                        "type": "string",
+                        "enum": ["md", "txt", "docx", "csv", "xlsx"],
+                        "description": "输出格式；未填写时可从 fileName/outputPath 后缀推断，默认 md",
+                    },
                     "audience": {"type": "string", "description": "目标读者"},
                     "tone": {"type": "string", "description": "写作语气"},
                     "sections": {
@@ -495,6 +514,16 @@ def register_builtin_tools() -> None:
                         "description": "核心要点",
                     },
                     "content": {"type": "string", "description": "已有草稿或素材"},
+                    "rows": {
+                        "type": "array",
+                        "items": {"type": "object"},
+                        "description": "csv/xlsx 可选结构化行数据；对象键会作为表头",
+                    },
+                    "table": {
+                        "type": "array",
+                        "items": {"type": "array"},
+                        "description": "csv/xlsx 可选二维表；第一行会作为表头",
+                    },
                     "useWebSearch": {
                         "oneOf": [{"type": "boolean"}, {"type": "string", "enum": ["auto", "true", "false"]}],
                         "description": "是否调用 web_search_agent，可为 true/false/auto",
@@ -506,7 +535,7 @@ def register_builtin_tools() -> None:
                         "description": "手动提供的来源列表",
                     },
                     "save": {"type": "boolean", "description": "是否保存到文件，默认 true"},
-                    "outputPath": {"type": "string", "description": "工作区内相对输出目录或 .md 文件路径"},
+                    "outputPath": {"type": "string", "description": "工作区内相对输出目录，或 md/txt/docx/csv/xlsx 文件路径"},
                     "fileName": {"type": "string", "description": "输出文件名"},
                     "overwrite": {"type": "boolean", "description": "是否覆盖已存在文件，默认 false"},
                     "frontMatter": {"type": "boolean", "description": "是否生成 YAML front matter"},

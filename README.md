@@ -171,7 +171,9 @@ For stable production search, run a SearXNG instance and set `AMADEUS_SEARXNG_UR
 planner_agent -> research_agent -> outline_agent -> markdown_writer_agent -> file_writer_agent
 ```
 
-The basic version writes Markdown only. Output is restricted to the workspace and defaults to `generated_docs`.
+The writer keeps Markdown as the canonical draft and can export `md`, `txt`, `docx`, `csv`, and `xlsx`.
+Output is restricted to the workspace and defaults to `generated_docs`.
+For `csv` and `xlsx`, pass `rows` as an array of objects or `table` as a two-dimensional array when you need structured tabular output; otherwise the agent exports the generated outline, sources, and warnings as rows.
 
 Example:
 
@@ -195,6 +197,28 @@ Example:
   "rawArguments": {},
   "client": "Amaduse HarmonyOS",
   "requestedAt": "2026-06-04T10:00:00+08:00"
+}
+```
+
+Structured CSV/XLSX example:
+
+```json
+{
+  "action": "call_tool",
+  "targetType": "tool",
+  "target": "doc_writer",
+  "intent": "生成任务清单表格",
+  "payload": {
+    "title": "Agent 任务清单",
+    "format": "xlsx",
+    "rows": [
+      {"task": "接入 web_search_agent", "owner": "backend", "status": "done"},
+      {"task": "补充 doc_writer 多格式导出", "owner": "backend", "status": "in_progress"}
+    ],
+    "outputPath": "generated_docs",
+    "fileName": "agent-task-list.xlsx",
+    "save": true
+  }
 }
 ```
 

@@ -18,8 +18,8 @@ from langgraph.graph import END, START, StateGraph
 SearchProviderName = Literal["direct_url", "searxng", "duckduckgo_html"]
 
 DEFAULT_USER_AGENT = "AmadeusWebSearch/0.1"
-DEFAULT_MAX_RESULTS = 8
-DEFAULT_FETCH_TOP_N = 4
+DEFAULT_MAX_RESULTS = 10
+DEFAULT_FETCH_TOP_N = 10
 MAX_RESULTS_LIMIT = 20
 MAX_FETCH_BYTES = 2 * 1024 * 1024
 FETCH_TIMEOUT_SECONDS = 8.0
@@ -245,7 +245,7 @@ async def reader_agent(state: WebSearchState) -> dict[str, Any]:
         return {"ranked_results": state.get("ranked_results", [])}
 
     results = state.get("ranked_results", [])
-    fetch_top_n = clamp_int(os.getenv("AMADEUS_SEARCH_FETCH_TOP_N"), DEFAULT_FETCH_TOP_N, 1, 8)
+    fetch_top_n = clamp_int(os.getenv("AMADEUS_SEARCH_FETCH_TOP_N"), DEFAULT_FETCH_TOP_N, 1, 10)
     top_results = results[: min(fetch_top_n, len(results))]
     warnings = list(state.get("warnings", []))
 
@@ -342,7 +342,7 @@ async def writer_agent(state: WebSearchState) -> dict[str, Any]:
         return {"answer": f"没有找到与“{query}”相关的可靠搜索结果。"}
 
     lines = [f"已检索“{query}”，找到 {len(results)} 个候选来源。"]
-    top = results[: min(5, len(results))]
+    top = results[: min(10, len(results))]
     for index, result in enumerate(top, start=1):
         title = result.get("title") or result.get("url", "")
         source_type = result.get("sourceType", "unknown")

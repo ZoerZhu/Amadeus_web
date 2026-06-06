@@ -42,7 +42,9 @@ The web backend uses `AMADEUS_LOCAL_TTS_URL=http://127.0.0.1:8011` by default an
 Start the API:
 
 ```powershell
-.\.venv\Scripts\python -m uvicorn backend.amadeus_app.main:app --reload --host 127.0.0.1 --port 8000
+New-NetFirewallRule -DisplayName "Amadeus Backend 8000" -Direction Inbound -Action Allow -Protocol TCP -LocalPort 8000 -Profile Private
+.\.venv\Scripts\python -m uvicorn backend.amadeus_app.main:app --reload --host 0.0.0.0 --port 8000
+uvicorn main:app --host 0.0.0.0 --port 8000
 ```
 
 Start the web app:
@@ -51,7 +53,7 @@ Start the web app:
 npm run dev
 ```
 
-Open http://127.0.0.1:5173.
+Open <http://127.0.0.1:5173>.
 
 ## Notes
 

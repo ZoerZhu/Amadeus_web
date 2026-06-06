@@ -1,14 +1,18 @@
 from __future__ import annotations
 
 import os
+import mimetypes
+import base64
+import binascii
 from pathlib import Path
 from uuid import UUID
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from dotenv import load_dotenv
+from pydantic import BaseModel, ConfigDict, Field
 
 from .agent_service import capabilities_response, invoke_agent_request
 from .chat_service import resolve_chat_settings, stream_chat
@@ -22,6 +26,7 @@ from .domain import (
 )
 from .personas import get_persona, list_personas
 from .providers import PROVIDER_PRESETS
+from .file_tools.file_reader import ensure_allowed_path, resolve_workspace_path
 from .runtime_config import effective_voice_settings
 from .storage import DEFAULT_USER_ID, PostgresStorage
 from .uploads.file_upload_service import (
@@ -58,6 +63,37 @@ app.add_middleware(
 app.mount("/audio", StaticFiles(directory=AUDIO_DIR), name="audio")
 
 
+class FileUploadBase64Request(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    filename: str
+    data_base64: str = Field(alias="dataBase64")
+    content_type: str = Field(default="", alias="contentType")
+    device: str = "mobile"
+    overwrite: bool = False
+
+
+class InMemoryUploadFile:
+    def __init__(self, *, filename: str, content_type: str, data: bytes) -> None:
+        self.filename = filename
+        self.content_type = content_type
+        self._data = data
+        self._offset = 0
+
+    async def read(self, size: int = -1) -> bytes:
+        if self._offset >= len(self._data):
+            return b""
+        if size is None or size < 0:
+            size = len(self._data) - self._offset
+        end = min(self._offset + size, len(self._data))
+        chunk = self._data[self._offset : end]
+        self._offset = end
+        return chunk
+
+    async def close(self) -> None:
+        self._offset = len(self._data)
+
+
 @app.on_event("startup")
 async def startup() -> None:
     await storage.connect()
@@ -75,6 +111,28 @@ def require_storage() -> PostgresStorage:
             detail="PostgreSQL 未配置或未连接；请设置 DATABASE_URL 或 AMADEUS_DATABASE_URL。",
         )
     return storage
+
+
+def upload_success_response(uploaded: dict) -> dict:
+    return {
+        "ok": True,
+        "summary": f"已上传 {uploaded['filename']} 到 {uploaded['path']}，可交给 file_reader 读取。",
+        "file": uploaded,
+        "data": {
+            "file": uploaded,
+        },
+    }
+
+
+async def save_upload_or_raise(file: object, *, device: str, overwrite: bool) -> dict:
+    try:
+        return await save_uploaded_text_file(file, device=device, overwrite=overwrite)
+    except UploadConflictError as error:
+        raise HTTPException(status_code=409, detail=str(error)) from error
+    except UploadTooLargeError as error:
+        raise HTTPException(status_code=413, detail=str(error)) from error
+    except UploadValidationError as error:
+        raise HTTPException(status_code=415, detail=str(error)) from error
 
 
 @app.get("/api/health")
@@ -113,22 +171,44 @@ async def upload_file(
     device: str = Form("host"),
     overwrite: bool = Form(False),
 ) -> dict:
+    uploaded = await save_upload_or_raise(file, device=device, overwrite=overwrite)
+    return upload_success_response(uploaded)
+
+
+@app.post("/api/files/upload-base64")
+async def upload_file_base64(request: FileUploadBase64Request) -> dict:
     try:
-        uploaded = await save_uploaded_text_file(file, device=device, overwrite=overwrite)
-    except UploadConflictError as error:
-        raise HTTPException(status_code=409, detail=str(error)) from error
-    except UploadTooLargeError as error:
-        raise HTTPException(status_code=413, detail=str(error)) from error
-    except UploadValidationError as error:
-        raise HTTPException(status_code=415, detail=str(error)) from error
-    return {
-        "ok": True,
-        "summary": f"已上传 {uploaded['filename']} 到 {uploaded['path']}，可交给 file_reader 读取。",
-        "file": uploaded,
-        "data": {
-            "file": uploaded,
-        },
-    }
+        payload = request.data_base64.strip()
+        if "," in payload and payload.lower().startswith("data:"):
+            payload = payload.split(",", 1)[1]
+        data = base64.b64decode(payload, validate=True)
+    except (binascii.Error, ValueError) as error:
+        raise HTTPException(status_code=400, detail="Invalid base64 file payload") from error
+    file = InMemoryUploadFile(
+        filename=request.filename,
+        content_type=request.content_type,
+        data=data,
+    )
+    uploaded = await save_upload_or_raise(file, device=request.device, overwrite=request.overwrite)
+    return upload_success_response(uploaded)
+
+
+@app.get("/api/files/download")
+async def download_file(path: str) -> FileResponse:
+    path_text = path.strip()
+    if not path_text:
+        raise HTTPException(status_code=400, detail="Missing file path")
+    try:
+        target = resolve_workspace_path(path_text)
+        ensure_allowed_path(target)
+    except Exception as error:
+        raise HTTPException(status_code=400, detail=str(error)) from error
+    if not target.exists():
+        raise HTTPException(status_code=404, detail="File not found")
+    if not target.is_file():
+        raise HTTPException(status_code=400, detail="Path is not a file")
+    media_type = mimetypes.guess_type(target.name)[0] or "application/octet-stream"
+    return FileResponse(target, media_type=media_type, filename=target.name)
 
 
 @app.get("/api/settings")

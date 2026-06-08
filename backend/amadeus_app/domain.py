@@ -70,6 +70,15 @@ class VoiceSynthesisRequest(BaseModel):
     voice: VoiceSettings = Field(default_factory=VoiceSettings)
 
 
+class TaskSummaryVoiceRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    summary: str
+    persona_id: str = Field(default="kurisu_amadeus", alias="personaId")
+    model: ModelSettings = Field(default_factory=ModelSettings)
+    voice: VoiceSettings = Field(default_factory=VoiceSettings)
+
+
 class VoiceCloneRequest(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
@@ -105,3 +114,17 @@ class AgentInvokeRequest(BaseModel):
     raw_arguments: dict[str, Any] = Field(default_factory=dict, alias="rawArguments")
     client: str = "Amadeus Web"
     requested_at: str = Field(default="", alias="requestedAt")
+
+
+class CodeTaskStreamRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    title: str = ""
+    prompt: str
+    workspace_path: str = Field(default="", alias="workspacePath")
+    agent: str = ""
+    provider_id: str = Field(default="", alias="providerId")
+    model_id: str = Field(default="", alias="modelId")
+    session_id: str = Field(default="", alias="sessionId")
+    auto_approve: bool = Field(default=False, alias="autoApprove")
+    timeout_seconds: int = Field(default=1800, alias="timeoutSeconds")

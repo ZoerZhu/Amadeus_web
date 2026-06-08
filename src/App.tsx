@@ -50,7 +50,9 @@ import {
   fetchSettings,
   listConversations,
   saveSettings,
+  streamCodeTask,
   streamChat,
+  synthesizeTaskSummaryVoice,
   synthesizeVoice,
   uploadAgentFile
 } from "./api";
@@ -72,6 +74,7 @@ import type {
   ApiChatMessage,
   ChatMessage,
   ChatMode,
+  CodeTaskEvent,
   ConversationDetail,
   ConversationSummary,
   ModelSettings,
@@ -95,6 +98,7 @@ const MIN_BOOT_DURATION_MS = 2000;
 const LIVE2D_ACTIVE_STORAGE_KEY = "amadeus-live2d-active-model-v1";
 const LIVE2D_LOCK_STORAGE_KEY = "amadeus-live2d-transform-locked-v1";
 const LIVE2D_IMPORT_INPUT_ID = "amadeus-live2d-folder-input";
+const DEFAULT_CODE_TASK_WORKSPACE = "";
 
 const DEFAULT_MODEL_SETTINGS: ModelSettings = {
   providerName: "OpenAI",
@@ -172,8 +176,53 @@ type MarkdownBlock =
   | { type: "heading"; level: number; text: string }
   | { type: "orderedList" | "unorderedList"; items: string[] }
   | { type: "code"; text: string };
+type RightPanelTab = "chat" | "tasks";
+type CodeTaskMessageKind = "user" | "assistant" | "status" | "tool" | "command" | "file" | "permission" | "error" | "done";
+type CodeTaskMessage = {
+  id: string;
+  kind: CodeTaskMessageKind;
+  title?: string;
+  text: string;
+  detail?: string;
+  createdAt: string;
+};
+type CodeTaskRecord = {
+  id: string;
+  title: string;
+  prompt: string;
+  workspacePath: string;
+  status: string;
+  sessionId?: string;
+  messages: CodeTaskMessage[];
+  summary?: string;
+  summarySpeechText?: string;
+  summaryAudioUrl?: string;
+  createdAt: string;
+  updatedAt: string;
+};
+type CodeTaskPhase = {
+  id: string;
+  title: string;
+  status: "running" | "completed" | "error";
+  messages: CodeTaskMessage[];
+};
+
+declare global {
+  interface Window {
+    amadeusDesktop?: {
+      selectFolder?: () => Promise<string | null>;
+    };
+  }
+}
 
 const TOOL_EVENT_LOG_PREFIX = "__AMADEUS_TOOL_EVENT__";
+const CODE_TASK_HISTORY_STORAGE_KEY = "amadeus-code-task-history-v1";
+const CODE_TASK_FLUSH_INTERVAL_MS = 80;
+const CODE_TASK_MAX_HISTORY = 48;
+const CODE_TASK_MAX_MESSAGES = 160;
+const CODE_TASK_MAX_ASSISTANT_TEXT = 80000;
+const CODE_TASK_MAX_DETAIL_TEXT = 8000;
+const CODE_TASK_TRUNCATED_SUFFIX = "\n\n[OpenCode 输出较长，后续内容已省略；完整结果请查看项目文件或 OpenCode 会话。]";
 const DISPLAY_EMOTIONS = new Set(["neutral", "anger", "joy", "sadness", "shy", "smile", "surprise", "unhappy"]);
 const LIVE2D_EMOTIONS = new Set([
   "neutral",
@@ -773,6 +822,195 @@ function clamp(value: number, min: number, max: number): number {
   return Math.min(Math.max(value, min), max);
 }
 
+function limitCodeTaskText(text: string, limit = CODE_TASK_MAX_DETAIL_TEXT): string {
+  if (text.length <= limit) {
+    return text;
+  }
+  return `${text.slice(0, limit).trimEnd()}\n\n[内容过长，已截断显示。]`;
+}
+
+function appendLimitedCodeTaskText(current: string, delta: string): string {
+  if (!delta || current.includes(CODE_TASK_TRUNCATED_SUFFIX)) {
+    return current;
+  }
+  const combined = `${current}${delta}`;
+  if (combined.length <= CODE_TASK_MAX_ASSISTANT_TEXT) {
+    return combined;
+  }
+  return `${combined.slice(0, CODE_TASK_MAX_ASSISTANT_TEXT).trimEnd()}${CODE_TASK_TRUNCATED_SUFFIX}`;
+}
+
+function trimCodeTaskMessages(messages: CodeTaskMessage[]): CodeTaskMessage[] {
+  if (messages.length <= CODE_TASK_MAX_MESSAGES) {
+    return messages;
+  }
+  const firstUser = messages.find((message) => message.kind === "user");
+  const tail = messages.slice(-(CODE_TASK_MAX_MESSAGES - 1));
+  if (firstUser && !tail.some((message) => message.id === firstUser.id)) {
+    return [firstUser, ...tail];
+  }
+  return messages.slice(-CODE_TASK_MAX_MESSAGES);
+}
+
+function normalizeStoredCodeTaskMessage(value: unknown): CodeTaskMessage | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+  const kind = typeof value.kind === "string" ? value.kind : "";
+  const allowedKinds: CodeTaskMessageKind[] = [
+    "user",
+    "assistant",
+    "status",
+    "tool",
+    "command",
+    "file",
+    "permission",
+    "error",
+    "done"
+  ];
+  if (!allowedKinds.includes(kind as CodeTaskMessageKind)) {
+    return null;
+  }
+  return {
+    id: typeof value.id === "string" ? value.id : createId(),
+    kind: kind as CodeTaskMessageKind,
+    title: typeof value.title === "string" ? value.title : undefined,
+    text: typeof value.text === "string" ? value.text : "",
+    detail: typeof value.detail === "string" ? value.detail : undefined,
+    createdAt: typeof value.createdAt === "string" ? value.createdAt : new Date().toISOString()
+  };
+}
+
+function loadStoredCodeTasks(): CodeTaskRecord[] {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(CODE_TASK_HISTORY_STORAGE_KEY) ?? "[]");
+    if (!Array.isArray(parsed)) {
+      return [];
+    }
+    return parsed
+      .map((item): CodeTaskRecord | null => {
+        if (!isRecord(item)) {
+          return null;
+        }
+        const messages = Array.isArray(item.messages)
+          ? item.messages.map(normalizeStoredCodeTaskMessage).filter((message): message is CodeTaskMessage => Boolean(message))
+          : [];
+        const now = new Date().toISOString();
+        const title = typeof item.title === "string" && item.title.trim() ? item.title : "OpenCode 任务";
+        return {
+          id: typeof item.id === "string" ? item.id : createId(),
+          title,
+          prompt: typeof item.prompt === "string" ? item.prompt : title,
+          workspacePath: typeof item.workspacePath === "string" ? item.workspacePath : "",
+          status: typeof item.status === "string" ? item.status : "idle",
+          sessionId: typeof item.sessionId === "string" ? item.sessionId : undefined,
+          messages: trimCodeTaskMessages(messages),
+          summary: typeof item.summary === "string" ? item.summary : undefined,
+          summarySpeechText: typeof item.summarySpeechText === "string" ? item.summarySpeechText : undefined,
+          summaryAudioUrl: typeof item.summaryAudioUrl === "string" ? item.summaryAudioUrl : undefined,
+          createdAt: typeof item.createdAt === "string" ? item.createdAt : now,
+          updatedAt: typeof item.updatedAt === "string" ? item.updatedAt : now
+        };
+      })
+      .filter((task): task is CodeTaskRecord => Boolean(task))
+      .sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime())
+      .slice(0, CODE_TASK_MAX_HISTORY);
+  } catch {
+    return [];
+  }
+}
+
+function codeTaskToMarkdown(task: CodeTaskRecord): string {
+  const lines = [
+    `# ${task.title}`,
+    "",
+    `- Status: ${task.status}`,
+    `- Workspace: ${task.workspacePath || "backend workspace"}`,
+    `- Session: ${task.sessionId || "none"}`,
+    `- Created: ${formatExportTime(task.createdAt)}`,
+    `- Updated: ${formatExportTime(task.updatedAt)}`,
+    "",
+    "## Prompt",
+    "",
+    task.prompt.trim() || "(empty)",
+    ""
+  ];
+  if (task.summary?.trim()) {
+    lines.push("## Summary", "", task.summary.trim(), "");
+  }
+  if (task.summarySpeechText?.trim()) {
+    lines.push("## Voice Script", "", task.summarySpeechText.trim(), "");
+  }
+  lines.push("## Timeline", "");
+  for (const message of task.messages) {
+    lines.push(`### ${message.title || message.kind} · ${formatExportTime(message.createdAt)}`, "");
+    lines.push(message.text.trim() || "(empty)", "");
+    if (message.detail?.trim()) {
+      lines.push("```text", message.detail.trim(), "```", "");
+    }
+  }
+  return lines.join("\n").trimEnd() + "\n";
+}
+
+function buildCodeTaskPhases(messages: CodeTaskMessage[], running: boolean): CodeTaskPhase[] {
+  const phaseSpecs: Array<{ id: string; title: string; kinds: CodeTaskMessageKind[] }> = [
+    { id: "request", title: "任务请求", kinds: ["user"] },
+    { id: "setup", title: "启动与会话", kinds: ["status"] },
+    { id: "thinking", title: "思考与输出", kinds: ["assistant"] },
+    { id: "tools", title: "工具调用", kinds: ["tool"] },
+    { id: "commands", title: "命令执行", kinds: ["command"] },
+    { id: "files", title: "文件与 Diff", kinds: ["file"] },
+    { id: "permissions", title: "权限处理", kinds: ["permission"] },
+    { id: "result", title: "任务结果", kinds: ["done", "error"] }
+  ];
+  const lastMessage = messages[messages.length - 1];
+  const activePhaseId =
+    running && lastMessage
+      ? phaseSpecs.find((phase) => phase.kinds.includes(lastMessage.kind))?.id ?? "setup"
+      : "";
+
+  return phaseSpecs
+    .map((phase) => {
+      const phaseMessages = messages.filter((message) => phase.kinds.includes(message.kind));
+      if (phaseMessages.length === 0) {
+        return null;
+      }
+      const hasError = phaseMessages.some((message) => message.kind === "error");
+      return {
+        id: phase.id,
+        title: phase.title,
+        status: hasError ? "error" : activePhaseId === phase.id ? "running" : "completed",
+        messages: phaseMessages
+      } satisfies CodeTaskPhase;
+    })
+    .filter((phase): phase is CodeTaskPhase => Boolean(phase));
+}
+
+function buildCodeTaskSummaryText(task: CodeTaskRecord, messages: CodeTaskMessage[]): string {
+  const files = messages
+    .filter((message) => message.kind === "file")
+    .map((message) => message.text.replace(/\s+/g, " ").trim())
+    .filter(Boolean)
+    .slice(-4);
+  const commands = messages.filter((message) => message.kind === "command").length;
+  const tools = messages.filter((message) => message.kind === "tool").length;
+  const error = [...messages].reverse().find((message) => message.kind === "error");
+  const assistantMessages = messages.filter((message) => message.kind === "assistant");
+  const finalOutput = assistantMessages[assistantMessages.length - 1]
+    ?.text.replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 260);
+  const parts = [
+    `OpenCode 任务「${task.title}」已经结束。`,
+    task.workspacePath ? `工作目录是 ${task.workspacePath}。` : "",
+    tools || commands ? `过程中记录了 ${tools} 次工具事件、${commands} 次命令事件。` : "",
+    files.length > 0 ? `主要文件变化包括：${files.join("；")}。` : "",
+    error ? `需要注意：${error.text}` : "",
+    finalOutput ? `最后的执行摘要是：${finalOutput}` : "没有收到额外的文本摘要。"
+  ];
+  return parts.filter(Boolean).join("");
+}
+
 function getLeftOccupiedWidth(menuOpen: boolean, configOpen: boolean): number {
   if (!menuOpen) {
     return EDGE_MARGIN;
@@ -795,6 +1033,7 @@ function getChatMaxWidth(menuOpen: boolean, configOpen: boolean): number {
 
 export default function App() {
   const stored = useMemo(loadStoredSettings, []);
+  const storedCodeTasks = useMemo(loadStoredCodeTasks, []);
   const [providers, setProviders] = useState<ProviderPreset[]>([]);
   const [storageOnline, setStorageOnline] = useState(false);
   const [storageError, setStorageError] = useState("");
@@ -812,6 +1051,15 @@ export default function App() {
   const [configOpen, setConfigOpen] = useState(false);
   const [chatOpen, setChatOpen] = useState(false);
   const [chatWidth, setChatWidth] = useState(430);
+  const [rightPanelTab, setRightPanelTab] = useState<RightPanelTab>("chat");
+  const [codeTasks, setCodeTasks] = useState<CodeTaskRecord[]>(storedCodeTasks);
+  const [activeCodeTaskId, setActiveCodeTaskId] = useState<string | null>(storedCodeTasks[0]?.id ?? null);
+  const [codeTaskWorkspace, setCodeTaskWorkspace] = useState(storedCodeTasks[0]?.workspacePath ?? DEFAULT_CODE_TASK_WORKSPACE);
+  const [codeTaskInput, setCodeTaskInput] = useState("");
+  const [codeTaskAutoApprove, setCodeTaskAutoApprove] = useState(false);
+  const [codeTaskRunning, setCodeTaskRunning] = useState(false);
+  const [codeTaskStatus, setCodeTaskStatus] = useState(storedCodeTasks[0]?.status ?? "idle");
+  const [codeTaskMessages, setCodeTaskMessages] = useState<CodeTaskMessage[]>(storedCodeTasks[0]?.messages ?? []);
   const [openSections, setOpenSections] = useState<Record<ConfigSection, boolean>>({
     profile: false,
     model: false,
@@ -841,6 +1089,15 @@ export default function App() {
   const live2dRef = useRef<Live2DStageHandle | null>(null);
   const activeLive2DModelRef = useRef<Live2DModelRecord>(DEFAULT_LIVE2D_MODEL);
   const abortRef = useRef<AbortController | null>(null);
+  const codeTaskAbortRef = useRef<AbortController | null>(null);
+  const codeTaskAssistantMessageIdRef = useRef<string | null>(null);
+  const codeTaskFlushTimerRef = useRef<number | null>(null);
+  const pendingCodeTaskAssistantDeltaRef = useRef("");
+  const pendingCodeTaskMessagesRef = useRef<Array<Omit<CodeTaskMessage, "id" | "createdAt">>>([]);
+  const lastCodeTaskStatusMessageRef = useRef("");
+  const codeTaskMessagesRef = useRef<CodeTaskMessage[]>(storedCodeTasks[0]?.messages ?? []);
+  const codeTaskCompletedRef = useRef(false);
+  const codeTaskFinalStatusRef = useRef("");
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const audioQueueRef = useRef<AudioQueueItem[]>([]);
   const audioPlayingRef = useRef(false);
@@ -848,11 +1105,22 @@ export default function App() {
   const textRevealTokenRef = useRef(0);
   const floatingMessageRef = useRef<HTMLDivElement | null>(null);
   const chatMessageRef = useRef<HTMLDivElement | null>(null);
+  const taskMessageRef = useRef<HTMLDivElement | null>(null);
   const saveSettingsTimerRef = useRef<number | null>(null);
 
   const selectedProvider = providers.find((provider) => provider.name === modelSettings.providerName);
   const canSend = (input.trim().length > 0 || uploadedFiles.length > 0) && !isStreaming;
+  const canStartCodeTask = codeTaskInput.trim().length > 0 && !codeTaskRunning;
   const visibleMessages = messages.filter((message) => message.content || message.streaming).slice(-8);
+  const activeCodeTask = codeTasks.find((task) => task.id === activeCodeTaskId) ?? null;
+  const visibleCodeTasks = useMemo(
+    () => [...codeTasks].sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime()),
+    [codeTasks]
+  );
+  const codeTaskPhases = useMemo(
+    () => buildCodeTaskPhases(codeTaskMessages, codeTaskRunning),
+    [codeTaskMessages, codeTaskRunning]
+  );
   const filteredConversations = useMemo(() => {
     const keyword = historySearch.trim().toLowerCase();
     if (!keyword) {
@@ -987,9 +1255,43 @@ export default function App() {
   }, [modelSettings, voiceSettings, mode, storageOnline]);
 
   useEffect(() => {
+    localStorage.setItem(CODE_TASK_HISTORY_STORAGE_KEY, JSON.stringify(codeTasks.slice(0, CODE_TASK_MAX_HISTORY)));
+  }, [codeTasks]);
+
+  useEffect(() => {
+    codeTaskMessagesRef.current = codeTaskMessages;
+  }, [codeTaskMessages]);
+
+  useEffect(() => {
+    if (!activeCodeTaskId) {
+      return;
+    }
+    const now = new Date().toISOString();
+    setCodeTasks((prev) =>
+      prev
+        .map((task) =>
+          task.id === activeCodeTaskId
+            ? {
+                ...task,
+                workspacePath: codeTaskWorkspace,
+                status: codeTaskStatus,
+                messages: trimCodeTaskMessages(codeTaskMessages),
+                updatedAt: now
+              }
+            : task
+        )
+        .sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime())
+        .slice(0, CODE_TASK_MAX_HISTORY)
+    );
+  }, [activeCodeTaskId, codeTaskMessages, codeTaskStatus, codeTaskWorkspace]);
+
+  useEffect(() => {
     return () => {
       if (saveSettingsTimerRef.current !== null) {
         window.clearTimeout(saveSettingsTimerRef.current);
+      }
+      if (codeTaskFlushTimerRef.current !== null) {
+        window.clearTimeout(codeTaskFlushTimerRef.current);
       }
     };
   }, []);
@@ -1007,6 +1309,10 @@ export default function App() {
     floatingMessageRef.current?.scrollTo({ top: floatingMessageRef.current.scrollHeight, behavior: "smooth" });
     chatMessageRef.current?.scrollTo({ top: chatMessageRef.current.scrollHeight, behavior: "smooth" });
   }, [messages, chatOpen]);
+
+  useEffect(() => {
+    taskMessageRef.current?.scrollTo({ top: taskMessageRef.current.scrollHeight, behavior: "auto" });
+  }, [codeTaskMessages, rightPanelTab, chatOpen]);
 
   function applyProvider(name: string) {
     const provider = providers.find((item) => item.name === name);
@@ -1248,6 +1554,7 @@ export default function App() {
     setUploadedFiles([]);
     setStatus("idle");
     setIsStreaming(false);
+    setRightPanelTab("chat");
     setChatOpen(true);
   }
 
@@ -1863,6 +2170,439 @@ export default function App() {
     setMessages((prev) => prev.map((message) => ({ ...message, streaming: false })));
   }
 
+  function openTaskPanel() {
+    setRightPanelTab("tasks");
+    setChatOpen(true);
+  }
+
+  function updateCodeTaskRecord(taskId: string, updater: (task: CodeTaskRecord) => CodeTaskRecord) {
+    setCodeTasks((prev) =>
+      prev
+        .map((task) => (task.id === taskId ? updater(task) : task))
+        .sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime())
+        .slice(0, CODE_TASK_MAX_HISTORY)
+    );
+  }
+
+  function openCodeTaskRecord(task: CodeTaskRecord) {
+    if (codeTaskRunning && task.id !== activeCodeTaskId) {
+      return;
+    }
+    clearPendingCodeTaskFlush();
+    setActiveCodeTaskId(task.id);
+    setCodeTaskWorkspace(task.workspacePath);
+    setCodeTaskStatus(task.status);
+    setCodeTaskMessages(task.messages);
+    codeTaskMessagesRef.current = task.messages;
+    setCodeTaskInput("");
+    codeTaskAssistantMessageIdRef.current = null;
+    openTaskPanel();
+  }
+
+  function startNewCodeTaskDraft() {
+    codeTaskAbortRef.current?.abort();
+    clearPendingCodeTaskFlush();
+    codeTaskAssistantMessageIdRef.current = null;
+    setActiveCodeTaskId(null);
+    setCodeTaskMessages([]);
+    codeTaskMessagesRef.current = [];
+    setCodeTaskInput("");
+    setCodeTaskStatus("idle");
+    setCodeTaskRunning(false);
+    openTaskPanel();
+  }
+
+  function exportCodeTaskRecord(task: CodeTaskRecord) {
+    const stamp = new Date().toISOString().slice(0, 16).replace(/[:T]/g, "-");
+    downloadText(`${sanitizeFilename(task.title)}-${stamp}.md`, codeTaskToMarkdown(task));
+  }
+
+  function deleteCodeTaskRecord(task: CodeTaskRecord) {
+    if (codeTaskRunning && task.id === activeCodeTaskId) {
+      setCodeTaskStatus("请先停止当前任务");
+      return;
+    }
+    const confirmed = window.confirm(`删除任务「${task.title}」？`);
+    if (!confirmed) {
+      return;
+    }
+    setCodeTasks((prev) => prev.filter((item) => item.id !== task.id));
+    if (task.id === activeCodeTaskId) {
+      const nextTask = codeTasks.find((item) => item.id !== task.id) ?? null;
+      setActiveCodeTaskId(nextTask?.id ?? null);
+      setCodeTaskMessages(nextTask?.messages ?? []);
+      codeTaskMessagesRef.current = nextTask?.messages ?? [];
+      setCodeTaskWorkspace(nextTask?.workspacePath ?? DEFAULT_CODE_TASK_WORKSPACE);
+      setCodeTaskStatus(nextTask?.status ?? "idle");
+    }
+  }
+
+  async function chooseCodeTaskFolder() {
+    try {
+      const selected = await window.amadeusDesktop?.selectFolder?.();
+      if (selected) {
+        setCodeTaskWorkspace(selected);
+        return;
+      }
+    } catch (error) {
+      setCodeTaskStatus(error instanceof Error ? error.message : "folder picker failed");
+      return;
+    }
+    const manualPath = window.prompt("输入要交给 OpenCode 的文件夹路径", codeTaskWorkspace);
+    if (manualPath !== null) {
+      setCodeTaskWorkspace(manualPath.trim());
+    }
+  }
+
+  function appendCodeTaskMessage(message: Omit<CodeTaskMessage, "id" | "createdAt">) {
+    pendingCodeTaskMessagesRef.current.push({
+      ...message,
+      text: limitCodeTaskText(message.text, message.kind === "user" ? CODE_TASK_MAX_ASSISTANT_TEXT : CODE_TASK_MAX_DETAIL_TEXT),
+      detail: message.detail ? limitCodeTaskText(message.detail) : undefined
+    });
+    scheduleCodeTaskFlush();
+  }
+
+  function appendCodeTaskAssistantDelta(text: string) {
+    if (!text) {
+      return;
+    }
+    pendingCodeTaskAssistantDeltaRef.current += text;
+    scheduleCodeTaskFlush();
+  }
+
+  function clearPendingCodeTaskFlush() {
+    pendingCodeTaskAssistantDeltaRef.current = "";
+    pendingCodeTaskMessagesRef.current = [];
+    lastCodeTaskStatusMessageRef.current = "";
+    if (codeTaskFlushTimerRef.current !== null) {
+      window.clearTimeout(codeTaskFlushTimerRef.current);
+      codeTaskFlushTimerRef.current = null;
+    }
+  }
+
+  function scheduleCodeTaskFlush() {
+    if (codeTaskFlushTimerRef.current !== null) {
+      return;
+    }
+    codeTaskFlushTimerRef.current = window.setTimeout(flushCodeTaskUpdates, CODE_TASK_FLUSH_INTERVAL_MS);
+  }
+
+  function flushCodeTaskUpdates() {
+    codeTaskFlushTimerRef.current = null;
+    const assistantDelta = pendingCodeTaskAssistantDeltaRef.current;
+    const queuedMessages = pendingCodeTaskMessagesRef.current;
+    pendingCodeTaskAssistantDeltaRef.current = "";
+    pendingCodeTaskMessagesRef.current = [];
+    if (!assistantDelta && queuedMessages.length === 0) {
+      return;
+    }
+    let next = codeTaskMessagesRef.current;
+    const targetId = codeTaskAssistantMessageIdRef.current;
+    if (assistantDelta) {
+      if (targetId && next.some((message) => message.id === targetId)) {
+        next = next.map((message) =>
+          message.id === targetId
+            ? {
+                ...message,
+                text: appendLimitedCodeTaskText(message.text, assistantDelta)
+              }
+            : message
+        );
+      } else {
+        const id = createId();
+        codeTaskAssistantMessageIdRef.current = id;
+        next = [
+          ...next,
+          {
+            id,
+            kind: "assistant",
+            title: "OpenCode",
+            text: appendLimitedCodeTaskText("", assistantDelta),
+            createdAt: new Date().toISOString()
+          }
+        ];
+      }
+    }
+    if (queuedMessages.length > 0) {
+      const createdAt = new Date().toISOString();
+      next = [
+        ...next,
+        ...queuedMessages.map((message) => ({
+          ...message,
+          id: createId(),
+          createdAt
+        }))
+      ];
+    }
+    const trimmed = trimCodeTaskMessages(next);
+    codeTaskMessagesRef.current = trimmed;
+    setCodeTaskMessages(trimmed);
+  }
+
+  function handleCodeTaskEvent(event: CodeTaskEvent, taskId = activeCodeTaskId) {
+    if (event.event === "output") {
+      appendCodeTaskAssistantDelta(event.payload.text);
+      return;
+    }
+    if (event.event === "status") {
+      const nextStatus = event.payload.status || event.payload.message || "running";
+      const statusMessage = event.payload.message || `OpenCode 状态：${nextStatus}`;
+      setCodeTaskStatus(nextStatus);
+      if (statusMessage !== lastCodeTaskStatusMessageRef.current) {
+        lastCodeTaskStatusMessageRef.current = statusMessage;
+        appendCodeTaskMessage({ kind: "status", title: "状态", text: statusMessage });
+      }
+      return;
+    }
+    if (event.event === "session") {
+      setCodeTaskStatus("session");
+      if (taskId) {
+        updateCodeTaskRecord(taskId, (task) => ({
+          ...task,
+          sessionId: event.payload.sessionId,
+          workspacePath: event.payload.workspacePath || task.workspacePath,
+          updatedAt: new Date().toISOString()
+        }));
+      }
+      appendCodeTaskMessage({
+        kind: "status",
+        title: "会话",
+        text: `OpenCode 会话已创建：${event.payload.sessionId}`,
+        detail: event.payload.workspacePath
+      });
+      return;
+    }
+    if (event.event === "tool") {
+      appendCodeTaskMessage({
+        kind: "tool",
+        title: event.payload.name || "工具",
+        text: event.payload.message || `工具状态：${event.payload.status || "running"}`,
+        detail: event.payload.detail
+      });
+      return;
+    }
+    if (event.event === "command") {
+      appendCodeTaskMessage({
+        kind: "command",
+        title: event.payload.status === "started" ? "命令开始" : "命令完成",
+        text: event.payload.message || event.payload.command || "命令事件",
+        detail: event.payload.output
+      });
+      return;
+    }
+    if (event.event === "file") {
+      appendCodeTaskMessage({
+        kind: "file",
+        title: "文件",
+        text: event.payload.message || event.payload.path || "文件变更"
+      });
+      return;
+    }
+    if (event.event === "permission") {
+      appendCodeTaskMessage({
+        kind: "permission",
+        title: event.payload.approved ? "权限已批准" : "权限请求",
+        text: event.payload.message || event.payload.action || "OpenCode 请求权限",
+        detail: Array.isArray(event.payload.resources) ? event.payload.resources.map(String).join("\n") : undefined
+      });
+      return;
+    }
+    if (event.event === "diff") {
+      appendCodeTaskMessage({
+        kind: "file",
+        title: "Diff",
+        text: event.payload.message || "OpenCode 生成了文件差异。",
+        detail: event.payload.diff ? JSON.stringify(event.payload.diff, null, 2) : undefined
+      });
+      return;
+    }
+    if (event.event === "log") {
+      appendCodeTaskMessage({
+        kind: "status",
+        title: event.payload.kind || "日志",
+        text: event.payload.message || ""
+      });
+      return;
+    }
+    if (event.event === "error") {
+      setCodeTaskStatus("error");
+      appendCodeTaskMessage({ kind: "error", title: "错误", text: event.payload.message });
+      return;
+    }
+    if (event.event === "done") {
+      codeTaskCompletedRef.current = true;
+      codeTaskFinalStatusRef.current = event.payload.status || "done";
+      if (taskId && event.payload.sessionId) {
+        updateCodeTaskRecord(taskId, (task) => ({
+          ...task,
+          sessionId: event.payload.sessionId,
+          workspacePath: event.payload.workspacePath || task.workspacePath,
+          updatedAt: new Date().toISOString()
+        }));
+      }
+      setCodeTaskStatus(event.payload.status || "done");
+      appendCodeTaskMessage({
+        kind: "done",
+        title: "完成",
+        text: event.payload.message || "OpenCode 任务已结束。"
+      });
+    }
+  }
+
+  async function finalizeCodeTaskSummary(taskId: string, finalStatus: string) {
+    flushCodeTaskUpdates();
+    const messages = codeTaskMessagesRef.current;
+    const task =
+      codeTasks.find((item) => item.id === taskId) ??
+      ({
+        id: taskId,
+        title: buildConversationTitle(messages.find((message) => message.kind === "user")?.text ?? "OpenCode 任务"),
+        prompt: messages.find((message) => message.kind === "user")?.text ?? "",
+        workspacePath: codeTaskWorkspace,
+        status: finalStatus,
+        messages,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString()
+      } satisfies CodeTaskRecord);
+    const summary = buildCodeTaskSummaryText({ ...task, status: finalStatus || task.status }, messages);
+    const createdAt = new Date().toISOString();
+    const summaryMessage: CodeTaskMessage = {
+      id: createId(),
+      kind: "done",
+      title: "任务总结",
+      text: summary,
+      createdAt
+    };
+    const nextMessages = trimCodeTaskMessages([...messages, summaryMessage]);
+    codeTaskMessagesRef.current = nextMessages;
+    setCodeTaskMessages(nextMessages);
+    updateCodeTaskRecord(taskId, (current) => ({
+      ...current,
+      status: finalStatus || current.status,
+      messages: nextMessages,
+      summary,
+      updatedAt: createdAt
+    }));
+
+    try {
+      const voiceResult = await synthesizeTaskSummaryVoice({
+        summary,
+        model: modelSettings,
+        voice: voiceSettings
+      });
+      enqueueAudio({ url: voiceResult.audioUrl, displayText: voiceResult.speechText || summary });
+      updateCodeTaskRecord(taskId, (current) => ({
+        ...current,
+        summarySpeechText: voiceResult.speechText || current.summarySpeechText,
+        summaryAudioUrl: voiceResult.audioUrl,
+        updatedAt: new Date().toISOString()
+      }));
+    } catch (error) {
+      appendCodeTaskMessage({
+        kind: "status",
+        title: "语音",
+        text: `任务总结语音生成失败：${error instanceof Error ? error.message : "voice error"}`
+      });
+    }
+  }
+
+  async function sendCodeTask(event?: FormEvent) {
+    event?.preventDefault();
+    const prompt = codeTaskInput.trim();
+    if (!prompt || codeTaskRunning) {
+      return;
+    }
+
+    const existingTask = activeCodeTaskId ? codeTasks.find((task) => task.id === activeCodeTaskId) ?? null : null;
+    const shouldCreateTask = !existingTask || codeTaskMessages.length === 0;
+    const taskId = shouldCreateTask ? createId() : existingTask.id;
+    const title = shouldCreateTask ? buildConversationTitle(prompt) : existingTask.title;
+    const sessionId = shouldCreateTask ? undefined : existingTask.sessionId;
+    const workspacePath = codeTaskWorkspace.trim();
+    const now = new Date().toISOString();
+
+    codeTaskAbortRef.current?.abort();
+    clearPendingCodeTaskFlush();
+    codeTaskAssistantMessageIdRef.current = null;
+    codeTaskCompletedRef.current = false;
+    codeTaskFinalStatusRef.current = "";
+    const controller = new AbortController();
+    codeTaskAbortRef.current = controller;
+    if (shouldCreateTask) {
+      const newTask: CodeTaskRecord = {
+        id: taskId,
+        title,
+        prompt,
+        workspacePath,
+        status: "connecting",
+        messages: [],
+        createdAt: now,
+        updatedAt: now
+      };
+      setCodeTasks((prev) => [newTask, ...prev].slice(0, CODE_TASK_MAX_HISTORY));
+      setCodeTaskMessages([]);
+      codeTaskMessagesRef.current = [];
+    } else {
+      updateCodeTaskRecord(taskId, (task) => ({
+        ...task,
+        workspacePath,
+        status: "connecting",
+        updatedAt: now
+      }));
+    }
+    setActiveCodeTaskId(taskId);
+    setCodeTaskRunning(true);
+    setCodeTaskStatus("connecting");
+    openTaskPanel();
+    appendCodeTaskMessage({
+      kind: "user",
+      title: "任务",
+      text: prompt,
+      detail: codeTaskWorkspace.trim() || "当前后端工作区"
+    });
+    setCodeTaskInput("");
+
+    try {
+      await streamCodeTask({
+        title,
+        prompt,
+        workspacePath,
+        sessionId,
+        autoApprove: codeTaskAutoApprove,
+        timeoutSeconds: 1800,
+        signal: controller.signal,
+        onEvent: (streamEvent) => handleCodeTaskEvent(streamEvent, taskId)
+      });
+    } catch (error) {
+      if (!controller.signal.aborted) {
+        appendCodeTaskMessage({
+          kind: "error",
+          title: "错误",
+          text: error instanceof Error ? error.message : "OpenCode task failed"
+        });
+        setCodeTaskStatus("error");
+      }
+    } finally {
+      flushCodeTaskUpdates();
+      setCodeTaskRunning(false);
+      codeTaskAbortRef.current = null;
+      codeTaskAssistantMessageIdRef.current = null;
+      if (codeTaskCompletedRef.current && !controller.signal.aborted) {
+        await finalizeCodeTaskSummary(taskId, codeTaskFinalStatusRef.current || "done");
+      }
+      codeTaskCompletedRef.current = false;
+      codeTaskFinalStatusRef.current = "";
+    }
+  }
+
+  function stopCodeTask() {
+    codeTaskAbortRef.current?.abort();
+    setCodeTaskRunning(false);
+    setCodeTaskStatus("stopped");
+    appendCodeTaskMessage({ kind: "status", title: "停止", text: "已停止等待 OpenCode 任务。" });
+  }
+
   async function testVoice() {
     setVoiceBusy(true);
     setStatus("voice");
@@ -2109,6 +2849,182 @@ export default function App() {
     );
   }
 
+  function codeTaskIcon(message: CodeTaskMessage) {
+    if (message.kind === "user") {
+      return <UserRound size={14} />;
+    }
+    if (message.kind === "assistant") {
+      return <Bot size={14} />;
+    }
+    if (message.kind === "tool") {
+      return <Wrench size={14} />;
+    }
+    if (message.kind === "command") {
+      return <Play size={14} />;
+    }
+    if (message.kind === "file") {
+      return <BookOpenText size={14} />;
+    }
+    if (message.kind === "permission") {
+      return <Lock size={14} />;
+    }
+    if (message.kind === "error") {
+      return <XCircle size={14} />;
+    }
+    if (message.kind === "done") {
+      return <CheckCircle2 size={14} />;
+    }
+    return <CircleDashed size={14} />;
+  }
+
+  function renderCodeTaskMessage(message: CodeTaskMessage) {
+    return (
+      <article className={`code-task-message is-${message.kind}`} key={message.id}>
+        <span className="code-task-message-icon">{codeTaskIcon(message)}</span>
+        <div className="code-task-message-body">
+          <div className="code-task-message-head">
+            <strong>{message.title || (message.kind === "assistant" ? "OpenCode" : "事件")}</strong>
+            <time dateTime={message.createdAt}>{formatMessageTime(message.createdAt)}</time>
+          </div>
+          <p>{message.text}</p>
+          {message.detail && <pre>{message.detail}</pre>}
+        </div>
+      </article>
+    );
+  }
+
+  function codeTaskPhaseIcon(phase: CodeTaskPhase) {
+    if (phase.status === "running") {
+      return <CircleDashed className="phase-spinner" size={15} />;
+    }
+    if (phase.status === "error") {
+      return <XCircle size={15} />;
+    }
+    return <CheckCircle2 size={15} />;
+  }
+
+  function renderCodeTaskPhaseMessage(message: CodeTaskMessage) {
+    const textLimit = message.kind === "assistant" ? 4200 : 1400;
+    return (
+      <div className={`code-task-phase-event is-${message.kind}`} key={message.id}>
+        <span className="code-task-phase-event-icon">{codeTaskIcon(message)}</span>
+        <div className="code-task-phase-event-body">
+          <div className="code-task-phase-event-head">
+            <strong>{message.title || (message.kind === "assistant" ? "OpenCode" : "事件")}</strong>
+            <time dateTime={message.createdAt}>{formatMessageTime(message.createdAt)}</time>
+          </div>
+          <p>{limitCodeTaskText(message.text, textLimit)}</p>
+          {message.detail && <pre>{limitCodeTaskText(message.detail, 2200)}</pre>}
+        </div>
+      </div>
+    );
+  }
+
+  function renderCodeTaskPhase(phase: CodeTaskPhase) {
+    const hiddenCount = Math.max(0, phase.messages.length - 10);
+    const visiblePhaseMessages = phase.messages.slice(-10);
+    return (
+      <details
+        className={`code-task-phase is-${phase.status}`}
+        key={phase.id}
+        open={phase.status === "running" || phase.id === "result"}
+      >
+        <summary>
+          <span className="code-task-phase-icon">{codeTaskPhaseIcon(phase)}</span>
+          <span className="code-task-phase-title">{phase.title}</span>
+          <small>{phase.status === "running" ? "进行中" : phase.status === "error" ? "异常" : "已完成"}</small>
+        </summary>
+        <div className="code-task-phase-body">
+          {hiddenCount > 0 && <span className="code-task-phase-hidden">已折叠 {hiddenCount} 条较早事件</span>}
+          {visiblePhaseMessages.map(renderCodeTaskPhaseMessage)}
+        </div>
+      </details>
+    );
+  }
+
+  function renderTaskPanel() {
+    return (
+      <>
+        <div className="code-task-workspace">
+          <div className="code-task-current">
+            <strong>{activeCodeTask?.title ?? "新 OpenCode 任务"}</strong>
+            <small>
+              {activeCodeTask?.sessionId
+                ? `session ${activeCodeTask.sessionId}`
+                : activeCodeTask
+                  ? "等待 OpenCode 会话"
+                  : "输入任务后创建历史记录"}
+            </small>
+          </div>
+          <label className="field">
+            <span>工作目录</span>
+            <div className="folder-field">
+              <input
+                value={codeTaskWorkspace}
+                onChange={(event) => setCodeTaskWorkspace(event.target.value)}
+                placeholder="留空则使用后端当前工作区"
+              />
+              <button className="icon-button" onClick={() => void chooseCodeTaskFolder()} type="button" aria-label="选择文件夹">
+                <FolderOpen size={16} />
+              </button>
+            </div>
+          </label>
+          <label className="code-task-approval">
+            <input
+              checked={codeTaskAutoApprove}
+              onChange={(event) => setCodeTaskAutoApprove(event.target.checked)}
+              type="checkbox"
+            />
+            <span>允许 OpenCode 修改文件和执行命令</span>
+          </label>
+        </div>
+
+        <div className="code-task-list" ref={taskMessageRef}>
+          {codeTaskMessages.length === 0 && (
+            <div className="empty-state">
+              <Bell size={24} />
+              <span>暂无任务</span>
+            </div>
+          )}
+          {codeTaskPhases.map(renderCodeTaskPhase)}
+        </div>
+
+        <form className="code-task-composer" onSubmit={sendCodeTask}>
+          <textarea
+            value={codeTaskInput}
+            onChange={(event) => setCodeTaskInput(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+                event.preventDefault();
+                void sendCodeTask();
+              }
+            }}
+            placeholder="输入要交给 OpenCode 完成的任务"
+            rows={4}
+          />
+          <div className="composer-actions">
+            <div className="composer-left-actions">
+              <button className="text-icon-button" onClick={startNewCodeTaskDraft} type="button">
+                <Plus size={16} />
+                新建任务
+              </button>
+              <span className={`code-task-status ${codeTaskRunning ? "is-live" : ""}`}>{codeTaskStatus}</span>
+            </div>
+            {codeTaskRunning ? (
+              <button className="send-button" onClick={stopCodeTask} type="button">
+                <CircleStop size={18} />
+              </button>
+            ) : (
+              <button className="send-button" disabled={!canStartCodeTask} type="submit">
+                <Send size={18} />
+              </button>
+            )}
+          </div>
+        </form>
+      </>
+    );
+  }
+
   return (
     <main
       className={[
@@ -2218,7 +3134,7 @@ export default function App() {
               <MessageCircle size={17} />
               聊天记录
             </button>
-            <button className="dock-nav-item" type="button">
+            <button className="dock-nav-item" onClick={openTaskPanel} type="button">
               <Bell size={17} />
               任务
             </button>
@@ -2299,19 +3215,55 @@ export default function App() {
             ))}
           </section>
 
-          <section className="dock-section">
+          <section className="dock-section code-task-history-section">
             <div className="section-title">
               <BookOpenText size={14} />
               任务
             </div>
-            <button className="task-item" type="button">
-              <span>Agent 工具注册</span>
-              <small>pending</small>
+            <button className="dock-action" onClick={startNewCodeTaskDraft} type="button">
+              <Plus size={16} />
+              新建任务
             </button>
-            <button className="task-item" type="button">
-              <span>长期记忆接口</span>
-              <small>planned</small>
-            </button>
+            {visibleCodeTasks.length === 0 && (
+              <button className="task-item" onClick={openTaskPanel} type="button">
+                <span>暂无历史任务</span>
+                <small>new</small>
+              </button>
+            )}
+            {visibleCodeTasks.map((task) => (
+              <div className={`history-row ${task.id === activeCodeTaskId ? "is-current" : ""}`} key={task.id}>
+                <button
+                  className={`task-item ${task.id === activeCodeTaskId ? "is-current" : ""}`}
+                  disabled={codeTaskRunning && task.id !== activeCodeTaskId}
+                  onClick={() => openCodeTaskRecord(task)}
+                  type="button"
+                >
+                  <span>{task.title}</span>
+                  <small>{task.id === activeCodeTaskId ? codeTaskStatus : formatHistoryTime(task.updatedAt)}</small>
+                </button>
+                <div className="history-actions" aria-label={`${task.title} 操作`}>
+                  <button
+                    className="history-icon-button"
+                    onClick={() => exportCodeTaskRecord(task)}
+                    title="导出"
+                    type="button"
+                    aria-label={`导出 ${task.title}`}
+                  >
+                    <Download size={14} />
+                  </button>
+                  <button
+                    className="history-icon-button is-danger"
+                    disabled={codeTaskRunning && task.id === activeCodeTaskId}
+                    onClick={() => deleteCodeTaskRecord(task)}
+                    title="删除"
+                    type="button"
+                    aria-label={`删除 ${task.title}`}
+                  >
+                    <Trash2 size={14} />
+                  </button>
+                </div>
+              </div>
+            ))}
           </section>
         </div>
       </aside>
@@ -2603,72 +3555,98 @@ export default function App() {
         />
         <div className="chat-head">
           <div>
-            <span className="eyebrow">Session</span>
-            <h2>{currentConversation?.title ?? "Kurisu"}</h2>
+            <span className="eyebrow">{rightPanelTab === "chat" ? "Session" : "Task"}</span>
+            <h2>{rightPanelTab === "chat" ? currentConversation?.title ?? "Kurisu" : "OpenCode 任务"}</h2>
           </div>
-          <div className={`status-pill ${isStreaming ? "is-live" : ""}`}>{status}</div>
+          <div className="right-panel-tabs" aria-label="右侧面板">
+            <button
+              className={rightPanelTab === "chat" ? "is-active" : ""}
+              onClick={() => setRightPanelTab("chat")}
+              type="button"
+            >
+              <MessageCircle size={14} />
+              对话
+            </button>
+            <button
+              className={rightPanelTab === "tasks" ? "is-active" : ""}
+              onClick={() => setRightPanelTab("tasks")}
+              type="button"
+            >
+              <Bell size={14} />
+              任务
+            </button>
+          </div>
+          <div className={`status-pill ${rightPanelTab === "chat" ? (isStreaming ? "is-live" : "") : codeTaskRunning ? "is-live" : ""}`}>
+            {rightPanelTab === "chat" ? status : codeTaskStatus}
+          </div>
           <button className="icon-button" onClick={() => setChatOpen(false)} type="button" aria-label="收起对话栏">
             <ChevronRight size={18} />
           </button>
         </div>
 
-        <div className="message-list" ref={chatMessageRef}>
-          {messages.length === 0 && (
-            <div className="empty-state">
-              <MessageCircle size={24} />
-              <span>待机</span>
+        {rightPanelTab === "chat" ? (
+          <>
+            <div className="message-list" ref={chatMessageRef}>
+              {messages.length === 0 && (
+                <div className="empty-state">
+                  <MessageCircle size={24} />
+                  <span>待机</span>
+                </div>
+              )}
+              {messages.map((message) => renderMessageBubble(message, "panel"))}
             </div>
-          )}
-          {messages.map((message) => renderMessageBubble(message, "panel"))}
-        </div>
 
-        <form className={`composer ${uploadedFiles.length > 0 ? "has-attachments" : ""}`} onSubmit={sendMessage}>
-          {renderUploadPanel()}
-          {renderUploadedFiles()}
-          <textarea
-            value={input}
-            onChange={(event) => setInput(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === "Enter" && !event.shiftKey) {
-                event.preventDefault();
-                void sendMessage();
-              }
-            }}
-            placeholder="输入消息"
-            rows={3}
-          />
-          <div className="composer-actions">
-            <div className="composer-left-actions">
-              <button
-                className={`round-tool composer-upload upload-trigger ${uploadPanelOpen ? "is-active" : ""} ${uploadBusy ? "is-busy" : ""}`}
-                disabled={uploadBusy}
-                onClick={toggleUploadPanel}
-                type="button"
-                aria-label="上传文件"
-                title="上传文件"
-              >
-                <Plus size={18} />
-              </button>
-              <button
-                className={`text-icon-button ${voiceSettings.autoPlay ? "is-active" : ""}`}
-                onClick={toggleAutoVoice}
-                type="button"
-              >
-                {voiceSettings.autoPlay ? <Volume2 size={16} /> : <VolumeX size={16} />}
-                语音
-              </button>
-            </div>
-            {isStreaming ? (
-              <button className="send-button" onClick={stopStreaming} type="button">
-                <CircleStop size={18} />
-              </button>
-            ) : (
-              <button className="send-button" disabled={!canSend} type="submit">
-                <Send size={18} />
-              </button>
-            )}
-          </div>
-        </form>
+            <form className={`composer ${uploadedFiles.length > 0 ? "has-attachments" : ""}`} onSubmit={sendMessage}>
+              {renderUploadPanel()}
+              {renderUploadedFiles()}
+              <textarea
+                value={input}
+                onChange={(event) => setInput(event.target.value)}
+                onKeyDown={(event) => {
+                  if (event.key === "Enter" && !event.shiftKey) {
+                    event.preventDefault();
+                    void sendMessage();
+                  }
+                }}
+                placeholder="输入消息"
+                rows={3}
+              />
+              <div className="composer-actions">
+                <div className="composer-left-actions">
+                  <button
+                    className={`round-tool composer-upload upload-trigger ${uploadPanelOpen ? "is-active" : ""} ${uploadBusy ? "is-busy" : ""}`}
+                    disabled={uploadBusy}
+                    onClick={toggleUploadPanel}
+                    type="button"
+                    aria-label="上传文件"
+                    title="上传文件"
+                  >
+                    <Plus size={18} />
+                  </button>
+                  <button
+                    className={`text-icon-button ${voiceSettings.autoPlay ? "is-active" : ""}`}
+                    onClick={toggleAutoVoice}
+                    type="button"
+                  >
+                    {voiceSettings.autoPlay ? <Volume2 size={16} /> : <VolumeX size={16} />}
+                    语音
+                  </button>
+                </div>
+                {isStreaming ? (
+                  <button className="send-button" onClick={stopStreaming} type="button">
+                    <CircleStop size={18} />
+                  </button>
+                ) : (
+                  <button className="send-button" disabled={!canSend} type="submit">
+                    <Send size={18} />
+                  </button>
+                )}
+              </div>
+            </form>
+          </>
+        ) : (
+          renderTaskPanel()
+        )}
       </aside>
 
       {!enteredApp && <BootLoader ready={loadingReady} onEnter={() => setEnteredApp(true)} />}

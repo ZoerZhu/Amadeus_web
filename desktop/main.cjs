@@ -1,4 +1,4 @@
-const { app, BrowserWindow, dialog } = require("electron");
+const { app, BrowserWindow, dialog, ipcMain } = require("electron");
 const { spawn } = require("child_process");
 const fs = require("fs");
 const path = require("path");
@@ -107,6 +107,16 @@ function stopBackend() {
 
 app.whenReady().then(async () => {
   try {
+    ipcMain.handle("amadeus:select-folder", async () => {
+      const result = await dialog.showOpenDialog(mainWindow || undefined, {
+        title: "选择 OpenCode 工作目录",
+        properties: ["openDirectory", "createDirectory"],
+      });
+      if (result.canceled || result.filePaths.length === 0) {
+        return null;
+      }
+      return result.filePaths[0];
+    });
     startBackend();
     await createWindow();
   } catch (error) {

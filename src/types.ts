@@ -137,3 +137,28 @@ export type StreamEvent =
   | { event: "voice_error"; payload: { message: string; index?: number } }
   | { event: "error"; payload: { message: string } }
   | { event: "done"; payload: { text: string } };
+
+export interface CodeTaskStreamRequest {
+  title?: string;
+  prompt: string;
+  workspacePath: string;
+  agent?: string;
+  providerId?: string;
+  modelId?: string;
+  sessionId?: string;
+  autoApprove?: boolean;
+  timeoutSeconds?: number;
+}
+
+export type CodeTaskEvent =
+  | { event: "session"; payload: { sessionId: string; serverUrl?: string; workspacePath?: string; title?: string } }
+  | { event: "status"; payload: { status?: string; message?: string; workspacePath?: string; sessionId?: string } }
+  | { event: "output"; payload: { text: string } }
+  | { event: "log"; payload: { kind?: string; message?: string } }
+  | { event: "tool"; payload: { status?: string; name?: string; message?: string; detail?: string } }
+  | { event: "command"; payload: { status?: string; command?: string; message?: string; output?: string } }
+  | { event: "file"; payload: { path?: string; message?: string } }
+  | { event: "diff"; payload: { message?: string; diff?: unknown[] } }
+  | { event: "permission"; payload: { requestId?: string; action?: string; resources?: unknown[]; message?: string; blocked?: boolean; approved?: boolean } }
+  | { event: "error"; payload: { message: string; requestId?: string } }
+  | { event: "done"; payload: { status?: string; message?: string; sessionId?: string; workspacePath?: string } };

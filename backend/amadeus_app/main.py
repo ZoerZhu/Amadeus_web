@@ -16,11 +16,14 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from .agent_service import capabilities_response, invoke_agent_request
 from .chat_service import resolve_chat_settings, stream_chat
+from .code_tasks.opencode_runner import stream_opencode_task
 from .domain import (
     AgentInvokeRequest,
     ChatStreamRequest,
+    CodeTaskStreamRequest,
     ConversationCreateRequest,
     SettingsSaveRequest,
+    TaskSummaryVoiceRequest,
     VoiceCloneRequest,
     VoiceSynthesisRequest,
 )
@@ -35,7 +38,7 @@ from .uploads.file_upload_service import (
     UploadValidationError,
     save_uploaded_text_file,
 )
-from .voice_service import AUDIO_DIR, clone_kurisu_voice, synthesize_for_persona
+from .voice_service import AUDIO_DIR, clone_kurisu_voice, prepare_task_summary_speech_text, synthesize_for_persona
 
 
 ROOT_DIR = Path(__file__).resolve().parents[2]
@@ -286,6 +289,19 @@ async def chat_stream(request: ChatStreamRequest) -> StreamingResponse:
     )
 
 
+@app.post("/api/code-tasks/stream")
+async def code_task_stream(request: CodeTaskStreamRequest) -> StreamingResponse:
+    return StreamingResponse(
+        stream_opencode_task(request),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
 @app.post("/api/voice/synthesize")
 async def voice_synthesize(request: VoiceSynthesisRequest) -> dict:
     provider, settings = resolve_chat_settings(
@@ -309,6 +325,38 @@ async def voice_synthesize(request: VoiceSynthesisRequest) -> dict:
     if audio is None:
         raise HTTPException(status_code=400, detail="语音服务未返回音频，请检查当前语音模型配置。")
     return {"audioUrl": audio.url}
+
+
+@app.post("/api/voice/task-summary")
+async def voice_task_summary(request: TaskSummaryVoiceRequest) -> dict:
+    provider, settings = resolve_chat_settings(
+        ChatStreamRequest(
+            messages=[],
+            personaId=request.persona_id,
+            model=request.model,
+            voice=request.voice,
+        )
+    )
+    persona = get_persona(request.persona_id)
+    try:
+        speech_text = await prepare_task_summary_speech_text(
+            summary=request.summary,
+            persona=persona,
+            model_settings=settings,
+            provider=provider,
+        )
+        audio = await synthesize_for_persona(
+            text=speech_text,
+            persona=persona,
+            voice_settings=effective_voice_settings(request.voice),
+            model_settings=settings,
+            provider=provider,
+        )
+    except Exception as error:
+        raise HTTPException(status_code=502, detail=str(error) or error.__class__.__name__) from error
+    if audio is None:
+        raise HTTPException(status_code=400, detail="语音服务未返回音频，请检查当前语音模型配置。")
+    return {"audioUrl": audio.url, "speechText": speech_text}
 
 
 @app.post("/api/voice/clone")

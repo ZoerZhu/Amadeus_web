@@ -2,6 +2,8 @@ import type {
   AgentInvokeRequest,
   AgentInvokeResponse,
   ApiChatMessage,
+  CodeTaskEvent,
+  CodeTaskStreamRequest,
   ChatMode,
   ConversationDetail,
   ConversationSummary,
@@ -167,6 +169,47 @@ export async function invokeAgent(request: Partial<AgentInvokeRequest>): Promise
   return data;
 }
 
+export async function streamCodeTask(options: CodeTaskStreamRequest & {
+  signal?: AbortSignal;
+  onEvent: (event: CodeTaskEvent) => void;
+}): Promise<void> {
+  const response = await fetch("/api/code-tasks/stream", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      title: options.title ?? "",
+      prompt: options.prompt,
+      workspacePath: options.workspacePath,
+      agent: options.agent ?? "",
+      providerId: options.providerId ?? "",
+      modelId: options.modelId ?? "",
+      sessionId: options.sessionId ?? "",
+      autoApprove: options.autoApprove ?? false,
+      timeoutSeconds: options.timeoutSeconds ?? 1800
+    }),
+    signal: options.signal
+  });
+
+  if (!response.ok || !response.body) {
+    throw new Error(`code task ${response.status}`);
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) {
+      break;
+    }
+    buffer += decoder.decode(value, { stream: true });
+    buffer = drainSseBuffer<CodeTaskEvent>(buffer, options.onEvent);
+  }
+  buffer += decoder.decode();
+  drainSseBuffer<CodeTaskEvent>(buffer, options.onEvent, true);
+}
+
 export async function uploadAgentFile(options: {
   file: File;
   device?: UploadDevice;
@@ -212,6 +255,31 @@ export async function synthesizeVoice(options: {
   return data.audioUrl;
 }
 
+export async function synthesizeTaskSummaryVoice(options: {
+  summary: string;
+  model: ModelSettings;
+  voice: VoiceSettings;
+}): Promise<{ audioUrl: string; speechText: string }> {
+  const response = await fetch("/api/voice/task-summary", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      summary: options.summary,
+      personaId: "kurisu_amadeus",
+      model: options.model,
+      voice: options.voice
+    })
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(data.detail || `task summary voice ${response.status}`);
+  }
+  return {
+    audioUrl: String(data.audioUrl || ""),
+    speechText: String(data.speechText || "")
+  };
+}
+
 export async function cloneVoice(options: {
   siliconFlowApiKey: string;
   customName: string;
@@ -229,9 +297,9 @@ export async function cloneVoice(options: {
   return data.voiceUri;
 }
 
-function drainSseBuffer(
+function drainSseBuffer<TEvent>(
   input: string,
-  onEvent: (event: StreamEvent) => void,
+  onEvent: (event: TEvent) => void,
   flush = false
 ): string {
   let buffer = input.replace(/\r\n/g, "\n");
@@ -242,16 +310,16 @@ function drainSseBuffer(
     }
     const block = buffer.slice(0, boundary);
     buffer = buffer.slice(boundary + 2);
-    emitSseBlock(block, onEvent);
+    emitSseBlock<TEvent>(block, onEvent);
   }
   if (flush && buffer.trim()) {
-    emitSseBlock(buffer, onEvent);
+    emitSseBlock<TEvent>(buffer, onEvent);
     return "";
   }
   return buffer;
 }
 
-function emitSseBlock(block: string, onEvent: (event: StreamEvent) => void): void {
+function emitSseBlock<TEvent>(block: string, onEvent: (event: TEvent) => void): void {
   const lines = block.split("\n");
   const eventLine = lines.find((line) => line.startsWith("event:"));
   const dataLines = lines
@@ -263,7 +331,7 @@ function emitSseBlock(block: string, onEvent: (event: StreamEvent) => void): voi
   }
   const event = eventLine.slice(6).trim();
   try {
-    onEvent({ event, payload: JSON.parse(dataLines.join("\n")) } as StreamEvent);
+    onEvent({ event, payload: JSON.parse(dataLines.join("\n")) } as TEvent);
   } catch {
     return;
   }

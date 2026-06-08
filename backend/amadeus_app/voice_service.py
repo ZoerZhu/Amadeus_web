@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import os
+import re
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -30,6 +31,23 @@ AUDIO_DIR.mkdir(parents=True, exist_ok=True)
 SILICONFLOW_API_BASE_URL = "https://api.siliconflow.cn/v1"
 SILICONFLOW_TTS_MODEL = "FunAudioLLM/CosyVoice2-0.5B"
 SILICONFLOW_RESPONSE_FORMAT = "mp3"
+FILE_PATH_RE = re.compile(r"(?<![\w])(?:[A-Za-z]:[\\/][^\s，。；;、]+|(?:/[\w .\-]+){2,})")
+SPEECH_FILE_EXTENSIONS = {
+    ".html": "HTML",
+    ".htm": "HTML",
+    ".css": "CSS",
+    ".js": "JavaScript",
+    ".jsx": "JSX",
+    ".ts": "TypeScript",
+    ".tsx": "TSX",
+    ".json": "JSON",
+    ".md": "Markdown",
+    ".py": "Python",
+    ".txt": "文本",
+    ".csv": "CSV",
+    ".xlsx": "Excel",
+    ".docx": "Word",
+}
 
 
 @dataclass(frozen=True)
@@ -68,6 +86,105 @@ async def synthesize_for_persona(
         model_settings=model_settings,
         provider=provider,
     )
+
+
+async def prepare_task_summary_speech_text(
+    *,
+    summary: str,
+    persona: PersonaPreset,
+    model_settings: ModelSettings,
+    provider: ModelProviderPreset,
+) -> str:
+    source = to_speech_source_text(oralize_file_paths(summary))
+    if not source:
+        return "OpenCodeのタスクは完了したわ。詳細はタスク履歴で確認して。"
+    fallback = fallback_task_summary_speech(source)
+    if not model_settings.use_remote or not provider.compatible:
+        return fallback
+    if not model_settings.api_key and model_settings.provider_name.lower() != "ollama":
+        return fallback
+
+    payload = build_chat_payload(
+        model_settings,
+        provider,
+        "fast",
+        [
+            {
+                "role": "system",
+                "content": (
+                    "你是 Amadeus 系统中的牧濑红莉栖人格。"
+                    "把输入的 OpenCode 任务总结改写成适合 TTS 朗读的自然日语播报稿。"
+                    "只输出日语正文，不要 Markdown、编号、项目符号、引号、括号、emoji 或 URL。"
+                    "语气要理性、克制、略带一点红莉栖式的锐利，但不要夸张。"
+                    "控制在 2 到 4 句。"
+                    "文件路径必须口语化描述，绝对不要逐字符朗读盘符、冒号、反斜杠或长路径；"
+                    "例如把“Amadeus 项目下 tasktest 文件夹里的 login HTML 文件”说成"
+                    "“AmadeusプロジェクトのtasktestフォルダーにあるloginのHTMLファイル”。"
+                ),
+            },
+            {"role": "user", "content": source},
+        ],
+        stream=False,
+    )
+    endpoint = f"{model_settings.base_url.rstrip('/')}/chat/completions"
+    headers = {"Content-Type": "application/json"}
+    if model_settings.api_key:
+        headers["Authorization"] = f"Bearer {model_settings.api_key}"
+
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(45.0, connect=15.0)) as client:
+            response = await client.post(endpoint, headers=headers, json=payload)
+        if response.status_code < 200 or response.status_code >= 300:
+            return fallback
+        data = response.json()
+        content = (
+            data.get("choices", [{}])[0]
+            .get("message", {})
+            .get("content", "")
+        )
+        speech_text = to_tts_input_text(clean_display_text(str(content))).strip()
+        return speech_text if has_japanese_kana(speech_text) else fallback
+    except Exception:
+        return fallback
+
+
+def oralize_file_paths(text: str) -> str:
+    def replace(match: re.Match[str]) -> str:
+        raw = match.group(0)
+        path = raw.rstrip(".,;:，。；：、")
+        return oralize_single_file_path(path) + raw[len(path) :]
+
+    return FILE_PATH_RE.sub(replace, text)
+
+
+def oralize_single_file_path(value: str) -> str:
+    normalized = value.replace("\\", "/").strip()
+    parts = [part for part in normalized.split("/") if part and not part.endswith(":")]
+    if not parts:
+        return "相关文件"
+    filename = parts[-1]
+    stem = filename
+    extension_label = ""
+    suffix = Path(filename).suffix.lower()
+    if suffix:
+        stem = filename[: -len(suffix)]
+        extension_label = SPEECH_FILE_EXTENSIONS.get(suffix, suffix.lstrip(".").upper())
+
+    project = parts[0] if parts else "项目"
+    folders = parts[1:-1]
+    folder_text = "、".join(folders[-2:])
+    file_text = f"{stem} {extension_label} 文件".strip() if extension_label else f"{stem} 文件"
+    if folder_text:
+        return f"{project} 项目下 {folder_text} 文件夹里的 {file_text}"
+    return f"{project} 项目里的 {file_text}"
+
+
+def fallback_task_summary_speech(source: str) -> str:
+    task_match = re.search(r"「([^」]{1,48})」", source)
+    task = task_match.group(1) if task_match else "今回のOpenCodeタスク"
+    has_file_change = "文件" in source or "差异" in source or "変更" in source
+    file_sentence = "変更されたファイルは画面のタスク履歴にまとめてある。" if has_file_change else "詳しいログはタスク履歴で確認できる。"
+    return f"OpenCodeのタスク、{task}は完了したわ。{file_sentence}長いパスは省略しておくから、必要なら履歴を見て。"
 
 
 async def synthesize_local_segments_for_persona(

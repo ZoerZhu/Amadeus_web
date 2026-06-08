@@ -14,7 +14,9 @@ import {
   Copy,
   Download,
   ExternalLink,
+  FolderOpen,
   KeyRound,
+  Lock,
   Menu,
   MessageCircle,
   Mic,
@@ -22,12 +24,16 @@ import {
   PanelRightClose,
   PanelRightOpen,
   Plus,
+  Play,
   Search,
   Send,
   Settings,
   SlidersHorizontal,
+  RotateCcw,
+  Smile,
   Sparkles,
   Trash2,
+  Unlock,
   UserRound,
   Volume2,
   VolumeX,
@@ -48,6 +54,18 @@ import {
   synthesizeVoice,
   uploadAgentFile
 } from "./api";
+import {
+  DEFAULT_LIVE2D_MODEL,
+  activateLive2DModel,
+  deleteImportedLive2DModel,
+  importLive2DModelFromFiles,
+  listLive2DModelHistory,
+  releaseLive2DModelRuntime,
+  updateLive2DModelTransform,
+  type Live2DControlOption,
+  type Live2DModelRecord,
+  type Live2DModelTransform
+} from "./agents/live2dImportAgent";
 import { BootLoader } from "./components/BootLoader";
 import { Live2DStage, type Live2DStageHandle } from "./components/Live2DStage";
 import type {
@@ -74,6 +92,9 @@ const EDGE_MARGIN = 18;
 const CHAT_MIN_WIDTH = 340;
 const CHAT_MAX_WIDTH = 620;
 const MIN_BOOT_DURATION_MS = 2000;
+const LIVE2D_ACTIVE_STORAGE_KEY = "amadeus-live2d-active-model-v1";
+const LIVE2D_LOCK_STORAGE_KEY = "amadeus-live2d-transform-locked-v1";
+const LIVE2D_IMPORT_INPUT_ID = "amadeus-live2d-folder-input";
 
 const DEFAULT_MODEL_SETTINGS: ModelSettings = {
   providerName: "OpenAI",
@@ -133,7 +154,7 @@ const ACCEPTED_UPLOAD_TYPES = [
   "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 ].join(",");
 
-type ConfigSection = "profile" | "model" | "voice" | "interface";
+type ConfigSection = "profile" | "model" | "voice" | "live2d" | "interface";
 type AudioQueueItem = {
   url: string;
   assistantId?: string;
@@ -795,10 +816,20 @@ export default function App() {
     profile: false,
     model: false,
     voice: false,
+    live2d: false,
     interface: false
   });
   const [status, setStatus] = useState("idle");
   const [currentEmotion, setCurrentEmotion] = useState("neutral");
+  const [live2dModels, setLive2dModels] = useState<Live2DModelRecord[]>([DEFAULT_LIVE2D_MODEL]);
+  const [activeLive2DModel, setActiveLive2DModel] = useState<Live2DModelRecord>(DEFAULT_LIVE2D_MODEL);
+  const [live2dImportBusy, setLive2dImportBusy] = useState(false);
+  const [live2dImportStatus, setLive2dImportStatus] = useState("");
+  const [live2dControlsOpen, setLive2dControlsOpen] = useState(false);
+  const [live2dControlTab, setLive2dControlTab] = useState<"expressions" | "motions">("expressions");
+  const [live2dTransformLocked, setLive2dTransformLocked] = useState(() => {
+    return localStorage.getItem(LIVE2D_LOCK_STORAGE_KEY) !== "false";
+  });
   const [isStreaming, setIsStreaming] = useState(false);
   const [speaking, setSpeaking] = useState(false);
   const [voiceBusy, setVoiceBusy] = useState(false);
@@ -808,6 +839,7 @@ export default function App() {
   const [minimumBootElapsed, setMinimumBootElapsed] = useState(false);
   const [enteredApp, setEnteredApp] = useState(false);
   const live2dRef = useRef<Live2DStageHandle | null>(null);
+  const activeLive2DModelRef = useRef<Live2DModelRecord>(DEFAULT_LIVE2D_MODEL);
   const abortRef = useRef<AbortController | null>(null);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const audioQueueRef = useRef<AudioQueueItem[]>([]);
@@ -838,6 +870,36 @@ export default function App() {
       setMinimumBootElapsed(true);
     }, MIN_BOOT_DURATION_MS);
     return () => window.clearTimeout(timer);
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadLive2DHistory() {
+      try {
+        const records = await listLive2DModelHistory();
+        if (cancelled) {
+          return;
+        }
+        setLive2dModels(records);
+        const storedId = localStorage.getItem(LIVE2D_ACTIVE_STORAGE_KEY) || DEFAULT_LIVE2D_MODEL.id;
+        const target = records.find((record) => record.id === storedId) ?? DEFAULT_LIVE2D_MODEL;
+        const activated = await activateLive2DModel(target);
+        if (cancelled) {
+          releaseLive2DModelRuntime(activated);
+          return;
+        }
+        applyLive2DRecord(activated, { persist: false });
+      } catch (error) {
+        setLive2dImportStatus(error instanceof Error ? error.message : "Live2D history failed");
+      }
+    }
+
+    void loadLive2DHistory();
+    return () => {
+      cancelled = true;
+      releaseLive2DModelRuntime(activeLive2DModelRef.current);
+    };
   }, []);
 
   useEffect(() => {
@@ -980,6 +1042,132 @@ export default function App() {
 
   function toggleSection(section: ConfigSection) {
     setOpenSections((prev) => ({ ...prev, [section]: !prev[section] }));
+  }
+
+  function toggleLive2DTransformLock() {
+    setLive2dTransformLocked((locked) => {
+      const nextLocked = !locked;
+      localStorage.setItem(LIVE2D_LOCK_STORAGE_KEY, String(nextLocked));
+      setStatus(nextLocked ? "live2d locked" : "live2d unlocked");
+      return nextLocked;
+    });
+  }
+
+  function applyLive2DRecord(record: Live2DModelRecord, options: { persist?: boolean } = {}) {
+    const previous = activeLive2DModelRef.current;
+    activeLive2DModelRef.current = record;
+    setActiveLive2DModel(record);
+    setLive2dReady(false);
+    setLive2dError("");
+    setCurrentEmotion("neutral");
+    setLive2dControlsOpen(false);
+    if (options.persist !== false) {
+      localStorage.setItem(LIVE2D_ACTIVE_STORAGE_KEY, record.id);
+    }
+    if (previous.modelUrl !== record.modelUrl) {
+      window.setTimeout(() => releaseLive2DModelRuntime(previous), 1200);
+    }
+  }
+
+  function attachLive2DFolderInput(node: HTMLInputElement | null) {
+    if (node) {
+      node.setAttribute("webkitdirectory", "");
+      node.setAttribute("directory", "");
+    }
+  }
+
+  async function refreshLive2DHistory() {
+    const records = await listLive2DModelHistory();
+    setLive2dModels(records);
+    return records;
+  }
+
+  async function handleLive2DFolderSelection(event: ChangeEvent<HTMLInputElement>) {
+    const files = Array.from(event.currentTarget.files ?? []);
+    event.currentTarget.value = "";
+    await importLive2DFolderFiles(files);
+  }
+
+  async function importLive2DFolderFiles(files: File[]) {
+    if (files.length === 0 || live2dImportBusy) {
+      return;
+    }
+    setLive2dImportBusy(true);
+    setLive2dImportStatus("解析 Live2D 目录");
+    setStatus("live2d import");
+    try {
+      const result = await importLive2DModelFromFiles(files);
+      applyLive2DRecord(result.record);
+      await refreshLive2DHistory();
+      setLive2dImportStatus(
+        `已导入 ${result.record.name}：${result.record.expressions.length} 表情 / ${result.record.motions.length} 动作`
+      );
+      setStatus("live2d ready");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Live2D import failed";
+      setLive2dImportStatus(message);
+      setStatus("live2d error");
+    } finally {
+      setLive2dImportBusy(false);
+    }
+  }
+
+  async function switchLive2DModel(record: Live2DModelRecord) {
+    if (live2dImportBusy || record.id === activeLive2DModel.id) {
+      return;
+    }
+    setLive2dImportStatus(`切换到 ${record.name}`);
+    setStatus("live2d switch");
+    try {
+      const activated = await activateLive2DModel(record);
+      applyLive2DRecord(activated);
+      setLive2dImportStatus(`当前形象：${activated.name}`);
+      setStatus("live2d ready");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Live2D switch failed";
+      setLive2dImportStatus(message);
+      setStatus("live2d error");
+    }
+  }
+
+  async function removeLive2DModel(record: Live2DModelRecord) {
+    if (record.source === "default" || live2dImportBusy) {
+      return;
+    }
+    setLive2dImportBusy(true);
+    try {
+      await deleteImportedLive2DModel(record.id);
+      const records = await refreshLive2DHistory();
+      if (record.id === activeLive2DModel.id) {
+        const fallback = records.find((item) => item.id === DEFAULT_LIVE2D_MODEL.id) ?? DEFAULT_LIVE2D_MODEL;
+        const activated = await activateLive2DModel(fallback);
+        applyLive2DRecord(activated);
+      }
+      setLive2dImportStatus(`已删除 ${record.name}`);
+    } catch (error) {
+      setLive2dImportStatus(error instanceof Error ? error.message : "Live2D delete failed");
+    } finally {
+      setLive2dImportBusy(false);
+    }
+  }
+
+  function handleLive2DTransformChange(transform: Live2DModelTransform) {
+    const current = activeLive2DModelRef.current;
+    if (current.source === "default") {
+      return;
+    }
+    const nextActive = {
+      ...current,
+      transform
+    };
+    activeLive2DModelRef.current = nextActive;
+    setActiveLive2DModel(nextActive);
+    setLive2dModels((prev) =>
+      prev.map((record) => (record.id === current.id ? { ...record, transform } : record))
+    );
+    void updateLive2DModelTransform(current.id, transform).catch((error) => {
+      setLive2dImportStatus(error instanceof Error ? error.message : "Live2D transform save failed");
+    });
   }
 
   async function refreshConversations() {
@@ -1404,6 +1592,135 @@ export default function App() {
     );
   }
 
+  function live2DRuntimeLabel(record: Live2DModelRecord): string {
+    return record.runtime === "cubism3" ? "moc3" : "moc";
+  }
+
+  function playLive2DExpression(option: Live2DControlOption) {
+    setCurrentEmotion(option.label);
+    live2dRef.current?.playExpression(option.name);
+  }
+
+  function playLive2DMotion(option: Live2DControlOption) {
+    setCurrentEmotion(option.label);
+    live2dRef.current?.playMotion(option.group ?? option.name, option.index ?? 0);
+  }
+
+  function renderLive2DOptionButtons(options: Live2DControlOption[], type: "expression" | "motion") {
+    if (options.length === 0) {
+      return (
+        <button className="live2d-option-button" type="button" disabled>
+          {type === "expression" ? <Smile size={14} /> : <Play size={14} />}
+          暂无
+        </button>
+      );
+    }
+    return options.map((option) => (
+      <button
+        className="live2d-option-button"
+        key={option.id}
+        onClick={() => (type === "expression" ? playLive2DExpression(option) : playLive2DMotion(option))}
+        title={option.file || option.name}
+        type="button"
+      >
+        {type === "expression" ? <Smile size={14} /> : <Play size={14} />}
+        <span>{option.label}</span>
+      </button>
+    ));
+  }
+
+  function renderLive2DQuickControls() {
+    const options = live2dControlTab === "expressions" ? activeLive2DModel.expressions : activeLive2DModel.motions;
+    return (
+      <div className={`live2d-quick-controls ${live2dControlsOpen ? "is-open" : ""}`}>
+        <div className="live2d-quick-actions">
+          <button
+            className="emotion-chip glass-panel"
+            onClick={() => setLive2dControlsOpen((open) => !open)}
+            type="button"
+            aria-label="打开 Live2D 表情和动作"
+            title="Live2D 表情和动作"
+          >
+            <Bot size={15} />
+            <span>{currentEmotion}</span>
+          </button>
+          <button
+            className={`live2d-lock-button glass-panel ${live2dTransformLocked ? "is-locked" : ""}`}
+            onClick={toggleLive2DTransformLock}
+            type="button"
+            aria-label={live2dTransformLocked ? "解锁 Live2D 位置和缩放" : "锁定 Live2D 位置和缩放"}
+            title={live2dTransformLocked ? "已锁定位置和缩放" : "可拖动和滚轮缩放"}
+          >
+            {live2dTransformLocked ? <Lock size={15} /> : <Unlock size={15} />}
+          </button>
+        </div>
+        {live2dControlsOpen && (
+          <div className="live2d-control-panel glass-panel">
+            <div className="live2d-control-head">
+              <strong title={activeLive2DModel.name}>{activeLive2DModel.name}</strong>
+              <small>
+                {live2DRuntimeLabel(activeLive2DModel)} · {activeLive2DModel.expressions.length}/{activeLive2DModel.motions.length}
+              </small>
+            </div>
+            <div className="live2d-tabs" role="tablist" aria-label="Live2D controls">
+              <button
+                className={live2dControlTab === "expressions" ? "is-active" : ""}
+                onClick={() => setLive2dControlTab("expressions")}
+                type="button"
+              >
+                <Smile size={14} />
+                表情
+              </button>
+              <button
+                className={live2dControlTab === "motions" ? "is-active" : ""}
+                onClick={() => setLive2dControlTab("motions")}
+                type="button"
+              >
+                <Play size={14} />
+                动作
+              </button>
+            </div>
+            <div className="live2d-option-grid">{renderLive2DOptionButtons(options, live2dControlTab === "expressions" ? "expression" : "motion")}</div>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  function renderLive2DHistory() {
+    return (
+      <div className="live2d-history-list">
+        {live2dModels.map((record) => (
+          <div className={`live2d-history-row ${record.id === activeLive2DModel.id ? "is-current" : ""}`} key={record.id}>
+            <button
+              className="live2d-history-main"
+              disabled={live2dImportBusy || record.id === activeLive2DModel.id}
+              onClick={() => void switchLive2DModel(record)}
+              type="button"
+            >
+              <span>{record.name}</span>
+              <small>
+                {live2DRuntimeLabel(record)} · {record.expressions.length} 表情 · {record.motions.length} 动作
+              </small>
+            </button>
+            {record.source !== "default" && (
+              <button
+                className="history-icon-button is-danger"
+                disabled={live2dImportBusy}
+                onClick={() => void removeLive2DModel(record)}
+                title="删除"
+                type="button"
+                aria-label={`删除 ${record.name}`}
+              >
+                <Trash2 size={14} />
+              </button>
+            )}
+          </div>
+        ))}
+      </div>
+    );
+  }
+
   async function playAssistantMessage(message: ChatMessage) {
     const text = message.content.trim();
     if (!text || message.role !== "assistant") {
@@ -1810,7 +2127,10 @@ export default function App() {
       <section className="stage-panel" aria-label="Amadeus Live2D canvas">
         <Live2DStage
           ref={live2dRef}
+          model={activeLive2DModel}
+          transformLocked={live2dTransformLocked}
           speaking={speaking}
+          onTransformChange={handleLive2DTransformChange}
           onReady={() => {
             setLive2dReady(true);
             setLive2dError("");
@@ -1874,10 +2194,7 @@ export default function App() {
         <UserRound size={22} />
       </button>
 
-      <div className="emotion-chip glass-panel">
-        <Bot size={15} />
-        {currentEmotion}
-      </div>
+      {renderLive2DQuickControls()}
 
       <aside className={`left-dock glass-panel ${menuOpen ? "is-open" : ""}`} aria-hidden={!menuOpen}>
         <div className="dock-head">
@@ -2144,6 +2461,49 @@ export default function App() {
                 云端克隆
               </button>
             </div>
+          </ConfigGroup>
+
+          <ConfigGroup
+            title="Live2D"
+            icon={<FolderOpen size={16} />}
+            open={openSections.live2d}
+            onToggle={() => toggleSection("live2d")}
+          >
+            <div className="live2d-current">
+              <strong title={activeLive2DModel.name}>{activeLive2DModel.name}</strong>
+              <span>
+                {live2DRuntimeLabel(activeLive2DModel)} · {activeLive2DModel.expressions.length} 表情 · {activeLive2DModel.motions.length} 动作
+              </span>
+            </div>
+            <input
+              className="live2d-folder-input"
+              id={LIVE2D_IMPORT_INPUT_ID}
+              ref={attachLive2DFolderInput}
+              type="file"
+              multiple
+              disabled={live2dImportBusy}
+              onChange={handleLive2DFolderSelection}
+            />
+            <div className="config-actions live2d-import-actions">
+              <label
+                className={`text-icon-button live2d-import-label ${live2dImportBusy ? "is-disabled" : ""}`}
+                htmlFor={LIVE2D_IMPORT_INPUT_ID}
+              >
+                <FolderOpen size={16} />
+                导入模型
+              </label>
+              <button
+                className="text-icon-button"
+                disabled={live2dImportBusy || activeLive2DModel.source === "default"}
+                onClick={() => void switchLive2DModel(DEFAULT_LIVE2D_MODEL)}
+                type="button"
+              >
+                <RotateCcw size={16} />
+                默认
+              </button>
+            </div>
+            {live2dImportStatus && <div className="live2d-import-status">{live2dImportStatus}</div>}
+            {renderLive2DHistory()}
           </ConfigGroup>
 
           <ConfigGroup

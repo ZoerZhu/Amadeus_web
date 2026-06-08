@@ -1,137 +1,161 @@
 from __future__ import annotations
 
+import asyncio
 import json
-from datetime import datetime
+import sqlite3
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
-
-import asyncpg
 
 
 DEFAULT_USER_ID = "local-user"
 
 
-def _decode_jsonb(value: Any) -> dict[str, Any]:
-    if isinstance(value, str):
-        return json.loads(value)
+def _decode_json(value: Any) -> dict[str, Any]:
+    if isinstance(value, str) and value:
+        try:
+            return json.loads(value)
+        except json.JSONDecodeError:
+            return {}
     if isinstance(value, dict):
         return value
     return {}
 
 
-def _isoformat(value: datetime) -> str:
-    return value.isoformat()
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
-def _serialize_conversation(row: asyncpg.Record) -> dict[str, Any]:
+def _serialize_conversation(row: sqlite3.Row) -> dict[str, Any]:
     return {
         "id": str(row["id"]),
         "title": row["title"],
         "personaId": row["persona_id"],
         "mode": row["mode"],
-        "createdAt": _isoformat(row["created_at"]),
-        "updatedAt": _isoformat(row["updated_at"]),
+        "createdAt": row["created_at"],
+        "updatedAt": row["updated_at"],
     }
 
 
-def _serialize_message(row: asyncpg.Record) -> dict[str, Any]:
+def _serialize_message(row: sqlite3.Row) -> dict[str, Any]:
     return {
         "id": str(row["id"]),
         "role": row["role"],
         "content": row["content"],
         "thinking": row["thinking"],
-        "createdAt": _isoformat(row["created_at"]),
+        "createdAt": row["created_at"],
     }
 
 
-class PostgresStorage:
-    def __init__(self, database_url: str) -> None:
-        self.database_url = database_url.strip()
-        self.pool: asyncpg.Pool | None = None
+class SQLiteStorage:
+    def __init__(self, database_path: str | Path) -> None:
+        self.database_path = Path(database_path).expanduser()
+        self.connection: sqlite3.Connection | None = None
+        self._lock = asyncio.Lock()
 
     @property
     def enabled(self) -> bool:
-        return bool(self.database_url)
+        return True
 
     @property
     def connected(self) -> bool:
-        return self.pool is not None
+        return self.connection is not None
 
     async def connect(self) -> None:
-        if not self.enabled:
+        if self.connection is not None:
             return
-        self.pool = await asyncpg.create_pool(self.database_url, min_size=1, max_size=5)
+        self.database_path.parent.mkdir(parents=True, exist_ok=True)
+        connection = sqlite3.connect(
+            self.database_path,
+            check_same_thread=False,
+            isolation_level=None,
+        )
+        connection.row_factory = sqlite3.Row
+        connection.execute("PRAGMA foreign_keys = ON")
+        connection.execute("PRAGMA journal_mode = WAL")
+        self.connection = connection
         await self.init_schema()
 
     async def close(self) -> None:
-        if self.pool is not None:
-            await self.pool.close()
-            self.pool = None
+        if self.connection is None:
+            return
+        async with self._lock:
+            connection = self.connection
+            self.connection = None
+            await asyncio.to_thread(connection.close)
 
-    def require_pool(self) -> asyncpg.Pool:
-        if self.pool is None:
-            raise RuntimeError("PostgreSQL storage is not configured. Set DATABASE_URL or AMADEUS_DATABASE_URL.")
-        return self.pool
+    def require_connection(self) -> sqlite3.Connection:
+        if self.connection is None:
+            raise RuntimeError("SQLite storage is not connected.")
+        return self.connection
 
     async def init_schema(self) -> None:
-        pool = self.require_pool()
-        async with pool.acquire() as conn:
-            await conn.execute(
-                """
-                CREATE TABLE IF NOT EXISTS app_settings (
-                    user_id text PRIMARY KEY,
-                    model_settings jsonb NOT NULL DEFAULT '{}'::jsonb,
-                    voice_settings jsonb NOT NULL DEFAULT '{}'::jsonb,
-                    mode text NOT NULL DEFAULT 'fast' CHECK (mode IN ('fast', 'thinking')),
-                    updated_at timestamptz NOT NULL DEFAULT now()
-                );
+        async with self._lock:
+            await asyncio.to_thread(self._init_schema_sync)
 
-                CREATE TABLE IF NOT EXISTS conversations (
-                    id uuid PRIMARY KEY,
-                    user_id text NOT NULL,
-                    persona_id text NOT NULL,
-                    title text NOT NULL,
-                    mode text NOT NULL DEFAULT 'fast' CHECK (mode IN ('fast', 'thinking')),
-                    created_at timestamptz NOT NULL DEFAULT now(),
-                    updated_at timestamptz NOT NULL DEFAULT now()
-                );
+    def _init_schema_sync(self) -> None:
+        conn = self.require_connection()
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS app_settings (
+                user_id TEXT PRIMARY KEY,
+                model_settings TEXT NOT NULL DEFAULT '{}',
+                voice_settings TEXT NOT NULL DEFAULT '{}',
+                mode TEXT NOT NULL DEFAULT 'fast' CHECK (mode IN ('fast', 'thinking')),
+                updated_at TEXT NOT NULL
+            );
 
-                CREATE INDEX IF NOT EXISTS conversations_user_updated_idx
-                    ON conversations (user_id, updated_at DESC);
+            CREATE TABLE IF NOT EXISTS conversations (
+                id TEXT PRIMARY KEY,
+                user_id TEXT NOT NULL,
+                persona_id TEXT NOT NULL,
+                title TEXT NOT NULL,
+                mode TEXT NOT NULL DEFAULT 'fast' CHECK (mode IN ('fast', 'thinking')),
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
 
-                CREATE TABLE IF NOT EXISTS chat_messages (
-                    id uuid PRIMARY KEY,
-                    conversation_id uuid NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
-                    role text NOT NULL CHECK (role IN ('user', 'assistant')),
-                    content text NOT NULL,
-                    thinking text NOT NULL DEFAULT '',
-                    position integer NOT NULL,
-                    created_at timestamptz NOT NULL DEFAULT now(),
-                    UNIQUE (conversation_id, position)
-                );
+            CREATE INDEX IF NOT EXISTS conversations_user_updated_idx
+                ON conversations (user_id, updated_at DESC);
 
-                CREATE INDEX IF NOT EXISTS chat_messages_conversation_position_idx
-                    ON chat_messages (conversation_id, position ASC);
-                """
-            )
+            CREATE TABLE IF NOT EXISTS chat_messages (
+                id TEXT PRIMARY KEY,
+                conversation_id TEXT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+                role TEXT NOT NULL CHECK (role IN ('user', 'assistant')),
+                content TEXT NOT NULL,
+                thinking TEXT NOT NULL DEFAULT '',
+                position INTEGER NOT NULL,
+                created_at TEXT NOT NULL,
+                UNIQUE (conversation_id, position)
+            );
+
+            CREATE INDEX IF NOT EXISTS chat_messages_conversation_position_idx
+                ON chat_messages (conversation_id, position ASC);
+            """
+        )
 
     async def get_settings(self, user_id: str) -> dict[str, Any] | None:
-        pool = self.require_pool()
-        row = await pool.fetchrow(
+        async with self._lock:
+            return await asyncio.to_thread(self._get_settings_sync, user_id)
+
+    def _get_settings_sync(self, user_id: str) -> dict[str, Any] | None:
+        conn = self.require_connection()
+        row = conn.execute(
             """
             SELECT model_settings, voice_settings, mode, updated_at
             FROM app_settings
-            WHERE user_id = $1
+            WHERE user_id = ?
             """,
-            user_id,
-        )
+            (user_id,),
+        ).fetchone()
         if row is None:
             return None
         return {
-            "model": _decode_jsonb(row["model_settings"]),
-            "voice": _decode_jsonb(row["voice_settings"]),
+            "model": _decode_json(row["model_settings"]),
+            "voice": _decode_json(row["voice_settings"]),
             "mode": row["mode"],
-            "updatedAt": _isoformat(row["updated_at"]),
+            "updatedAt": row["updated_at"],
         }
 
     async def save_settings(
@@ -142,36 +166,52 @@ class PostgresStorage:
         voice: dict[str, Any],
         mode: str,
     ) -> None:
-        pool = self.require_pool()
-        await pool.execute(
+        async with self._lock:
+            await asyncio.to_thread(self._save_settings_sync, user_id, model, voice, mode)
+
+    def _save_settings_sync(
+        self,
+        user_id: str,
+        model: dict[str, Any],
+        voice: dict[str, Any],
+        mode: str,
+    ) -> None:
+        conn = self.require_connection()
+        conn.execute(
             """
             INSERT INTO app_settings (user_id, model_settings, voice_settings, mode, updated_at)
-            VALUES ($1, $2::jsonb, $3::jsonb, $4, now())
-            ON CONFLICT (user_id) DO UPDATE SET
-                model_settings = EXCLUDED.model_settings,
-                voice_settings = EXCLUDED.voice_settings,
-                mode = EXCLUDED.mode,
-                updated_at = now()
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(user_id) DO UPDATE SET
+                model_settings = excluded.model_settings,
+                voice_settings = excluded.voice_settings,
+                mode = excluded.mode,
+                updated_at = excluded.updated_at
             """,
-            user_id,
-            json.dumps(model, ensure_ascii=False),
-            json.dumps(voice, ensure_ascii=False),
-            mode,
+            (
+                user_id,
+                json.dumps(model, ensure_ascii=False),
+                json.dumps(voice, ensure_ascii=False),
+                mode,
+                _now_iso(),
+            ),
         )
 
     async def list_conversations(self, *, user_id: str, limit: int = 30) -> list[dict[str, Any]]:
-        pool = self.require_pool()
-        rows = await pool.fetch(
+        async with self._lock:
+            return await asyncio.to_thread(self._list_conversations_sync, user_id, limit)
+
+    def _list_conversations_sync(self, user_id: str, limit: int) -> list[dict[str, Any]]:
+        conn = self.require_connection()
+        rows = conn.execute(
             """
             SELECT id, title, persona_id, mode, created_at, updated_at
             FROM conversations
-            WHERE user_id = $1
+            WHERE user_id = ?
             ORDER BY updated_at DESC
-            LIMIT $2
+            LIMIT ?
             """,
-            user_id,
-            limit,
-        )
+            (user_id, limit),
+        ).fetchall()
         return [_serialize_conversation(row) for row in rows]
 
     async def create_conversation(
@@ -182,64 +222,82 @@ class PostgresStorage:
         persona_id: str,
         mode: str,
     ) -> dict[str, Any]:
-        pool = self.require_pool()
-        conversation_id = uuid4()
+        async with self._lock:
+            return await asyncio.to_thread(self._create_conversation_sync, user_id, title, persona_id, mode)
+
+    def _create_conversation_sync(
+        self,
+        user_id: str,
+        title: str,
+        persona_id: str,
+        mode: str,
+    ) -> dict[str, Any]:
+        conn = self.require_connection()
+        conversation_id = str(uuid4())
         clean_title = title.strip()[:80] or "新对话"
-        row = await pool.fetchrow(
+        now = _now_iso()
+        conn.execute(
             """
-            INSERT INTO conversations (id, user_id, title, persona_id, mode)
-            VALUES ($1, $2, $3, $4, $5)
-            RETURNING id, title, persona_id, mode, created_at, updated_at
+            INSERT INTO conversations (id, user_id, title, persona_id, mode, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
-            conversation_id,
-            user_id,
-            clean_title,
-            persona_id,
-            mode,
+            (conversation_id, user_id, clean_title, persona_id, mode, now, now),
         )
+        row = conn.execute(
+            """
+            SELECT id, title, persona_id, mode, created_at, updated_at
+            FROM conversations
+            WHERE id = ?
+            """,
+            (conversation_id,),
+        ).fetchone()
         if row is None:
             raise RuntimeError("Failed to create conversation")
         return _serialize_conversation(row)
 
     async def get_conversation(self, *, user_id: str, conversation_id: UUID) -> dict[str, Any] | None:
-        pool = self.require_pool()
-        async with pool.acquire() as conn:
-            conversation = await conn.fetchrow(
-                """
-                SELECT id, title, persona_id, mode, created_at, updated_at
-                FROM conversations
-                WHERE id = $1 AND user_id = $2
-                """,
-                conversation_id,
-                user_id,
-            )
-            if conversation is None:
-                return None
-            messages = await conn.fetch(
-                """
-                SELECT id, role, content, thinking, created_at
-                FROM chat_messages
-                WHERE conversation_id = $1
-                ORDER BY position ASC
-                """,
-                conversation_id,
-            )
+        async with self._lock:
+            return await asyncio.to_thread(self._get_conversation_sync, user_id, str(conversation_id))
+
+    def _get_conversation_sync(self, user_id: str, conversation_id: str) -> dict[str, Any] | None:
+        conn = self.require_connection()
+        conversation = conn.execute(
+            """
+            SELECT id, title, persona_id, mode, created_at, updated_at
+            FROM conversations
+            WHERE id = ? AND user_id = ?
+            """,
+            (conversation_id, user_id),
+        ).fetchone()
+        if conversation is None:
+            return None
+        messages = conn.execute(
+            """
+            SELECT id, role, content, thinking, created_at
+            FROM chat_messages
+            WHERE conversation_id = ?
+            ORDER BY position ASC
+            """,
+            (conversation_id,),
+        ).fetchall()
         payload = _serialize_conversation(conversation)
         payload["messages"] = [_serialize_message(row) for row in messages]
         return payload
 
     async def delete_conversation(self, *, user_id: str, conversation_id: UUID) -> bool:
-        pool = self.require_pool()
-        row = await pool.fetchrow(
+        async with self._lock:
+            return await asyncio.to_thread(self._delete_conversation_sync, user_id, str(conversation_id))
+
+    def _delete_conversation_sync(self, user_id: str, conversation_id: str) -> bool:
+        conn = self.require_connection()
+        cursor = conn.execute(
             """
             DELETE FROM conversations
-            WHERE id = $1 AND user_id = $2
-            RETURNING id
+            WHERE id = ? AND user_id = ?
             """,
-            conversation_id,
-            user_id,
+            (conversation_id, user_id),
         )
-        return row is not None
+        return cursor.rowcount > 0
 
     async def add_message(
         self,
@@ -250,50 +308,75 @@ class PostgresStorage:
         content: str,
         thinking: str = "",
     ) -> dict[str, Any]:
-        pool = self.require_pool()
-        async with pool.acquire() as conn:
-            async with conn.transaction():
-                conversation = await conn.fetchrow(
-                    """
-                    SELECT id
-                    FROM conversations
-                    WHERE id = $1 AND user_id = $2
-                    FOR UPDATE
-                    """,
-                    conversation_id,
-                    user_id,
-                )
-                if conversation is None:
-                    raise ValueError("Conversation not found")
-                position = await conn.fetchval(
-                    """
-                    SELECT COALESCE(MAX(position), -1) + 1
-                    FROM chat_messages
-                    WHERE conversation_id = $1
-                    """,
-                    conversation_id,
-                )
-                row = await conn.fetchrow(
-                    """
-                    INSERT INTO chat_messages (id, conversation_id, role, content, thinking, position)
-                    VALUES ($1, $2, $3, $4, $5, $6)
-                    RETURNING id, role, content, thinking, created_at
-                    """,
-                    uuid4(),
-                    conversation_id,
-                    role,
-                    content,
-                    thinking,
-                    position,
-                )
-                await conn.execute(
-                    """
-                    UPDATE conversations
-                    SET updated_at = now()
-                    WHERE id = $1
-                    """,
-                    conversation_id,
-                )
+        async with self._lock:
+            return await asyncio.to_thread(
+                self._add_message_sync,
+                user_id,
+                str(conversation_id),
+                role,
+                content,
+                thinking,
+            )
+
+    def _add_message_sync(
+        self,
+        user_id: str,
+        conversation_id: str,
+        role: str,
+        content: str,
+        thinking: str,
+    ) -> dict[str, Any]:
+        conn = self.require_connection()
+        message_id = str(uuid4())
+        now = _now_iso()
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            conversation = conn.execute(
+                """
+                SELECT id
+                FROM conversations
+                WHERE id = ? AND user_id = ?
+                """,
+                (conversation_id, user_id),
+            ).fetchone()
+            if conversation is None:
+                raise ValueError("Conversation not found")
+            position = conn.execute(
+                """
+                SELECT COALESCE(MAX(position), -1) + 1
+                FROM chat_messages
+                WHERE conversation_id = ?
+                """,
+                (conversation_id,),
+            ).fetchone()[0]
+            conn.execute(
+                """
+                INSERT INTO chat_messages (id, conversation_id, role, content, thinking, position, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (message_id, conversation_id, role, content, thinking, position, now),
+            )
+            conn.execute(
+                """
+                UPDATE conversations
+                SET updated_at = ?
+                WHERE id = ?
+                """,
+                (now, conversation_id),
+            )
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+
+        row = conn.execute(
+            """
+            SELECT id, role, content, thinking, created_at
+            FROM chat_messages
+            WHERE id = ?
+            """,
+            (message_id,),
+        ).fetchone()
         if row is None:
             raise RuntimeError("Failed to store message")
         return _serialize_message(row)

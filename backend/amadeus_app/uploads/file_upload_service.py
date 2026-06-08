@@ -18,7 +18,8 @@ from ..file_tools.file_reader import (
 )
 
 
-WorkspacePath = Path(__file__).resolve().parents[3]
+WORKSPACE_PATH_VALUE = os.getenv("AMADEUS_WORKSPACE_PATH", "").strip()
+WorkspacePath = Path(WORKSPACE_PATH_VALUE).expanduser().resolve() if WORKSPACE_PATH_VALUE else Path(__file__).resolve().parents[3]
 DEFAULT_UPLOAD_DIR = Path("agent_uploads")
 DEFAULT_MAX_UPLOAD_BYTES = 10 * 1024 * 1024
 MAX_UPLOAD_BYTES_LIMIT = 50 * 1024 * 1024

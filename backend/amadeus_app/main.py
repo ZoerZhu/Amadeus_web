@@ -28,7 +28,7 @@ from .personas import get_persona, list_personas
 from .providers import PROVIDER_PRESETS
 from .file_tools.file_reader import ensure_allowed_path, resolve_workspace_path
 from .runtime_config import effective_voice_settings
-from .storage import DEFAULT_USER_ID, PostgresStorage
+from .storage import DEFAULT_USER_ID, SQLiteStorage
 from .uploads.file_upload_service import (
     UploadConflictError,
     UploadTooLargeError,
@@ -42,8 +42,16 @@ ROOT_DIR = Path(__file__).resolve().parents[2]
 FRONTEND_DIST = ROOT_DIR / "dist"
 load_dotenv(ROOT_DIR / ".env")
 
-DATABASE_URL = os.getenv("DATABASE_URL", "").strip() or os.getenv("AMADEUS_DATABASE_URL", "").strip()
-storage = PostgresStorage(DATABASE_URL)
+mimetypes.add_type("application/javascript", ".js")
+mimetypes.add_type("application/javascript", ".mjs")
+mimetypes.add_type("application/wasm", ".wasm")
+mimetypes.add_type("application/octet-stream", ".moc3")
+
+SQLITE_PATH_VALUE = os.getenv("AMADEUS_SQLITE_PATH", "").strip()
+SQLITE_PATH = Path(SQLITE_PATH_VALUE) if SQLITE_PATH_VALUE else ROOT_DIR / "agent_state" / "amadeus_web.sqlite3"
+if not SQLITE_PATH.is_absolute():
+    SQLITE_PATH = ROOT_DIR / SQLITE_PATH
+storage = SQLiteStorage(SQLITE_PATH)
 
 app = FastAPI(title="Amadeus Web", version="0.1.0")
 
@@ -104,11 +112,11 @@ async def shutdown() -> None:
     await storage.close()
 
 
-def require_storage() -> PostgresStorage:
+def require_storage() -> SQLiteStorage:
     if not storage.connected:
         raise HTTPException(
             status_code=503,
-            detail="PostgreSQL 未配置或未连接；请设置 DATABASE_URL 或 AMADEUS_DATABASE_URL。",
+            detail="SQLite 存储未连接；请检查 AMADEUS_SQLITE_PATH 是否可写。",
         )
     return storage
 
@@ -142,7 +150,12 @@ async def health() -> dict:
 
 @app.get("/api/storage")
 async def storage_status() -> dict:
-    return {"enabled": storage.enabled, "connected": storage.connected}
+    return {
+        "enabled": storage.enabled,
+        "connected": storage.connected,
+        "type": "sqlite",
+        "path": str(storage.database_path),
+    }
 
 
 @app.get("/api/providers")

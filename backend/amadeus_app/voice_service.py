@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import os
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -22,7 +23,8 @@ from .text_cleaning import clean_display_text, has_japanese_kana, to_speech_sour
 
 BACKEND_DIR = Path(__file__).resolve().parents[1]
 ASSETS_DIR = BACKEND_DIR / "assets"
-AUDIO_DIR = BACKEND_DIR / "runtime" / "audio"
+AUDIO_DIR_VALUE = os.getenv("AMADEUS_AUDIO_DIR", "").strip()
+AUDIO_DIR = Path(AUDIO_DIR_VALUE).expanduser().resolve() if AUDIO_DIR_VALUE else BACKEND_DIR / "runtime" / "audio"
 AUDIO_DIR.mkdir(parents=True, exist_ok=True)
 
 SILICONFLOW_API_BASE_URL = "https://api.siliconflow.cn/v1"

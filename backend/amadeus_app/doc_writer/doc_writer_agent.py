@@ -16,7 +16,8 @@ from ..search.web_search_agent import run_web_search_agent
 
 
 DocFormat = Literal["md", "txt", "docx", "csv", "xlsx"]
-WorkspacePath = Path(__file__).resolve().parents[3]
+WORKSPACE_PATH_VALUE = os.getenv("AMADEUS_WORKSPACE_PATH", "").strip()
+WorkspacePath = Path(WORKSPACE_PATH_VALUE).expanduser().resolve() if WORKSPACE_PATH_VALUE else Path(__file__).resolve().parents[3]
 DEFAULT_OUTPUT_DIR = Path("generated_docs")
 DEFAULT_SECTIONS = ["背景与目标", "核心内容", "实施步骤", "注意事项", "后续工作"]
 DOC_FORMAT_LABELS: dict[str, str] = {

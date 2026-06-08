@@ -16,7 +16,7 @@ from .model_adapter import build_chat_payload, should_read_reasoning
 from .personas import PersonaPreset, build_system_prompt, get_persona
 from .providers import get_provider
 from .runtime_config import effective_model_settings, effective_voice_settings
-from .storage import DEFAULT_USER_ID, PostgresStorage
+from .storage import DEFAULT_USER_ID, SQLiteStorage
 from .text_cleaning import (
     EMOTION_RE,
     clean_display_text,
@@ -944,7 +944,7 @@ def truncate_text(text: str, limit: int) -> str:
 async def stream_chat(
     request: ChatStreamRequest,
     *,
-    storage: PostgresStorage | None = None,
+    storage: SQLiteStorage | None = None,
 ) -> AsyncGenerator[str, None]:
     provider, settings = resolve_chat_settings(request)
     persona = get_persona(request.persona_id)
@@ -1136,7 +1136,7 @@ async def stream_chat(
 async def _demo_stream(
     request: ChatStreamRequest,
     *,
-    storage: PostgresStorage | None = None,
+    storage: SQLiteStorage | None = None,
     persona,
     voice_settings,
     model_settings: ModelSettings,

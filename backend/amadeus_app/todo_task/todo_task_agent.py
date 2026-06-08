@@ -29,7 +29,8 @@ TodoAction = Literal[
 TodoStatus = Literal["todo", "in_progress", "blocked", "done", "archived"]
 TodoPriority = Literal["low", "medium", "high", "urgent"]
 
-WorkspacePath = Path(__file__).resolve().parents[3]
+WORKSPACE_PATH_VALUE = os.getenv("AMADEUS_WORKSPACE_PATH", "").strip()
+WorkspacePath = Path(WORKSPACE_PATH_VALUE).expanduser().resolve() if WORKSPACE_PATH_VALUE else Path(__file__).resolve().parents[3]
 DEFAULT_STORE_PATH = Path("agent_state/todo_tasks.json")
 MAX_TASKS_PER_REQUEST = 50
 MAX_LIST_LIMIT = 200

@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import mimetypes
+import os
 from pathlib import Path
 from typing import Any, Literal
 
 
 FileReaderAction = Literal["read", "list", "stat"]
-WorkspacePath = Path(__file__).resolve().parents[3]
+WORKSPACE_PATH_VALUE = os.getenv("AMADEUS_WORKSPACE_PATH", "").strip()
+WorkspacePath = Path(WORKSPACE_PATH_VALUE).expanduser().resolve() if WORKSPACE_PATH_VALUE else Path(__file__).resolve().parents[3]
 DEFAULT_MAX_BYTES = 128 * 1024
 MAX_BYTES_LIMIT = 1024 * 1024
 DEFAULT_MAX_ENTRIES = 200

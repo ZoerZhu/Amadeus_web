@@ -10,25 +10,25 @@ python -m venv .venv
 npm install
 ```
 
-Configure PostgreSQL in `.env`:
+Create `.env` from the example:
 
 ```powershell
 Copy-Item .env.example .env
 ```
 
-Set `DATABASE_URL` to your PostgreSQL database, for example:
+By default the API stores chat conversations, messages, and user settings in SQLite:
 
 ```text
-DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5432/amadeus_web
+agent_state/amadeus_web.sqlite3
 ```
 
-Create the database before starting the API if it does not already exist:
+You can override the SQLite database location in `.env`:
 
-```powershell
-createdb amadeus_web
+```text
+AMADEUS_SQLITE_PATH=agent_state/amadeus_web.sqlite3
 ```
 
-The API creates the required tables on startup. Chat conversations, messages, and user settings are stored in PostgreSQL. Generated voice files remain under `backend/runtime/audio` and are served through `/audio/...`. `AMADEUS_DATABASE_URL` can be used instead of `DATABASE_URL` if you prefer an app-specific variable name.
+The API creates the required SQLite tables on startup. Generated voice files remain under `backend/runtime/audio` and are served through `/audio/...`.
 
 Start the local CosyVoice2 engine before enabling voice:
 
@@ -54,6 +54,28 @@ npm run dev
 ```
 
 Open <http://127.0.0.1:5173>.
+
+## Windows Desktop Build
+
+The desktop build uses Electron for the Windows window and a bundled PyInstaller FastAPI backend.
+
+```powershell
+npm run desktop:build
+```
+
+Output:
+
+```text
+release/electron/Amadeus-0.1.0-win-x64.exe
+```
+
+In the packaged app, SQLite and agent runtime files are stored under the current Windows user's app data directory, for example:
+
+```text
+C:\Users\<user>\AppData\Roaming\amadeus-web\data\amadeus_web.sqlite3
+```
+
+Rebuild the desktop exe after frontend changes. Existing SQLite data in AppData is preserved when replacing the exe.
 
 ## Notes
 

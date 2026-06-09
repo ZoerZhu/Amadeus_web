@@ -8,7 +8,7 @@ from backend.amadeus_app.main import app
 
 
 def main() -> None:
-    host = os.getenv("AMADEUS_DESKTOP_HOST", "127.0.0.1")
+    host = os.getenv("AMADEUS_DESKTOP_HOST", "0.0.0.0")
     port = int(os.getenv("AMADEUS_DESKTOP_PORT", "8765"))
     uvicorn.run(
         app,

@@ -1,5 +1,5 @@
 const { app, BrowserWindow, dialog, ipcMain } = require("electron");
-const { spawn } = require("child_process");
+const { spawn, spawnSync } = require("child_process");
 const fs = require("fs");
 const path = require("path");
 
@@ -43,7 +43,7 @@ function startBackend() {
     windowsHide: true,
     env: {
       ...process.env,
-      AMADEUS_DESKTOP_HOST: "127.0.0.1",
+      AMADEUS_DESKTOP_HOST: process.env.AMADEUS_DESKTOP_HOST || "0.0.0.0",
       AMADEUS_DESKTOP_PORT: String(BACKEND_PORT),
       AMADEUS_WORKSPACE_PATH: userData,
       AMADEUS_SQLITE_PATH: path.join(dataDir, "amadeus_web.sqlite3"),
@@ -100,9 +100,20 @@ async function createWindow() {
 
 function stopBackend() {
   quitting = true;
-  if (backendProcess && !backendProcess.killed) {
-    backendProcess.kill();
+  if (!backendProcess || backendProcess.killed) {
+    return;
   }
+  if (process.platform === "win32") {
+    const result = spawnSync("taskkill", ["/PID", String(backendProcess.pid), "/T", "/F"], {
+      windowsHide: true,
+      stdio: "ignore",
+    });
+    if (result.error) {
+      backendProcess.kill();
+    }
+    return;
+  }
+  backendProcess.kill();
 }
 
 app.whenReady().then(async () => {

@@ -139,6 +139,7 @@ export type StreamEvent =
   | { event: "done"; payload: { text: string } };
 
 export interface CodeTaskStreamRequest {
+  taskId?: string;
   title?: string;
   prompt: string;
   workspacePath: string;
@@ -150,7 +151,30 @@ export interface CodeTaskStreamRequest {
   timeoutSeconds?: number;
 }
 
+export interface CodeTaskQuestionOption {
+  label: string;
+  description?: string;
+}
+
+export interface CodeTaskQuestionItem {
+  question: string;
+  header: string;
+  options: CodeTaskQuestionOption[];
+  multiple?: boolean;
+  custom?: boolean;
+}
+
+export interface CodeTaskQuestionReplyRequest {
+  serverUrl: string;
+  sessionId: string;
+  requestId: string;
+  answers: string[][];
+  v2?: boolean;
+  reject?: boolean;
+}
+
 export type CodeTaskEvent =
+  | { event: "input"; payload: { text: string; source?: string; message?: string; workspacePath?: string; taskId?: string } }
   | { event: "session"; payload: { sessionId: string; serverUrl?: string; workspacePath?: string; title?: string } }
   | { event: "status"; payload: { status?: string; message?: string; workspacePath?: string; sessionId?: string } }
   | { event: "output"; payload: { text: string } }
@@ -160,5 +184,32 @@ export type CodeTaskEvent =
   | { event: "file"; payload: { path?: string; message?: string } }
   | { event: "diff"; payload: { message?: string; diff?: unknown[] } }
   | { event: "permission"; payload: { requestId?: string; action?: string; resources?: unknown[]; message?: string; blocked?: boolean; approved?: boolean } }
+  | {
+      event: "question";
+      payload: {
+        requestId?: string;
+        sessionId?: string;
+        questions?: CodeTaskQuestionItem[];
+        message?: string;
+        tool?: Record<string, unknown> | null;
+        v2?: boolean;
+      };
+    }
+  | {
+      event: "question_result";
+      payload: {
+        requestId?: string;
+        message?: string;
+        answers?: string[][];
+        rejected?: boolean;
+      };
+    }
   | { event: "error"; payload: { message: string; requestId?: string } }
   | { event: "done"; payload: { status?: string; message?: string; sessionId?: string; workspacePath?: string } };
+
+export type TaskSummaryVoiceEvent =
+  | { event: "status"; payload: { phase: string } }
+  | { event: "audio"; payload: { url: string; index?: number; text?: string; syncText?: boolean } }
+  | { event: "voice_error"; payload: { message: string; index?: number } }
+  | { event: "error"; payload: { message: string } }
+  | { event: "done"; payload: { speechText: string } };

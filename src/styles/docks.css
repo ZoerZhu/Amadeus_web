@@ -1,0 +1,608 @@
+﻿.live2d-control-panel {
+  position: relative;
+  z-index: 34;
+  display: grid;
+  width: min(330px, calc(100vw - 116px));
+  max-height: min(390px, calc(100vh - 118px));
+  min-width: 0;
+  gap: 10px;
+  overflow: hidden;
+  padding: 12px;
+  border-radius: 24px;
+  background: rgba(255, 255, 255, 0.8);
+}
+
+.live2d-control-head {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.live2d-control-head strong {
+  overflow: hidden;
+  font-size: 0.88rem;
+  font-weight: 760;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.live2d-control-head small {
+  color: var(--ink-muted);
+  font-size: 0.72rem;
+}
+
+.live2d-tabs {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+
+.live2d-tabs button,
+.live2d-option-button,
+.live2d-history-main {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  min-width: 0;
+  border: 1px solid rgba(12, 12, 13, 0.08);
+  border-radius: var(--radius-pill);
+  background: rgba(255, 255, 255, 0.58);
+  color: var(--ink-soft);
+  transition:
+    transform 190ms ease,
+    background 190ms ease,
+    color 190ms ease,
+    border-color 190ms ease;
+}
+
+.live2d-tabs button {
+  min-height: 34px;
+  font-size: 0.8rem;
+}
+
+.live2d-tabs button.is-active {
+  color: #fff;
+  background: #101011;
+}
+
+.live2d-option-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 7px;
+  min-height: 0;
+  overflow-y: auto;
+  padding-right: 2px;
+  scrollbar-color: rgba(0, 0, 0, 0.2) transparent;
+  scrollbar-width: thin;
+}
+
+.live2d-option-button {
+  min-height: 34px;
+  padding: 0 9px;
+  font-size: 0.76rem;
+}
+
+.live2d-option-button span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.live2d-tabs button:hover,
+.live2d-option-button:hover,
+.live2d-history-main:hover {
+  transform: translateY(-1px);
+  border-color: rgba(12, 12, 13, 0.16);
+  background: rgba(255, 255, 255, 0.78);
+  color: var(--ink);
+}
+
+.live2d-tabs button.is-active:hover {
+  color: #fff;
+  background: #101011;
+}
+
+.left-dock,
+.config-dock,
+.chat-panel {
+  position: fixed;
+  z-index: 16;
+  top: 88px;
+  bottom: 18px;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+  border-radius: var(--radius-xl);
+  opacity: 0;
+  pointer-events: none;
+  transition:
+    transform 340ms cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 220ms ease,
+    width 180ms ease,
+    left 260ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.left-dock {
+  left: var(--edge);
+  width: var(--left-width);
+  transform-origin: 36px calc(100% - 30px);
+  transform: translate(-18px, calc(100% - 86px)) scale(0.12);
+  border-radius: 44px;
+}
+
+.left-dock.is-open {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translate(0, 0) scale(1);
+  border-radius: var(--radius-xl);
+}
+
+.config-dock {
+  width: var(--config-width);
+  transform: translateX(-32px) scaleX(0.94);
+  transform-origin: left center;
+}
+
+.config-dock.is-open {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateX(0) scaleX(1);
+}
+
+.dock-head {
+  flex: 0 0 auto;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 16px 16px 10px;
+  border-bottom: 1px solid var(--line);
+}
+
+.eyebrow {
+  display: block;
+  margin-bottom: 4px;
+  color: var(--ink-muted);
+  font-size: 0.72rem;
+  font-weight: 700;
+  line-height: 1;
+  text-transform: uppercase;
+}
+
+.dock-action {
+  justify-content: flex-start;
+  min-height: 44px;
+  margin: 14px 14px 8px;
+  padding: 0 14px;
+  color: #fff;
+  background: #101011;
+}
+
+.dock-scroll {
+  min-height: 0;
+  flex: 1;
+  overflow-x: hidden;
+  overflow-y: auto;
+  padding-bottom: 76px;
+  scrollbar-color: rgba(0, 0, 0, 0.2) transparent;
+  scrollbar-width: thin;
+}
+
+.dock-scroll::-webkit-scrollbar,
+.config-list::-webkit-scrollbar {
+  width: 7px;
+}
+
+.dock-scroll::-webkit-scrollbar-thumb,
+.config-list::-webkit-scrollbar-thumb {
+  border: 2px solid transparent;
+  border-radius: var(--radius-pill);
+  background: rgba(0, 0, 0, 0.2);
+  background-clip: content-box;
+}
+
+.dock-scroll::-webkit-scrollbar-track,
+.config-list::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.dock-nav {
+  display: grid;
+  gap: 8px;
+  padding: 0 14px 12px;
+}
+
+.dock-nav-item {
+  justify-content: flex-start;
+  min-height: 42px;
+  padding: 0 12px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--ink-soft);
+}
+
+.dock-nav-item.is-active,
+.dock-nav-item:hover {
+  border-color: rgba(12, 12, 13, 0.08);
+  background: rgba(255, 255, 255, 0.66);
+  color: var(--ink);
+}
+
+.dock-section {
+  display: grid;
+  gap: 8px;
+  padding: 12px 14px 2px;
+}
+
+.history-section {
+  padding-top: 8px;
+}
+
+.history-search {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 42px;
+  padding: 0 12px;
+  border: 1px solid rgba(12, 12, 13, 0.08);
+  border-radius: var(--radius-pill);
+  background: rgba(255, 255, 255, 0.58);
+  color: var(--ink-muted);
+  transition:
+    background 180ms ease,
+    border-color 180ms ease,
+    box-shadow 180ms ease;
+}
+
+.history-search:focus-within {
+  border-color: rgba(12, 12, 13, 0.24);
+  background: rgba(255, 255, 255, 0.74);
+  box-shadow: 0 0 0 4px rgba(0, 0, 0, 0.045);
+}
+
+.history-search input {
+  width: 100%;
+  min-width: 0;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--ink);
+  font-size: 0.86rem;
+}
+
+.history-search input::placeholder {
+  color: var(--ink-muted);
+}
+
+.section-title {
+  gap: 6px;
+  color: var(--ink-muted);
+  font-size: 0.75rem;
+  font-weight: 700;
+}
+
+.history-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-width: 0;
+}
+
+.history-item,
+.task-item {
+  justify-content: space-between;
+  width: 100%;
+  min-height: 52px;
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid rgba(12, 12, 13, 0.08);
+  background: rgba(255, 255, 255, 0.48);
+  text-align: left;
+}
+
+.history-row .history-item {
+  min-height: 52px;
+}
+
+.history-item span,
+.task-item span {
+  overflow: hidden;
+  font-size: 0.88rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.history-item small,
+.task-item small {
+  flex: 0 0 auto;
+  color: var(--ink-muted);
+  font-size: 0.72rem;
+  text-align: right;
+}
+
+.history-row.is-current .history-item,
+.history-row.is-current .task-item,
+.history-item.is-current,
+.task-item.is-current {
+  background: rgba(255, 255, 255, 0.78);
+}
+
+.code-task-history-section .dock-action {
+  min-height: 40px;
+  padding: 0 12px;
+  justify-content: flex-start;
+}
+
+.history-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding-right: 2px;
+}
+
+.history-icon-button {
+  width: 32px;
+  height: 32px;
+  flex: 0 0 auto;
+  border: 1px solid rgba(12, 12, 13, 0.08);
+  background: rgba(255, 255, 255, 0.42);
+  color: rgba(13, 13, 14, 0.5);
+  box-shadow: none;
+  transition:
+    transform 180ms ease,
+    background 180ms ease,
+    border-color 180ms ease,
+    color 180ms ease;
+}
+
+.history-icon-button:hover {
+  border-color: rgba(12, 12, 13, 0.16);
+  background: rgba(255, 255, 255, 0.74);
+  color: rgba(13, 13, 14, 0.84);
+}
+
+.history-icon-button.is-danger:hover {
+  border-color: rgba(150, 28, 28, 0.18);
+  background: rgba(255, 255, 255, 0.78);
+  color: rgba(140, 20, 20, 0.86);
+}
+
+.config-list {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  flex: 1;
+  gap: 10px;
+  overflow-y: auto;
+  padding: 14px;
+  scrollbar-color: rgba(0, 0, 0, 0.2) transparent;
+  scrollbar-width: thin;
+}
+
+.config-group {
+  flex: 0 0 auto;
+  overflow: hidden;
+  border: 1px solid rgba(12, 12, 13, 0.08);
+  border-radius: 22px;
+  background: rgba(255, 255, 255, 0.48);
+}
+
+.config-group-head {
+  justify-content: space-between;
+  width: 100%;
+  min-height: 48px;
+  padding: 0 13px;
+  border-radius: 0;
+  background: transparent;
+}
+
+.config-group-head span {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.9rem;
+  font-weight: 650;
+}
+
+.config-group-head > svg {
+  transition: transform 220ms ease;
+}
+
+.config-group.is-open .config-group-head > svg {
+  transform: rotate(90deg);
+}
+
+.config-group-body {
+  display: grid;
+  max-height: 0;
+  gap: 10px;
+  overflow: hidden;
+  padding: 0 13px;
+  opacity: 0;
+  transition:
+    max-height 280ms cubic-bezier(0.22, 1, 0.36, 1),
+    opacity 180ms ease,
+    padding 220ms ease;
+}
+
+.config-group.is-open .config-group-body {
+  max-height: 860px;
+  padding: 0 13px 13px;
+  opacity: 1;
+}
+
+.field {
+  display: grid;
+  min-width: 0;
+  gap: 7px;
+}
+
+.field span {
+  color: var(--ink-muted);
+  font-size: 0.76rem;
+  font-weight: 700;
+}
+
+.field input,
+.field select {
+  width: 100%;
+  min-height: 42px;
+  border: 1px solid rgba(12, 12, 13, 0.11);
+  border-radius: 16px;
+  outline: 0;
+  background: rgba(255, 255, 255, 0.72);
+  color: var(--ink);
+  padding: 0 12px;
+  transition:
+    border-color 160ms ease,
+    box-shadow 160ms ease,
+    background 160ms ease;
+}
+
+.field input:focus,
+.field select:focus,
+.composer textarea:focus,
+.floating-composer input:focus {
+  border-color: rgba(12, 12, 13, 0.34);
+  box-shadow: 0 0 0 4px rgba(0, 0, 0, 0.055);
+}
+
+.inline-fields {
+  gap: 10px;
+}
+
+.inline-fields .field {
+  flex: 1;
+}
+
+.switch-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 42px;
+  padding: 0 12px;
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.5);
+}
+
+.switch-row span {
+  color: var(--ink-soft);
+  font-size: 0.86rem;
+}
+
+.config-actions {
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.live2d-folder-input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.live2d-import-label {
+  position: relative;
+  overflow: hidden;
+  cursor: pointer;
+}
+
+.live2d-import-label.is-disabled {
+  cursor: not-allowed;
+  opacity: 0.42;
+  pointer-events: none;
+}
+
+.live2d-current {
+  display: grid;
+  min-width: 0;
+  gap: 4px;
+  padding: 11px 12px;
+  border: 1px solid rgba(12, 12, 13, 0.08);
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.5);
+}
+
+.live2d-current strong {
+  overflow: hidden;
+  font-size: 0.88rem;
+  font-weight: 740;
+  line-height: 1.18;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.live2d-current span,
+.live2d-import-status {
+  color: var(--ink-muted);
+  font-size: 0.74rem;
+  line-height: 1.35;
+}
+
+.live2d-import-actions {
+  justify-content: flex-start;
+}
+
+.live2d-import-status {
+  padding: 0 2px;
+}
+
+.live2d-history-list {
+  display: grid;
+  max-height: 230px;
+  gap: 8px;
+  overflow-y: auto;
+  padding-right: 2px;
+  scrollbar-color: rgba(0, 0, 0, 0.2) transparent;
+  scrollbar-width: thin;
+}
+
+.live2d-history-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+}
+
+.live2d-history-main {
+  display: grid;
+  justify-items: start;
+  min-height: 48px;
+  padding: 7px 11px;
+  border-radius: 14px;
+  text-align: left;
+}
+
+.live2d-history-row.is-current .live2d-history-main {
+  border-color: rgba(12, 12, 13, 0.16);
+  background: rgba(255, 255, 255, 0.78);
+  color: var(--ink);
+}
+
+.live2d-history-main span,
+.live2d-history-main small {
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.live2d-history-main span {
+  color: inherit;
+  font-size: 0.84rem;
+  font-weight: 690;
+}
+
+.live2d-history-main small {
+  color: var(--ink-muted);
+  font-size: 0.7rem;
+}
+

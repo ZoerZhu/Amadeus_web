@@ -119,6 +119,7 @@ class AgentInvokeRequest(BaseModel):
 class CodeTaskStreamRequest(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
+    task_id: str = Field(default="", alias="taskId")
     title: str = ""
     prompt: str
     workspace_path: str = Field(default="", alias="workspacePath")
@@ -126,5 +127,61 @@ class CodeTaskStreamRequest(BaseModel):
     provider_id: str = Field(default="", alias="providerId")
     model_id: str = Field(default="", alias="modelId")
     session_id: str = Field(default="", alias="sessionId")
+    source: str = "host"
     auto_approve: bool = Field(default=False, alias="autoApprove")
     timeout_seconds: int = Field(default=1800, alias="timeoutSeconds")
+
+
+class CodeTaskQuestionReplyRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    server_url: str = Field(alias="serverUrl")
+    session_id: str = Field(alias="sessionId")
+    request_id: str = Field(alias="requestId")
+    answers: list[list[str]] = Field(default_factory=list)
+    v2: bool = True
+    reject: bool = False
+
+
+class CodeTaskRemoteMessageRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    prompt: str
+    title: str = ""
+    agent: str = ""
+    provider_id: str = Field(default="", alias="providerId")
+    model_id: str = Field(default="", alias="modelId")
+    auto_approve: bool = Field(default=False, alias="autoApprove")
+    timeout_seconds: int = Field(default=1800, alias="timeoutSeconds")
+
+
+class CodeTaskMobileQuestionReplyRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    request_id: str = Field(alias="requestId")
+    answers: list[list[str]] = Field(default_factory=list)
+    v2: bool = True
+    reject: bool = False
+    wait_for_result: bool = Field(default=False, alias="waitForResult")
+    after_seq: int = Field(default=0, alias="afterSeq")
+    timeout_seconds: int = Field(default=180, alias="timeoutSeconds")
+
+
+class CodeTaskSnapshot(BaseModel):
+    model_config = ConfigDict(populate_by_name=True, extra="allow")
+
+    id: str
+    title: str = ""
+    prompt: str = ""
+    workspace_path: str = Field(default="", alias="workspacePath")
+    status: str = "idle"
+    session_id: str = Field(default="", alias="sessionId")
+    created_at: str = Field(default="", alias="createdAt")
+    updated_at: str = Field(default="", alias="updatedAt")
+    messages: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class CodeTaskSyncRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    tasks: list[CodeTaskSnapshot] = Field(default_factory=list)

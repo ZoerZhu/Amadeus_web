@@ -1,0 +1,92 @@
+﻿@media (max-width: 1080px) {
+  .top-bar {
+    width: calc(100vw - 28px);
+  }
+
+  .config-dock {
+    width: min(var(--config-width), calc(100vw - var(--left-width) - 54px));
+  }
+}
+
+@media (max-width: 760px) {
+  .top-bar {
+    align-items: stretch;
+    min-height: 102px;
+    flex-direction: column;
+    border-radius: 26px;
+  }
+
+  .top-actions {
+    justify-content: space-between;
+  }
+
+  .model-switch {
+    flex: 1;
+  }
+
+  .model-switch select {
+    max-width: none;
+    width: 100%;
+  }
+
+  .left-dock,
+  .config-dock,
+  .chat-panel {
+    top: 128px;
+  }
+
+  .left-dock,
+  .config-dock {
+    width: calc(100vw - 36px);
+  }
+
+  .config-dock {
+    left: 18px !important;
+    transform: translateY(26px) scale(0.98);
+  }
+
+  .config-dock.is-open {
+    transform: translateY(0) scale(1);
+  }
+
+  .chat-panel {
+    right: 12px;
+    width: calc(100vw - 24px);
+  }
+
+  .chat-edge-toggle.is-open {
+    right: 24px;
+    top: 122px;
+  }
+
+  .floating-composer {
+    grid-template-columns: 34px minmax(0, 1fr) 36px 40px;
+  }
+
+  .upload-attachment-card {
+    width: min(270px, 76vw);
+    min-width: min(230px, 76vw);
+  }
+
+  .mode-select {
+    display: none;
+  }
+
+  .emotion-chip {
+    left: 88px;
+  }
+
+  .live2d-quick-controls {
+    left: 88px;
+    max-width: calc(100vw - 108px);
+  }
+
+  .live2d-control-panel {
+    width: calc(100vw - 108px);
+  }
+
+  .live2d-option-grid {
+    grid-template-columns: 1fr;
+  }
+
+}

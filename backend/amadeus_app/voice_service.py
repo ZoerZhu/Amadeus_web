@@ -113,10 +113,13 @@ async def prepare_task_summary_speech_text(
                 "role": "system",
                 "content": (
                     "你是 Amadeus 系统中的牧濑红莉栖人格。"
-                    "把输入的 OpenCode 任务总结改写成适合 TTS 朗读的自然日语播报稿。"
+                    "根据输入中的 OpenCode 最终回答，提炼一段适合 TTS 朗读的自然日语任务完成播报。"
                     "只输出日语正文，不要 Markdown、编号、项目符号、引号、括号、emoji 或 URL。"
-                    "语气要理性、克制、略带一点红莉栖式的锐利，但不要夸张。"
-                    "控制在 2 到 4 句。"
+                    "必须简短精炼，控制在 1 到 2 句，最多 90 个日文字符左右。"
+                    "语气要理性、克制、略带一点红莉栖式的锋利和别扭关心，但不要夸张。"
+                    "不要复述执行过程，不要说“我先读取”“我需要分析”“让我看看”之类过程自述。"
+                    "不要播报工作目录、工具次数、diff 次数或完整文件路径，除非这是用户关心的结论。"
+                    "只总结任务完成了什么、最终结论是什么、是否有需要用户注意的地方。"
                     "文件路径必须口语化描述，绝对不要逐字符朗读盘符、冒号、反斜杠或长路径；"
                     "例如把“Amadeus 项目下 tasktest 文件夹里的 login HTML 文件”说成"
                     "“AmadeusプロジェクトのtasktestフォルダーにあるloginのHTMLファイル”。"
@@ -180,11 +183,13 @@ def oralize_single_file_path(value: str) -> str:
 
 
 def fallback_task_summary_speech(source: str) -> str:
-    task_match = re.search(r"「([^」]{1,48})」", source)
-    task = task_match.group(1) if task_match else "今回のOpenCodeタスク"
-    has_file_change = "文件" in source or "差异" in source or "変更" in source
-    file_sentence = "変更されたファイルは画面のタスク履歴にまとめてある。" if has_file_change else "詳しいログはタスク履歴で確認できる。"
-    return f"OpenCodeのタスク、{task}は完了したわ。{file_sentence}長いパスは省略しておくから、必要なら履歴を見て。"
+    task_match = re.search(r"任务标题[:：]\s*([^\n]{1,48})", source)
+    task = task_match.group(1).strip() if task_match else "今回のタスク"
+    if "深色" in source or "毛玻璃" in source or "macOS" in source or "iOS" in source:
+        return "確認は終わったわ。三つのページは、暗色基調とグラスモーフィズムで統一された、かなり今風のUIね。"
+    if "完成" in source or "已完成" in source:
+        return f"{task}は完了したわ。細かい内容は履歴に残してあるから、必要ならそこを確認して。"
+    return f"{task}の確認は終わったわ。要点だけなら、結果はタスク履歴にまとめてある。"
 
 
 async def synthesize_local_segments_for_persona(

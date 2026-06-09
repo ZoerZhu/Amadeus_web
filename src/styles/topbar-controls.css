@@ -1,0 +1,330 @@
+﻿.top-bar {
+  position: fixed;
+  top: 16px;
+  left: 50%;
+  z-index: 12;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: min(860px, calc(100vw - 36px));
+  min-height: 58px;
+  padding: 8px 10px;
+  border-radius: 24px;
+  background: rgba(255, 255, 255, 0.64);
+  transform: translateX(-50%);
+}
+
+.brand-mark,
+.top-actions,
+.composer-actions,
+.modal-actions,
+.chat-head,
+.dock-head,
+.section-title,
+.config-actions,
+.inline-fields {
+  display: flex;
+  align-items: center;
+}
+
+.brand-mark {
+  min-width: 0;
+  gap: 10px;
+  padding-left: 4px;
+}
+
+.brand-orbit,
+.avatar-launcher {
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  color: #fff;
+  background: #0f0f10;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.12), var(--small-shadow);
+}
+
+.brand-orbit {
+  width: 36px;
+  height: 36px;
+}
+
+.brand-mark h1,
+.chat-head h2,
+.dock-head h2 {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 680;
+  line-height: 1.08;
+}
+
+.brand-mark p {
+  max-width: 210px;
+  margin: 3px 0 0;
+  overflow: hidden;
+  color: var(--ink-soft);
+  font-size: 0.78rem;
+  line-height: 1.15;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.top-actions {
+  gap: 8px;
+}
+
+.model-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 38px;
+  padding: 0 10px;
+  border: 1px solid rgba(12, 12, 13, 0.08);
+  border-radius: var(--radius-pill);
+  background: rgba(255, 255, 255, 0.6);
+  color: var(--ink-soft);
+}
+
+.model-switch select {
+  max-width: 150px;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--ink);
+  font-size: 0.84rem;
+}
+
+.segmented-control {
+  position: relative;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  width: 142px;
+  min-height: 38px;
+  padding: 4px;
+  border: 1px solid rgba(12, 12, 13, 0.08);
+  border-radius: var(--radius-pill);
+  background: rgba(245, 245, 245, 0.68);
+}
+
+.segmented-indicator {
+  position: absolute;
+  top: 4px;
+  bottom: 4px;
+  left: 4px;
+  width: calc(50% - 4px);
+  border-radius: var(--radius-pill);
+  background: #101011;
+  box-shadow: var(--small-shadow);
+  transition: transform 260ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+.segmented-control.is-thinking .segmented-indicator {
+  transform: translateX(calc(100% + 0px));
+}
+
+.segmented-control button,
+.text-icon-button,
+.primary-button,
+.send-button,
+.icon-button,
+.round-tool,
+.round-send,
+.dock-action,
+.dock-nav-item,
+.history-item,
+.history-icon-button,
+.task-item,
+.config-group-head,
+.chat-edge-toggle,
+.mode-select {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  border-radius: var(--radius-pill);
+  color: var(--ink);
+  transition:
+    transform 190ms ease,
+    background 190ms ease,
+    color 190ms ease,
+    box-shadow 190ms ease,
+    border-color 190ms ease,
+    opacity 190ms ease;
+}
+
+.segmented-control button {
+  position: relative;
+  z-index: 1;
+  min-height: 30px;
+  padding: 0 9px;
+  background: transparent;
+  color: var(--ink-soft);
+  font-size: 0.84rem;
+}
+
+.segmented-control button.is-active {
+  color: #fff;
+}
+
+.icon-button {
+  width: 38px;
+  height: 38px;
+  flex: 0 0 auto;
+  border: 1px solid rgba(12, 12, 13, 0.08);
+  background: rgba(255, 255, 255, 0.68);
+}
+
+.text-icon-button,
+.primary-button {
+  min-height: 40px;
+  padding: 0 14px;
+  border: 1px solid rgba(12, 12, 13, 0.1);
+  background: rgba(255, 255, 255, 0.7);
+}
+
+.text-icon-button.is-active,
+.primary-button {
+  color: #fff;
+  background: #101011;
+}
+
+.send-button,
+.round-send {
+  color: #fff;
+  background: #0e0e0f;
+  box-shadow: var(--small-shadow);
+}
+
+.send-button {
+  width: 46px;
+  height: 46px;
+}
+
+.segmented-control button:hover,
+.icon-button:hover,
+.text-icon-button:hover,
+.primary-button:hover,
+.send-button:hover,
+.round-tool:hover,
+.round-send:hover,
+.dock-action:hover,
+.dock-nav-item:hover,
+.history-item:hover,
+.history-icon-button:hover,
+.task-item:hover,
+.config-group-head:hover,
+.chat-edge-toggle:hover,
+.mode-select:hover {
+  transform: translateY(-1px);
+}
+
+.avatar-launcher {
+  position: fixed;
+  left: 24px;
+  bottom: 24px;
+  z-index: 18;
+  width: 56px;
+  height: 56px;
+  transition:
+    transform 260ms cubic-bezier(0.22, 1, 0.36, 1),
+    box-shadow 190ms ease;
+}
+
+.avatar-launcher.is-active {
+  transform: scale(1.04);
+}
+
+.emotion-chip {
+  position: fixed;
+  left: 94px;
+  bottom: 30px;
+  z-index: 13;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 13px;
+  border-radius: var(--radius-pill);
+  color: rgba(0, 0, 0, 0.72);
+  font-size: 0.82rem;
+  background: rgba(255, 255, 255, 0.72);
+  transition:
+    transform 260ms ease,
+    opacity 220ms ease;
+}
+
+.is-menu-open .emotion-chip {
+  transform: translateX(250px);
+  opacity: 0;
+}
+
+.live2d-quick-controls {
+  position: fixed;
+  left: 94px;
+  bottom: 30px;
+  z-index: 34;
+  display: grid;
+  max-width: min(340px, calc(100vw - 116px));
+  gap: 10px;
+  transition:
+    transform 260ms ease,
+    opacity 220ms ease;
+}
+
+.live2d-quick-controls .emotion-chip {
+  position: relative;
+  left: auto;
+  bottom: auto;
+  z-index: 35;
+  justify-self: start;
+  min-height: 40px;
+  border-radius: var(--radius-pill);
+}
+
+.live2d-quick-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  justify-self: start;
+  min-width: 0;
+}
+
+.live2d-quick-controls .emotion-chip span {
+  max-width: 160px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.live2d-lock-button {
+  display: grid;
+  width: 40px;
+  height: 40px;
+  place-items: center;
+  border-radius: 50%;
+  color: rgba(13, 13, 14, 0.7);
+  background: rgba(255, 255, 255, 0.72);
+  transition:
+    transform 190ms ease,
+    background 190ms ease,
+    color 190ms ease;
+}
+
+.live2d-lock-button.is-locked {
+  color: #fff;
+  background: #101011;
+}
+
+.live2d-lock-button:hover {
+  transform: translateY(-1px);
+}
+
+.is-menu-open .live2d-quick-controls {
+  transform: translateX(250px);
+  opacity: 0;
+  pointer-events: none;
+}
+
+.is-menu-open .live2d-quick-controls .emotion-chip {
+  transform: none;
+  opacity: 1;
+}
+

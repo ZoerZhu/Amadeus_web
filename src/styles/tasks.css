@@ -1,0 +1,706 @@
+﻿.code-task-workspace {
+  display: grid;
+  gap: 10px;
+  padding: 14px 18px 12px;
+  border-bottom: 1px solid var(--line);
+}
+
+.code-task-current {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.code-task-current strong {
+  overflow: hidden;
+  color: rgba(13, 13, 14, 0.76);
+  font-size: 0.88rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.code-task-current small {
+  overflow: hidden;
+  color: rgba(13, 13, 14, 0.42);
+  font-size: 0.72rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.folder-field {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 38px;
+  gap: 8px;
+}
+
+.code-task-approval {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  color: var(--ink-soft);
+  font-size: 0.8rem;
+}
+
+.code-task-approval input {
+  accent-color: #101011;
+}
+
+.code-task-list {
+  display: flex;
+  min-height: 0;
+  flex: 1;
+  flex-direction: column;
+  gap: 12px;
+  align-items: stretch;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 18px;
+  scrollbar-color: rgba(0, 0, 0, 0.22) transparent;
+  scrollbar-width: thin;
+}
+
+.code-task-dialog {
+  max-width: 92%;
+}
+
+.code-task-dialog.is-assistant {
+  width: 92%;
+}
+
+.code-task-dialog .message-bubble {
+  max-height: min(52vh, 460px);
+  overflow-y: auto;
+  scrollbar-color: rgba(0, 0, 0, 0.22) transparent;
+  scrollbar-width: thin;
+}
+
+.code-task-dialog .message-bubble::-webkit-scrollbar {
+  width: 7px;
+}
+
+.code-task-dialog .message-bubble::-webkit-scrollbar-thumb {
+  border-radius: var(--radius-pill);
+  background: rgba(0, 0, 0, 0.2);
+}
+
+.code-task-dialog.is-user .message-bubble {
+  max-height: min(28vh, 240px);
+}
+
+.code-task-processed {
+  width: 100%;
+  min-height: 48px;
+  flex: 0 0 auto;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.62);
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.56);
+  box-shadow: 0 14px 42px rgba(0, 0, 0, 0.08);
+}
+
+.code-task-processed-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  min-height: 48px;
+  padding: 0 16px;
+  border: 0;
+  background: transparent;
+  color: rgba(13, 13, 14, 0.68);
+  font: inherit;
+  cursor: pointer;
+  user-select: none;
+}
+
+.code-task-processed-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  font-size: 0.86rem;
+  font-weight: 680;
+}
+
+.code-task-processed-title small {
+  color: rgba(13, 13, 14, 0.42);
+  font-size: 0.76rem;
+  font-weight: 520;
+}
+
+.code-task-processed-meta {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 0 0 auto;
+  color: rgba(13, 13, 14, 0.42);
+  font-size: 0.72rem;
+}
+
+.code-task-processed .label-open,
+.code-task-processed.is-open .label-closed {
+  display: none;
+}
+
+.code-task-processed.is-open .label-open,
+.code-task-processed .label-closed {
+  display: inline;
+}
+
+.code-task-processed-body {
+  display: grid;
+  gap: 10px;
+  max-height: min(56vh, 520px);
+  min-height: 0;
+  overflow-y: auto;
+  padding: 0 14px 14px;
+  overscroll-behavior: contain;
+  scrollbar-color: rgba(0, 0, 0, 0.22) transparent;
+  scrollbar-width: thin;
+}
+
+.code-task-processed-body::-webkit-scrollbar {
+  width: 7px;
+}
+
+.code-task-processed-body::-webkit-scrollbar-thumb {
+  border-radius: var(--radius-pill);
+  background: rgba(0, 0, 0, 0.18);
+}
+
+.code-task-thinking-card {
+  margin-bottom: 12px;
+}
+
+.code-task-thinking-card .thinking-card-body {
+  max-height: min(38vh, 360px);
+  overflow-y: auto;
+}
+
+.code-task-live-output {
+  margin: 0;
+  color: rgba(13, 13, 14, 0.72);
+  font-size: 0.88rem;
+  line-height: 1.58;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.code-task-question-card {
+  display: grid;
+  gap: 12px;
+  margin-top: 12px;
+  padding: 12px;
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.54);
+}
+
+.code-task-question-card.is-composer {
+  max-height: min(42vh, 380px);
+  margin-top: 0;
+  overflow-y: auto;
+  background: rgba(255, 255, 255, 0.58);
+  scrollbar-color: rgba(0, 0, 0, 0.22) transparent;
+  scrollbar-width: thin;
+}
+
+.code-task-question-card.is-composer::-webkit-scrollbar {
+  width: 7px;
+}
+
+.code-task-question-card.is-composer::-webkit-scrollbar-thumb {
+  border-radius: var(--radius-pill);
+  background: rgba(0, 0, 0, 0.18);
+}
+
+.code-task-question-item {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.code-task-question-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.code-task-question-head strong {
+  overflow: hidden;
+  color: rgba(13, 13, 14, 0.76);
+  font-size: 0.82rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.code-task-question-head small,
+.code-task-question-actions span {
+  flex: 0 0 auto;
+  color: rgba(13, 13, 14, 0.44);
+  font-size: 0.72rem;
+}
+
+.code-task-question-item p {
+  margin: 0;
+  color: rgba(13, 13, 14, 0.66);
+  font-size: 0.84rem;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.code-task-question-options {
+  display: grid;
+  gap: 8px;
+}
+
+.code-task-question-options button {
+  display: grid;
+  gap: 3px;
+  width: 100%;
+  padding: 9px 10px;
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.62);
+  color: rgba(13, 13, 14, 0.7);
+  font: inherit;
+  text-align: left;
+  transition: background 140ms ease, border-color 140ms ease, box-shadow 140ms ease;
+}
+
+.code-task-question-options button:not(:disabled) {
+  cursor: pointer;
+}
+
+.code-task-question-options button:hover:not(:disabled),
+.code-task-question-options button.is-selected {
+  border-color: rgba(16, 16, 17, 0.26);
+  background: rgba(255, 255, 255, 0.86);
+  box-shadow: inset 0 0 0 1px rgba(16, 16, 17, 0.08);
+}
+
+.code-task-question-options button span {
+  font-size: 0.82rem;
+  font-weight: 680;
+}
+
+.code-task-question-options button small {
+  color: rgba(13, 13, 14, 0.5);
+  font-size: 0.76rem;
+  line-height: 1.35;
+}
+
+.code-task-question-custom {
+  width: 100%;
+  min-width: 0;
+  padding: 9px 10px;
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.7);
+  color: rgba(13, 13, 14, 0.72);
+  font: inherit;
+  font-size: 0.82rem;
+  outline: none;
+}
+
+.code-task-question-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.code-task-question-actions .text-icon-button {
+  min-height: 34px;
+  padding: 0 12px;
+}
+
+.code-task-question-actions .text-icon-button.is-muted {
+  background: rgba(255, 255, 255, 0.52);
+  color: rgba(13, 13, 14, 0.52);
+}
+
+.code-task-question-submitted {
+  margin: 0;
+  overflow: auto;
+  padding: 8px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.56);
+  color: rgba(13, 13, 14, 0.56);
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 0.72rem;
+  line-height: 1.42;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.code-task-question-note {
+  margin: 7px 0 0;
+  padding: 7px 8px;
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.46);
+  color: rgba(13, 13, 14, 0.5);
+  font-size: 0.76rem;
+  line-height: 1.45;
+  white-space: pre-wrap;
+}
+
+.code-task-tool-trace-list {
+  gap: 2px;
+}
+
+.code-task-trace-event {
+  min-width: 0;
+  margin-top: 7px;
+  padding: 7px 8px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.42);
+}
+
+.code-task-trace-event-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+
+.code-task-trace-event-head span {
+  overflow: hidden;
+  color: rgba(13, 13, 14, 0.62);
+  font-size: 0.76rem;
+  font-weight: 680;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.code-task-trace-event-head time {
+  flex: 0 0 auto;
+  color: rgba(13, 13, 14, 0.36);
+  font-size: 0.68rem;
+}
+
+.code-task-trace-event p {
+  margin: 4px 0 0;
+  color: rgba(13, 13, 14, 0.56);
+  font-size: 0.78rem;
+  line-height: 1.48;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.code-task-trace-details {
+  margin-top: 7px;
+}
+
+.code-task-bubble-detail {
+  max-height: 180px;
+  margin: 9px 0 0;
+  overflow: auto;
+  padding: 8px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.54);
+  color: rgba(13, 13, 14, 0.56);
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 0.72rem;
+  line-height: 1.42;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.code-task-message {
+  display: grid;
+  grid-template-columns: 26px minmax(0, 1fr);
+  gap: 9px;
+  align-items: start;
+}
+
+.code-task-message-icon {
+  display: grid;
+  width: 26px;
+  height: 26px;
+  place-items: center;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.66);
+  color: rgba(13, 13, 14, 0.54);
+  box-shadow: 0 10px 26px rgba(0, 0, 0, 0.08);
+}
+
+.code-task-message.is-error .code-task-message-icon {
+  color: #b43b3b;
+}
+
+.code-task-message.is-done .code-task-message-icon {
+  color: #1b7f4c;
+}
+
+.code-task-message.is-permission .code-task-message-icon {
+  color: #8a5b11;
+}
+
+.code-task-message-body {
+  min-width: 0;
+  overflow: hidden;
+  padding: 10px 12px;
+  border: 1px solid rgba(255, 255, 255, 0.58);
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.46);
+  box-shadow: 0 12px 38px rgba(0, 0, 0, 0.08);
+}
+
+.code-task-message.is-user .code-task-message-body {
+  background: rgba(255, 255, 255, 0.32);
+}
+
+.code-task-message-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.code-task-message-head strong {
+  overflow: hidden;
+  color: rgba(13, 13, 14, 0.68);
+  font-size: 0.8rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.code-task-message-head time {
+  flex: 0 0 auto;
+  color: rgba(13, 13, 14, 0.38);
+  font-size: 0.7rem;
+}
+
+.code-task-message-body p {
+  margin: 0;
+  color: rgba(13, 13, 14, 0.68);
+  font-size: 0.86rem;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.code-task-message-body .markdown-content p,
+.code-task-message-body .markdown-content li,
+.code-task-message-body .markdown-content pre {
+  font-size: 0.86rem;
+}
+
+.code-task-message-body pre {
+  max-height: 210px;
+  margin: 8px 0 0;
+  overflow: auto;
+  padding: 9px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.56);
+  color: rgba(13, 13, 14, 0.58);
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 0.72rem;
+  line-height: 1.42;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.code-task-phase {
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.58);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.42);
+  box-shadow: 0 12px 34px rgba(0, 0, 0, 0.07);
+}
+
+.code-task-phase summary {
+  display: grid;
+  grid-template-columns: 24px minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: center;
+  min-height: 42px;
+  padding: 9px 11px;
+  cursor: pointer;
+  list-style: none;
+}
+
+.code-task-phase summary::-webkit-details-marker {
+  display: none;
+}
+
+.code-task-phase-icon {
+  display: grid;
+  width: 24px;
+  height: 24px;
+  place-items: center;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.62);
+  color: rgba(13, 13, 14, 0.5);
+}
+
+.code-task-phase.is-running .code-task-phase-icon {
+  color: #101011;
+}
+
+.code-task-phase.is-error .code-task-phase-icon {
+  color: #b43b3b;
+}
+
+.code-task-phase-title {
+  overflow: hidden;
+  color: rgba(13, 13, 14, 0.74);
+  font-size: 0.84rem;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.code-task-phase summary small {
+  color: rgba(13, 13, 14, 0.42);
+  font-size: 0.72rem;
+}
+
+.phase-spinner {
+  animation: phase-spin 1.1s linear infinite;
+}
+
+@keyframes phase-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.code-task-phase-body {
+  display: grid;
+  gap: 8px;
+  max-height: min(48vh, 430px);
+  overflow-y: auto;
+  padding: 0 10px 10px 34px;
+  scrollbar-color: rgba(0, 0, 0, 0.22) transparent;
+  scrollbar-width: thin;
+}
+
+.code-task-phase-body::-webkit-scrollbar {
+  width: 7px;
+}
+
+.code-task-phase-body::-webkit-scrollbar-thumb {
+  border-radius: var(--radius-pill);
+  background: rgba(0, 0, 0, 0.2);
+}
+
+.code-task-phase-hidden {
+  color: rgba(13, 13, 14, 0.38);
+  font-size: 0.72rem;
+}
+
+.code-task-phase-event {
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr);
+  gap: 7px;
+  align-items: start;
+}
+
+.code-task-phase-event-icon {
+  display: grid;
+  width: 20px;
+  height: 20px;
+  place-items: center;
+  color: rgba(13, 13, 14, 0.44);
+}
+
+.code-task-phase-event.is-error .code-task-phase-event-icon {
+  color: #b43b3b;
+}
+
+.code-task-phase-event.is-done .code-task-phase-event-icon {
+  color: #1b7f4c;
+}
+
+.code-task-phase-event-body {
+  min-width: 0;
+  padding: 8px 9px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.5);
+}
+
+.code-task-phase-event-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.code-task-phase-event-head strong {
+  overflow: hidden;
+  color: rgba(13, 13, 14, 0.62);
+  font-size: 0.74rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.code-task-phase-event-head time {
+  flex: 0 0 auto;
+  color: rgba(13, 13, 14, 0.36);
+  font-size: 0.68rem;
+}
+
+.code-task-phase-event-body p {
+  margin: 0;
+  color: rgba(13, 13, 14, 0.66);
+  font-size: 0.8rem;
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.code-task-phase-event-body pre {
+  max-height: 170px;
+  margin: 7px 0 0;
+  overflow: auto;
+  padding: 8px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.58);
+  color: rgba(13, 13, 14, 0.56);
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 0.7rem;
+  line-height: 1.42;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.code-task-composer {
+  display: grid;
+  gap: 10px;
+  padding: 12px 16px 16px;
+  border-top: 1px solid var(--line);
+}
+
+.code-task-composer.has-question {
+  gap: 9px;
+}
+
+.code-task-composer textarea {
+  width: 100%;
+  min-height: 86px;
+  max-height: 180px;
+  resize: vertical;
+}
+
+.code-task-status {
+  overflow: hidden;
+  max-width: 120px;
+  color: rgba(13, 13, 14, 0.42);
+  font-size: 0.75rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.code-task-status.is-live {
+  color: #101011;
+  font-weight: 700;
+}
+

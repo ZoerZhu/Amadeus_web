@@ -161,6 +161,73 @@ Response:
 
 Current safe tools are `get_current_time`, `calculate`, `echo`, `describe_capabilities`, `web_search`, `doc_writer`, `file_reader`, and `todo_task`. High-risk local tools such as shell, browser automation, and unrestricted file writes are intentionally disabled in the simple agent.
 
+## Mobile Code Task Bridge
+
+The host backend keeps an in-memory OpenCode task hub so a mobile client can monitor and advance code tasks started on the host.
+
+Desktop/web tasks are registered automatically when `/api/code-tasks/stream` is called with `taskId`. The web app also syncs stored local task history once on startup:
+
+```http
+POST /api/code-tasks/sync
+```
+
+Mobile discovery:
+
+```http
+GET /api/mobile/connect-info
+GET /api/mobile/code-tasks
+GET /api/mobile/code-tasks/{taskId}
+```
+
+Realtime subscription options:
+
+```http
+GET /api/mobile/code-tasks/{taskId}/events?replay=true
+WebSocket /api/mobile/code-tasks/{taskId}/ws
+```
+
+The SSE stream emits the same OpenCode event names used by the host UI: `input`, `session`, `status`, `output`, `tool`, `command`, `file`, `diff`, `permission`, `question`, `question_result`, `error`, and `done`. Each payload includes `taskId`, `eventId`, and `emittedAt`.
+
+To advance an existing task from mobile:
+
+```http
+POST /api/mobile/code-tasks/{taskId}/messages
+Content-Type: application/json
+```
+
+```json
+{
+  "prompt": "继续修复刚才的 TypeScript 报错",
+  "autoApprove": false,
+  "timeoutSeconds": 1800
+}
+```
+
+If the OpenCode session is still running, the host sends the prompt to that live session. If the task is idle but has a saved `sessionId`, the host starts OpenCode again in the background and resumes that session.
+
+When OpenCode emits a `question` event, mobile can submit an existing option or custom text:
+
+```http
+POST /api/mobile/code-tasks/{taskId}/question/reply
+Content-Type: application/json
+```
+
+```json
+{
+  "requestId": "question-request-id",
+  "answers": [["Use existing option or custom answer"]],
+  "v2": true,
+  "reject": false
+}
+```
+
+The WebSocket accepts the same commands:
+
+```json
+{ "type": "message", "prompt": "继续推进这个任务" }
+{ "type": "question_reply", "requestId": "question-request-id", "answers": [["自定义选项"]] }
+```
+
 `web_search` is backed by a LangGraph search workflow:
 
 ```text

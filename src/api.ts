@@ -3,6 +3,7 @@ import type {
   AgentInvokeResponse,
   ApiChatMessage,
   CodeTaskEvent,
+  CodeTaskQuestionReplyRequest,
   CodeTaskStreamRequest,
   ChatMode,
   ConversationDetail,
@@ -12,6 +13,7 @@ import type {
   ProviderPreset,
   StoredSettings,
   StreamEvent,
+  TaskSummaryVoiceEvent,
   UploadDevice,
   VoiceSettings
 } from "./types";
@@ -177,6 +179,7 @@ export async function streamCodeTask(options: CodeTaskStreamRequest & {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
+      taskId: options.taskId ?? "",
       title: options.title ?? "",
       prompt: options.prompt,
       workspacePath: options.workspacePath,
@@ -208,6 +211,103 @@ export async function streamCodeTask(options: CodeTaskStreamRequest & {
   }
   buffer += decoder.decode();
   drainSseBuffer<CodeTaskEvent>(buffer, options.onEvent, true);
+}
+
+export async function syncCodeTaskHistory(tasks: unknown[]): Promise<void> {
+  const response = await fetch("/api/code-tasks/sync", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ tasks })
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(data.detail || `code task sync ${response.status}`);
+  }
+}
+
+export function subscribeCodeTaskEvents(options: {
+  taskId: string;
+  replay?: boolean;
+  onEvent: (event: CodeTaskEvent) => void;
+  onTask?: (task: unknown) => void;
+  onError?: (message: string) => void;
+}): () => void {
+  const replay = options.replay === true ? "true" : "false";
+  const source = new EventSource(`/api/mobile/code-tasks/${encodeURIComponent(options.taskId)}/events?replay=${replay}`);
+  const eventNames = [
+    "input",
+    "session",
+    "status",
+    "output",
+    "log",
+    "tool",
+    "command",
+    "file",
+    "diff",
+    "permission",
+    "question",
+    "question_result",
+    "error",
+    "done"
+  ];
+
+  const parsePayload = <T>(event: MessageEvent<string>): T | null => {
+    try {
+      return JSON.parse(event.data) as T;
+    } catch {
+      return null;
+    }
+  };
+
+  const taskHandler = (event: MessageEvent<string>) => {
+    const payload = parsePayload<{ task?: unknown }>(event);
+    if (payload?.task !== undefined) {
+      options.onTask?.(payload.task);
+    }
+  };
+  source.addEventListener("task", taskHandler);
+
+  const handlers = eventNames.map((eventName) => {
+    const handler = (event: MessageEvent<string>) => {
+      const payload = parsePayload<Record<string, unknown>>(event);
+      if (!payload) {
+        options.onError?.(`task event parse failed: ${eventName}`);
+        return;
+      }
+      options.onEvent({ event: eventName, payload } as CodeTaskEvent);
+    };
+    source.addEventListener(eventName, handler);
+    return { eventName, handler };
+  });
+
+  source.onerror = () => {
+    options.onError?.("task event stream disconnected");
+  };
+
+  return () => {
+    source.removeEventListener("task", taskHandler);
+    handlers.forEach(({ eventName, handler }) => source.removeEventListener(eventName, handler));
+    source.close();
+  };
+}
+
+export async function replyCodeTaskQuestion(options: CodeTaskQuestionReplyRequest): Promise<void> {
+  const response = await fetch("/api/code-tasks/question/reply", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      serverUrl: options.serverUrl,
+      sessionId: options.sessionId,
+      requestId: options.requestId,
+      answers: options.answers,
+      v2: options.v2 ?? true,
+      reject: options.reject ?? false
+    })
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(data.detail || `question reply ${response.status}`);
+  }
 }
 
 export async function uploadAgentFile(options: {
@@ -260,7 +360,46 @@ export async function synthesizeTaskSummaryVoice(options: {
   model: ModelSettings;
   voice: VoiceSettings;
 }): Promise<{ audioUrl: string; speechText: string }> {
-  const response = await fetch("/api/voice/task-summary", {
+  const controller = new AbortController();
+  const timer = window.setTimeout(() => controller.abort(), 75000);
+  try {
+    const response = await fetch("/api/voice/task-summary", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        summary: options.summary,
+        personaId: "kurisu_amadeus",
+        model: options.model,
+        voice: options.voice
+      }),
+      signal: controller.signal
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      throw new Error(data.detail || `task summary voice ${response.status}`);
+    }
+    return {
+      audioUrl: String(data.audioUrl || ""),
+      speechText: String(data.speechText || "")
+    };
+  } catch (error) {
+    if (error instanceof DOMException && error.name === "AbortError") {
+      throw new Error("任务总结语音生成超时");
+    }
+    throw error;
+  } finally {
+    window.clearTimeout(timer);
+  }
+}
+
+export async function streamTaskSummaryVoice(options: {
+  summary: string;
+  model: ModelSettings;
+  voice: VoiceSettings;
+  signal?: AbortSignal;
+  onEvent: (event: TaskSummaryVoiceEvent) => void;
+}): Promise<void> {
+  const response = await fetch("/api/voice/task-summary/stream", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -268,16 +407,28 @@ export async function synthesizeTaskSummaryVoice(options: {
       personaId: "kurisu_amadeus",
       model: options.model,
       voice: options.voice
-    })
+    }),
+    signal: options.signal
   });
-  const data = await response.json().catch(() => ({}));
-  if (!response.ok) {
-    throw new Error(data.detail || `task summary voice ${response.status}`);
+
+  if (!response.ok || !response.body) {
+    throw new Error(`task summary voice stream ${response.status}`);
   }
-  return {
-    audioUrl: String(data.audioUrl || ""),
-    speechText: String(data.speechText || "")
-  };
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) {
+      break;
+    }
+    buffer += decoder.decode(value, { stream: true });
+    buffer = drainSseBuffer<TaskSummaryVoiceEvent>(buffer, options.onEvent);
+  }
+  buffer += decoder.decode();
+  drainSseBuffer<TaskSummaryVoiceEvent>(buffer, options.onEvent, true);
 }
 
 export async function cloneVoice(options: {

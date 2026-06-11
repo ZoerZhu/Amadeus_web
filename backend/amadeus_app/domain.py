@@ -185,3 +185,10 @@ class CodeTaskSyncRequest(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
     tasks: list[CodeTaskSnapshot] = Field(default_factory=list)
+
+
+class CodeTaskViewPublishRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    task_id: str = Field(default="", alias="taskId")
+    snapshot: dict[str, Any] = Field(default_factory=dict)

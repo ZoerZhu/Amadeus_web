@@ -207,6 +207,82 @@ export type CodeTaskEvent =
   | { event: "error"; payload: { message: string; requestId?: string } }
   | { event: "done"; payload: { status?: string; message?: string; sessionId?: string; workspacePath?: string } };
 
+export interface CodeTaskViewQuestion {
+  requestId: string;
+  sessionId: string;
+  serverUrl?: string;
+  questions: CodeTaskQuestionItem[];
+  v2?: boolean;
+  answered?: boolean;
+  rejected?: boolean;
+  answers?: string[][];
+}
+
+export interface CodeTaskViewMessage {
+  id: string;
+  kind: string;
+  title?: string;
+  text: string;
+  detail?: string;
+  createdAt: string;
+  question?: CodeTaskViewQuestion;
+}
+
+export interface CodeTaskViewPhase {
+  id: string;
+  title: string;
+  status: "running" | "completed" | "error";
+  eventCount: number;
+  hiddenCount: number;
+  messages: CodeTaskViewMessage[];
+}
+
+export interface CodeTaskViewTurn {
+  id: string;
+  running: boolean;
+  request?: CodeTaskViewMessage;
+  processed: {
+    title: "处理中" | "已处理";
+    openByDefault: boolean;
+    duration: string;
+    phaseCount: number;
+    eventCount: number;
+    phases: CodeTaskViewPhase[];
+  };
+  responses: CodeTaskViewMessage[];
+}
+
+export interface CodeTaskMobileViewSnapshot {
+  version: 2;
+  kind: "code_task_view";
+  taskId: string;
+  status: string;
+  running: boolean;
+  renderedAt: string;
+  task: {
+    id: string;
+    title: string;
+    prompt: string;
+    workspacePath: string;
+    status: string;
+    sessionId?: string;
+    createdAt: string;
+    updatedAt: string;
+  };
+  view: {
+    source: "host";
+    refreshIntervalMs: number;
+    eventCount: number;
+    turnCount: number;
+  };
+  turns: CodeTaskViewTurn[];
+  pendingQuestion?: CodeTaskViewQuestion & {
+    turnId: string;
+    messageId: string;
+  };
+  summary?: string;
+}
+
 export type TaskSummaryVoiceEvent =
   | { event: "status"; payload: { phase: string } }
   | { event: "audio"; payload: { url: string; index?: number; text?: string; syncText?: boolean } }

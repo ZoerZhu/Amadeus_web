@@ -3,6 +3,7 @@ import type {
   ApiChatMessage,
   ChatMessage,
   ConversationDetail,
+  CodeTaskMobileViewSnapshot,
   CodeTaskQuestionItem,
   ModelSettings,
   StoredSettings,
@@ -1030,6 +1031,186 @@ function buildCodeTaskPhases(messages: CodeTaskMessage[], running: boolean): Cod
     .filter((phase): phase is CodeTaskPhase => Boolean(phase));
 }
 
+function isFinalCodeTaskSummaryMessage(message: CodeTaskMessage): boolean {
+  return message.kind === "done" && message.title === "任务总结";
+}
+
+function isPendingCodeTaskQuestionMessage(message: CodeTaskMessage): boolean {
+  return message.kind === "question" && Boolean(message.question) && !message.question?.answered && !message.question?.rejected;
+}
+
+function formatCodeTaskViewDuration(messages: CodeTaskMessage[]): string {
+  if (messages.length < 2) {
+    return "";
+  }
+  const start = new Date(messages[0].createdAt).getTime();
+  const end = new Date(messages[messages.length - 1].createdAt).getTime();
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end <= start) {
+    return "";
+  }
+  const totalSeconds = Math.max(1, Math.round((end - start) / 1000));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  if (hours > 0) {
+    return `${hours}h ${minutes}m ${seconds}s`;
+  }
+  if (minutes > 0) {
+    return `${minutes}m ${seconds}s`;
+  }
+  return `${seconds}s`;
+}
+
+function buildCodeTaskViewTurns(messages: CodeTaskMessage[], running: boolean) {
+  const turns: Array<{ id: string; messages: CodeTaskMessage[]; running: boolean }> = [];
+  let current: { id: string; messages: CodeTaskMessage[]; running: boolean } | null = null;
+
+  for (const message of messages) {
+    if (message.kind === "user" || current === null) {
+      current = {
+        id: message.kind === "user" ? message.id : `task-orphan-${message.id}`,
+        messages: [message],
+        running: false
+      };
+      turns.push(current);
+      continue;
+    }
+    current.messages.push(message);
+  }
+
+  return turns.map((turn, index) => ({
+    ...turn,
+    running: running && index === turns.length - 1
+  }));
+}
+
+function codeTaskViewMessage(message: CodeTaskMessage): CodeTaskMobileViewSnapshot["turns"][number]["responses"][number] {
+  return {
+    id: message.id,
+    kind: message.kind,
+    title: message.title,
+    text: limitCodeTaskText(message.text, message.kind === "assistant" ? 4200 : 1400),
+    detail: message.detail ? limitCodeTaskText(message.detail, 2200) : undefined,
+    createdAt: message.createdAt,
+    question: message.question
+      ? {
+          requestId: message.question.requestId,
+          sessionId: message.question.sessionId,
+          serverUrl: message.question.serverUrl,
+          questions: message.question.questions,
+          v2: message.question.v2,
+          answered: message.question.answered,
+          rejected: message.question.rejected,
+          answers: message.question.answers
+        }
+      : undefined
+  };
+}
+
+function buildCodeTaskMobileViewSnapshot(
+  task: CodeTaskRecord,
+  messages: CodeTaskMessage[],
+  running: boolean
+): CodeTaskMobileViewSnapshot {
+  const turns = buildCodeTaskViewTurns(messages, running);
+  const viewTurns = turns.map((turn) => {
+    const phases = buildCodeTaskPhases(turn.messages, turn.running)
+      .filter((phase) => phase.id !== "request")
+      .map((phase) => ({
+        ...phase,
+        messages: phase.messages.filter((message) => !isFinalCodeTaskSummaryMessage(message))
+      }))
+      .filter((phase) => phase.messages.length > 0);
+    const pendingQuestion = turn.messages.some(isPendingCodeTaskQuestionMessage);
+    const hasError = phases.some((phase) => phase.status === "error");
+    const eventCount = phases.reduce((total, phase) => total + phase.messages.length, 0);
+    const responseMessages = turn.messages.filter(
+      (message) => message.kind === "error" || isFinalCodeTaskSummaryMessage(message)
+    );
+    const fallback = !turn.running && responseMessages.length === 0
+      ? [...turn.messages].reverse().find((message) => message.kind === "done")
+      : undefined;
+    const responses = fallback ? [fallback] : responseMessages;
+
+    return {
+      id: turn.id,
+      running: turn.running,
+      request: turn.messages.find((message) => message.kind === "user")
+        ? codeTaskViewMessage(turn.messages.find((message) => message.kind === "user") as CodeTaskMessage)
+        : undefined,
+      processed: {
+        title: turn.running ? "处理中" as const : "已处理" as const,
+        openByDefault: turn.running || pendingQuestion || hasError,
+        duration: formatCodeTaskViewDuration(turn.messages),
+        phaseCount: phases.length,
+        eventCount,
+        phases: phases.map((phase) => {
+          const visibleMessages = phase.messages.slice(-10);
+          return {
+            id: phase.id,
+            title: phase.title,
+            status: phase.status,
+            eventCount: phase.messages.length,
+            hiddenCount: Math.max(0, phase.messages.length - visibleMessages.length),
+            messages: visibleMessages.map(codeTaskViewMessage)
+          };
+        })
+      },
+      responses: responses.map(codeTaskViewMessage)
+    };
+  });
+  const pendingQuestionMessage = [...messages].reverse().find(isPendingCodeTaskQuestionMessage);
+  const pendingQuestionTurn = pendingQuestionMessage
+    ? viewTurns.find((turn) =>
+        turn.processed.phases.some((phase) =>
+          phase.messages.some((message) => message.id === pendingQuestionMessage.id)
+        )
+      )
+    : undefined;
+  const finalSummary = task.summary || [...messages].reverse().find(isFinalCodeTaskSummaryMessage)?.text;
+
+  return {
+    version: 2,
+    kind: "code_task_view",
+    taskId: task.id,
+    status: task.status,
+    running,
+    renderedAt: new Date().toISOString(),
+    task: {
+      id: task.id,
+      title: task.title,
+      prompt: task.prompt,
+      workspacePath: task.workspacePath,
+      status: task.status,
+      sessionId: task.sessionId,
+      createdAt: task.createdAt,
+      updatedAt: task.updatedAt
+    },
+    view: {
+      source: "host",
+      refreshIntervalMs: 1000,
+      eventCount: viewTurns.reduce((total, turn) => total + turn.processed.eventCount, 0),
+      turnCount: viewTurns.length
+    },
+    turns: viewTurns,
+    pendingQuestion: pendingQuestionMessage?.question
+      ? {
+          turnId: pendingQuestionTurn?.id ?? "",
+          messageId: pendingQuestionMessage.id,
+          requestId: pendingQuestionMessage.question.requestId,
+          sessionId: pendingQuestionMessage.question.sessionId,
+          serverUrl: pendingQuestionMessage.question.serverUrl,
+          questions: pendingQuestionMessage.question.questions,
+          v2: pendingQuestionMessage.question.v2,
+          answered: pendingQuestionMessage.question.answered,
+          rejected: pendingQuestionMessage.question.rejected,
+          answers: pendingQuestionMessage.question.answers
+        }
+      : undefined,
+    summary: finalSummary
+  };
+}
+
 function buildCodeTaskSummaryText(task: CodeTaskRecord, messages: CodeTaskMessage[]): string {
   const error = [...messages].reverse().find((message) => message.kind === "error");
   const prompt = messages.find((message) => message.kind === "user")?.text.trim() || task.prompt || task.title;
@@ -1134,6 +1315,7 @@ export {
   STORAGE_KEY,
   appendLimitedCodeTaskText,
   buildCodeTaskPhases,
+  buildCodeTaskMobileViewSnapshot,
   buildCodeTaskSummaryText,
   buildCodeTaskVoiceSummarySource,
   buildConversationTitle,

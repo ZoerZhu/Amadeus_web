@@ -31,8 +31,10 @@ import {
   fetchProviders,
   fetchSettings,
   listConversations,
+  publishCodeTaskMobileView,
   replyCodeTaskQuestion,
   saveSettings,
+  subscribeAllCodeTaskEvents,
   subscribeCodeTaskEvents,
   streamCodeTask,
   streamChat,
@@ -99,6 +101,7 @@ import {
   STORAGE_KEY,
   appendLimitedCodeTaskText,
   buildCodeTaskPhases,
+  buildCodeTaskMobileViewSnapshot,
   buildCodeTaskSummaryText,
   buildCodeTaskVoiceSummarySource,
   buildConversationTitle,
@@ -196,11 +199,19 @@ export default function App() {
   const lastCodeTaskStatusMessageRef = useRef("");
   const codeTasksRef = useRef<CodeTaskRecord[]>(storedCodeTasks);
   const codeTaskMessagesRef = useRef<CodeTaskMessage[]>(storedCodeTasks[0]?.messages ?? []);
+  const activeCodeTaskIdRef = useRef<string | null>(storedCodeTasks[0]?.id ?? null);
+  const codeTaskStatusRef = useRef(storedCodeTasks[0]?.status ?? "idle");
+  const codeTaskWorkspaceRef = useRef(storedCodeTasks[0]?.workspacePath ?? DEFAULT_CODE_TASK_WORKSPACE);
+  const codeTaskRunningRef = useRef(false);
   const codeTaskCompletedRef = useRef(false);
   const codeTaskFinalStatusRef = useRef("");
   const codeTaskServerUrlRef = useRef("");
   const codeTaskPersistTimerRef = useRef<number | null>(null);
   const codeTaskHistorySyncTimerRef = useRef<number | null>(null);
+  const mobileTaskViewTimerRef = useRef<number | null>(null);
+  const mobileTaskViewFrameRef = useRef<number | null>(null);
+  const pendingMobileTaskViewPublishRef = useRef(false);
+  const lastMobileTaskViewHashRef = useRef("");
   const handledCodeTaskEventKeysRef = useRef<Set<string>>(new Set());
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const audioQueueRef = useRef<AudioQueueItem[]>([]);
@@ -394,6 +405,43 @@ export default function App() {
   }, [codeTaskMessages]);
 
   useEffect(() => {
+    activeCodeTaskIdRef.current = activeCodeTaskId;
+  }, [activeCodeTaskId]);
+
+  useEffect(() => {
+    codeTaskStatusRef.current = codeTaskStatus;
+  }, [codeTaskStatus]);
+
+  useEffect(() => {
+    codeTaskWorkspaceRef.current = codeTaskWorkspace;
+  }, [codeTaskWorkspace]);
+
+  useEffect(() => {
+    codeTaskRunningRef.current = codeTaskRunning;
+  }, [codeTaskRunning]);
+
+  useEffect(() => {
+    return subscribeAllCodeTaskEvents({
+      replay: false,
+      onEvent: (event) => {
+        const taskId = getCodeTaskEventTaskId(event);
+        if (!taskId) {
+          return;
+        }
+        if (!ensureIncomingCodeTaskVisible(taskId, event)) {
+          return;
+        }
+        handleCodeTaskEventOnce(event, taskId);
+      },
+      onError: (message) => {
+        if (rightPanelTab === "tasks") {
+          setCodeTaskStatus(message);
+        }
+      }
+    });
+  }, [activeCodeTaskId, rightPanelTab, activeCodeTask?.sessionId]);
+
+  useEffect(() => {
     if (!activeCodeTaskId) {
       return;
     }
@@ -448,6 +496,25 @@ export default function App() {
   }, [activeCodeTaskId, codeTaskMessages, codeTaskStatus, codeTaskWorkspace, codeTaskRunning]);
 
   useEffect(() => {
+    if (!activeCodeTaskId) {
+      return;
+    }
+    pendingMobileTaskViewPublishRef.current = true;
+    if (!codeTaskRunning || codeTaskStatus === "waiting_input" || codeTaskStatus === "error") {
+      scheduleMobileTaskViewPublish(120);
+    }
+  }, [activeCodeTaskId, codeTaskMessages, codeTaskStatus, codeTaskWorkspace, codeTaskRunning]);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      if (pendingMobileTaskViewPublishRef.current) {
+        publishMobileTaskViewSnapshot();
+      }
+    }, 1000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
     return () => {
       if (saveSettingsTimerRef.current !== null) {
         window.clearTimeout(saveSettingsTimerRef.current);
@@ -460,6 +527,12 @@ export default function App() {
       }
       if (codeTaskHistorySyncTimerRef.current !== null) {
         window.clearTimeout(codeTaskHistorySyncTimerRef.current);
+      }
+      if (mobileTaskViewTimerRef.current !== null) {
+        window.clearTimeout(mobileTaskViewTimerRef.current);
+      }
+      if (mobileTaskViewFrameRef.current !== null) {
+        window.cancelAnimationFrame(mobileTaskViewFrameRef.current);
       }
     };
   }, []);
@@ -1212,6 +1285,124 @@ export default function App() {
     setChatOpen(true);
   }
 
+  function getCodeTaskEventTaskId(event: CodeTaskEvent): string {
+    const payload = event.payload as Record<string, unknown>;
+    return typeof payload.taskId === "string" ? payload.taskId : "";
+  }
+
+  function ensureIncomingCodeTaskVisible(taskId: string, event: CodeTaskEvent): boolean {
+    if (taskId === activeCodeTaskIdRef.current) {
+      return true;
+    }
+    const payload = event.payload as Record<string, unknown>;
+    const source = typeof payload.source === "string" ? payload.source : "";
+    const existing = codeTasksRef.current.find((task) => task.id === taskId) ?? null;
+    const shouldSwitch = !activeCodeTaskIdRef.current || !existing || source === "mobile";
+    if (!shouldSwitch) {
+      return false;
+    }
+    const now = new Date().toISOString();
+    const prompt = typeof payload.text === "string" && payload.text.trim()
+      ? payload.text.trim()
+      : typeof payload.message === "string"
+        ? payload.message.trim()
+        : "OpenCode 任务";
+    const workspacePath = typeof payload.workspacePath === "string" ? payload.workspacePath : existing?.workspacePath ?? "";
+    const nextTask: CodeTaskRecord = existing ?? {
+      id: taskId,
+      title: buildConversationTitle(prompt),
+      prompt,
+      workspacePath,
+      status: "running",
+      messages: [],
+      createdAt: now,
+      updatedAt: now
+    };
+    const nextMessages = existing?.messages ?? [];
+    activeCodeTaskIdRef.current = taskId;
+    codeTaskMessagesRef.current = nextMessages;
+    codeTaskStatusRef.current = nextTask.status;
+    codeTaskWorkspaceRef.current = nextTask.workspacePath;
+    codeTaskRunningRef.current = true;
+    codeTaskAssistantMessageIdRef.current = null;
+    codeTaskServerUrlRef.current = "";
+    setActiveCodeTaskId(taskId);
+    setCodeTaskMessages(nextMessages);
+    setCodeTaskWorkspace(nextTask.workspacePath);
+    setCodeTaskStatus(nextTask.status);
+    setCodeTaskRunning(true);
+    setCodeTaskQuestionBusyIds([]);
+    if (!existing) {
+      codeTasksRef.current = [nextTask, ...codeTasksRef.current].slice(0, CODE_TASK_MAX_HISTORY);
+    }
+    setCodeTasks((prev) => {
+      if (prev.some((task) => task.id === taskId)) {
+        return prev;
+      }
+      return [nextTask, ...prev].slice(0, CODE_TASK_MAX_HISTORY);
+    });
+    openTaskPanel();
+    return true;
+  }
+
+  function scheduleMobileTaskViewPublish(delayMs: number) {
+    if (mobileTaskViewTimerRef.current !== null) {
+      window.clearTimeout(mobileTaskViewTimerRef.current);
+    }
+    mobileTaskViewTimerRef.current = window.setTimeout(() => {
+      mobileTaskViewTimerRef.current = null;
+      publishMobileTaskViewSnapshot();
+    }, delayMs);
+  }
+
+  function publishMobileTaskViewSnapshot() {
+    const taskId = activeCodeTaskIdRef.current;
+    if (!taskId) {
+      pendingMobileTaskViewPublishRef.current = false;
+      return;
+    }
+    const baseTask = codeTasksRef.current.find((task) => task.id === taskId);
+    if (!baseTask) {
+      pendingMobileTaskViewPublishRef.current = false;
+      return;
+    }
+    const messagesForSnapshot = codeTaskMessagesRef.current;
+    const taskForSnapshot: CodeTaskRecord = {
+      ...baseTask,
+      workspacePath: codeTaskWorkspaceRef.current,
+      status: codeTaskStatusRef.current,
+      messages: messagesForSnapshot,
+      updatedAt: new Date().toISOString()
+    };
+    const snapshot = buildCodeTaskMobileViewSnapshot(
+      taskForSnapshot,
+      messagesForSnapshot,
+      codeTaskRunningRef.current
+    );
+    const snapshotHash = JSON.stringify({
+      task: snapshot.task,
+      status: snapshot.status,
+      running: snapshot.running,
+      view: snapshot.view,
+      turns: snapshot.turns,
+      pendingQuestion: snapshot.pendingQuestion,
+      summary: snapshot.summary
+    });
+    if (snapshotHash === lastMobileTaskViewHashRef.current) {
+      pendingMobileTaskViewPublishRef.current = false;
+      return;
+    }
+    lastMobileTaskViewHashRef.current = snapshotHash;
+    pendingMobileTaskViewPublishRef.current = false;
+    if (mobileTaskViewFrameRef.current !== null) {
+      window.cancelAnimationFrame(mobileTaskViewFrameRef.current);
+    }
+    mobileTaskViewFrameRef.current = window.requestAnimationFrame(() => {
+      mobileTaskViewFrameRef.current = null;
+      publishCodeTaskMobileView(snapshot).catch(() => undefined);
+    });
+  }
+
   function updateCodeTaskRecord(taskId: string, updater: (task: CodeTaskRecord) => CodeTaskRecord) {
     setCodeTasks((prev) =>
       prev
@@ -1226,6 +1417,7 @@ export default function App() {
       return;
     }
     clearPendingCodeTaskFlush();
+    activeCodeTaskIdRef.current = task.id;
     setActiveCodeTaskId(task.id);
     setCodeTaskWorkspace(task.workspacePath);
     setCodeTaskStatus(task.status);
@@ -1244,6 +1436,7 @@ export default function App() {
     codeTaskAssistantMessageIdRef.current = null;
     codeTaskServerUrlRef.current = "";
     setCodeTaskQuestionBusyIds([]);
+    activeCodeTaskIdRef.current = null;
     setActiveCodeTaskId(null);
     setCodeTaskMessages([]);
     codeTaskMessagesRef.current = [];
@@ -1270,6 +1463,7 @@ export default function App() {
     setCodeTasks((prev) => prev.filter((item) => item.id !== task.id));
     if (task.id === activeCodeTaskId) {
       const nextTask = codeTasks.find((item) => item.id !== task.id) ?? null;
+      activeCodeTaskIdRef.current = nextTask?.id ?? null;
       setActiveCodeTaskId(nextTask?.id ?? null);
       setCodeTaskMessages(nextTask?.messages ?? []);
       codeTaskMessagesRef.current = nextTask?.messages ?? [];
@@ -1391,6 +1585,9 @@ export default function App() {
   }
 
   function handleCodeTaskEventOnce(event: CodeTaskEvent, taskId = activeCodeTaskId) {
+    if (taskId && taskId !== activeCodeTaskIdRef.current && !ensureIncomingCodeTaskVisible(taskId, event)) {
+      return;
+    }
     const payload = event.payload as Record<string, unknown>;
     const eventId = payload.eventId;
     const key = taskId && (typeof eventId === "number" || typeof eventId === "string")
@@ -1795,6 +1992,7 @@ export default function App() {
       }));
     }
     setActiveCodeTaskId(taskId);
+    activeCodeTaskIdRef.current = taskId;
     setCodeTaskRunning(true);
     setCodeTaskStatus("connecting");
     openTaskPanel();

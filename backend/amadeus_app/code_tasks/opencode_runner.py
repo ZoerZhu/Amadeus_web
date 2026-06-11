@@ -48,6 +48,17 @@ CODE_TASK_TERMINAL_STATUSES = {
 }
 
 
+class OpenCodePostFailure(RuntimeError):
+    def __init__(self, message: str, *, status_codes: list[int], errors: list[str]) -> None:
+        super().__init__(message)
+        self.status_codes = status_codes
+        self.errors = errors
+
+    @property
+    def has_server_error(self) -> bool:
+        return any(status >= 500 for status in self.status_codes)
+
+
 def sse_event(event: str, payload: dict[str, Any]) -> str:
     return f"event: {event}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
@@ -624,36 +635,109 @@ async def reply_opencode_question(request: CodeTaskQuestionReplyRequest) -> dict
     answers = normalize_question_answers(request.answers)
     async with httpx.AsyncClient(base_url=server_url, timeout=15) as client:
         if request.reject:
-            await post_first_success(
-                client,
-                [
-                    f"/api/session/{quote(session_id)}/question/request/{quote(request_id)}/reject",
-                    f"/question/{quote(request_id)}/reject",
-                ]
-                if request.v2
-                else [
-                    f"/question/{quote(request_id)}/reject",
-                    f"/api/session/{quote(session_id)}/question/request/{quote(request_id)}/reject",
-                ],
-            )
-            return {"ok": True, "rejected": True}
+            try:
+                await post_first_success(
+                    client,
+                    [
+                        f"/api/session/{quote(session_id)}/question/request/{quote(request_id)}/reject",
+                        f"/question/{quote(request_id)}/reject",
+                    ]
+                    if request.v2
+                    else [
+                        f"/question/{quote(request_id)}/reject",
+                        f"/api/session/{quote(session_id)}/question/request/{quote(request_id)}/reject",
+                    ],
+                )
+                return {"ok": True, "rejected": True}
+            except OpenCodePostFailure as error:
+                if not error.has_server_error:
+                    raise
+                await send_question_answer_fallback_prompt(
+                    client,
+                    session_id=session_id,
+                    request_id=request_id,
+                    answers=[],
+                    rejected=True,
+                    original_error=error,
+                )
+                return {
+                    "ok": True,
+                    "rejected": True,
+                    "fallback": "prompt_async",
+                    "warning": "OpenCode question reject API returned a server error; sent the rejection as a session prompt instead.",
+                }
 
         if not answers:
             raise ValueError("OpenCode question 至少需要一个回答。")
-        await post_first_success(
-            client,
-            [
-                f"/api/session/{quote(session_id)}/question/request/{quote(request_id)}/reply",
-                f"/question/{quote(request_id)}/reply",
-            ]
-            if request.v2
-            else [
-                f"/question/{quote(request_id)}/reply",
-                f"/api/session/{quote(session_id)}/question/request/{quote(request_id)}/reply",
-            ],
-            json_body={"answers": answers},
+        try:
+            await post_first_success(
+                client,
+                [
+                    f"/api/session/{quote(session_id)}/question/request/{quote(request_id)}/reply",
+                    f"/question/{quote(request_id)}/reply",
+                ]
+                if request.v2
+                else [
+                    f"/question/{quote(request_id)}/reply",
+                    f"/api/session/{quote(session_id)}/question/request/{quote(request_id)}/reply",
+                ],
+                json_body={"answers": answers},
+            )
+            return {"ok": True, "answers": answers}
+        except OpenCodePostFailure as error:
+            if not error.has_server_error:
+                raise
+            await send_question_answer_fallback_prompt(
+                client,
+                session_id=session_id,
+                request_id=request_id,
+                answers=answers,
+                rejected=False,
+                original_error=error,
+            )
+            return {
+                "ok": True,
+                "answers": answers,
+                "fallback": "prompt_async",
+                "warning": "OpenCode question reply API returned a server error; sent the answer as a session prompt instead.",
+            }
+
+
+async def send_question_answer_fallback_prompt(
+    client: httpx.AsyncClient,
+    *,
+    session_id: str,
+    request_id: str,
+    answers: list[list[str]],
+    rejected: bool,
+    original_error: OpenCodePostFailure,
+) -> None:
+    if rejected:
+        text = f"用户拒绝了 OpenCode question 请求 {request_id}。请基于这个选择继续任务。"
+    else:
+        answer_lines = []
+        for index, items in enumerate(answers, start=1):
+            value = "、".join(items).strip() or "无回答"
+            answer_lines.append(f"{index}. {value}")
+        text = (
+            f"用户已回答 OpenCode question 请求 {request_id}，答案如下：\n"
+            + "\n".join(answer_lines)
+            + "\n请将这些答案视为用户对刚才选项问题的正式回复，并继续完成原任务。"
         )
-        return {"ok": True, "answers": answers}
+    response = await client.post(
+        f"/session/{quote(session_id)}/prompt_async",
+        json={
+            "parts": [
+                {
+                    "type": "text",
+                    "text": text,
+                }
+            ]
+        },
+    )
+    if response.status_code >= 400:
+        fallback_error = f"fallback /session/{quote(session_id)}/prompt_async: HTTP {response.status_code} {truncate(response.text, 500)}"
+        raise RuntimeError(f"{original_error}；{fallback_error}") from original_error
 
 
 async def send_remote_code_task_message(
@@ -1139,15 +1223,36 @@ async def post_first_success(
     json_body: dict[str, Any] | None = None,
 ) -> httpx.Response:
     errors: list[str] = []
+    status_codes: list[int] = []
     for path in paths:
         try:
             response = await client.post(path, json=json_body)
             if response.status_code < 400:
                 return response
-            errors.append(f"{path}: HTTP {response.status_code} {truncate(response.text, 300)}")
+            status_codes.append(response.status_code)
+            body = normalize_response_error_text(response)
+            errors.append(f"{path}: HTTP {response.status_code}{body}")
         except Exception as error:
             errors.append(f"{path}: {str(error) or error.__class__.__name__}")
-    raise RuntimeError("OpenCode question 回复失败：" + "；".join(errors))
+    message = "OpenCode question 回复失败：" + "；".join(errors)
+    raise OpenCodePostFailure(message, status_codes=status_codes, errors=errors)
+
+
+def normalize_response_error_text(response: httpx.Response) -> str:
+    text = response.text.strip()
+    if not text:
+        return ""
+    try:
+        data = response.json()
+    except ValueError:
+        return " " + truncate(text, 500)
+    if isinstance(data, dict):
+        for key in ("message", "detail", "error"):
+            value = data.get(key)
+            if value:
+                return " " + truncate(str(value), 500)
+        return " " + truncate(compact_json(data), 500)
+    return " " + truncate(text, 500)
 
 
 def compact_json(value: Any) -> str:

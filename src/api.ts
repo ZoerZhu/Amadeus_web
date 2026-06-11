@@ -3,6 +3,7 @@ import type {
   AgentInvokeResponse,
   ApiChatMessage,
   CodeTaskEvent,
+  CodeTaskMobileViewSnapshot,
   CodeTaskQuestionReplyRequest,
   CodeTaskStreamRequest,
   ChatMode,
@@ -17,6 +18,23 @@ import type {
   UploadDevice,
   VoiceSettings
 } from "./types";
+
+const CODE_TASK_EVENT_NAMES = [
+  "input",
+  "session",
+  "status",
+  "output",
+  "log",
+  "tool",
+  "command",
+  "file",
+  "diff",
+  "permission",
+  "question",
+  "question_result",
+  "error",
+  "done"
+];
 
 export async function fetchProviders(): Promise<ProviderPreset[]> {
   const response = await fetch("/api/providers");
@@ -225,6 +243,36 @@ export async function syncCodeTaskHistory(tasks: unknown[]): Promise<void> {
   }
 }
 
+export function subscribeAllCodeTaskEvents(options: {
+  replay?: boolean;
+  onEvent: (event: CodeTaskEvent) => void;
+  onError?: (message: string) => void;
+}): () => void {
+  const replay = options.replay === true ? "true" : "false";
+  const source = new EventSource(`/api/code-tasks/events?replay=${replay}`);
+  const handlers = CODE_TASK_EVENT_NAMES.map((eventName) => {
+    const handler = (event: MessageEvent<string>) => {
+      const payload = parseSsePayload<Record<string, unknown>>(event.data);
+      if (!payload) {
+        options.onError?.(`task event parse failed: ${eventName}`);
+        return;
+      }
+      options.onEvent({ event: eventName, payload } as CodeTaskEvent);
+    };
+    source.addEventListener(eventName, handler);
+    return { eventName, handler };
+  });
+
+  source.onerror = () => {
+    options.onError?.("global task event stream disconnected");
+  };
+
+  return () => {
+    handlers.forEach(({ eventName, handler }) => source.removeEventListener(eventName, handler));
+    source.close();
+  };
+}
+
 export function subscribeCodeTaskEvents(options: {
   taskId: string;
   replay?: boolean;
@@ -234,29 +282,9 @@ export function subscribeCodeTaskEvents(options: {
 }): () => void {
   const replay = options.replay === true ? "true" : "false";
   const source = new EventSource(`/api/mobile/code-tasks/${encodeURIComponent(options.taskId)}/events?replay=${replay}`);
-  const eventNames = [
-    "input",
-    "session",
-    "status",
-    "output",
-    "log",
-    "tool",
-    "command",
-    "file",
-    "diff",
-    "permission",
-    "question",
-    "question_result",
-    "error",
-    "done"
-  ];
 
   const parsePayload = <T>(event: MessageEvent<string>): T | null => {
-    try {
-      return JSON.parse(event.data) as T;
-    } catch {
-      return null;
-    }
+    return parseSsePayload<T>(event.data);
   };
 
   const taskHandler = (event: MessageEvent<string>) => {
@@ -267,7 +295,7 @@ export function subscribeCodeTaskEvents(options: {
   };
   source.addEventListener("task", taskHandler);
 
-  const handlers = eventNames.map((eventName) => {
+  const handlers = CODE_TASK_EVENT_NAMES.map((eventName) => {
     const handler = (event: MessageEvent<string>) => {
       const payload = parsePayload<Record<string, unknown>>(event);
       if (!payload) {
@@ -289,6 +317,21 @@ export function subscribeCodeTaskEvents(options: {
     handlers.forEach(({ eventName, handler }) => source.removeEventListener(eventName, handler));
     source.close();
   };
+}
+
+export async function publishCodeTaskMobileView(snapshot: CodeTaskMobileViewSnapshot): Promise<void> {
+  const response = await fetch("/api/mobile/task-views", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      taskId: snapshot.taskId,
+      snapshot
+    })
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(data.detail || `mobile task view ${response.status}`);
+  }
 }
 
 export async function replyCodeTaskQuestion(options: CodeTaskQuestionReplyRequest): Promise<void> {
@@ -468,6 +511,14 @@ function drainSseBuffer<TEvent>(
     return "";
   }
   return buffer;
+}
+
+function parseSsePayload<T>(data: string): T | null {
+  try {
+    return JSON.parse(data) as T;
+  } catch {
+    return null;
+  }
 }
 
 function emitSseBlock<TEvent>(block: string, onEvent: (event: TEvent) => void): void {

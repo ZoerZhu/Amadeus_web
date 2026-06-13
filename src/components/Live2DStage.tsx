@@ -17,6 +17,8 @@ export interface Live2DStageHandle {
   playEmotion: (emotion: string) => void;
   playExpression: (expression: string) => void;
   playMotion: (group: string, index?: number) => void;
+  resetMouth: () => void;
+  setMouthOpen: (value: number) => void;
 }
 
 export interface Live2DStageProps {
@@ -51,6 +53,7 @@ const MIN_MODEL_SCALE = 0.35;
 const MAX_MODEL_SCALE = 2.6;
 const MIN_MODEL_OFFSET = -0.8;
 const MAX_MODEL_OFFSET = 0.8;
+const MOUTH_OPEN_PARAMETER_IDS = ["ParamMouthOpenY", "PARAM_MOUTH_OPEN_Y"];
 
 let scriptLoadPromise: Promise<void> | null = null;
 
@@ -142,6 +145,33 @@ function clamp(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
 }
 
+function setModelParameter(model: any, ids: string[], value: number): boolean {
+  const targets = [
+    model?.internalModel?.coreModel,
+    model?.internalModel,
+    model?.coreModel,
+    model
+  ].filter(Boolean);
+
+  for (const target of targets) {
+    for (const id of ids) {
+      try {
+        if (typeof target.setParameterValueById === "function") {
+          target.setParameterValueById(id, value);
+          return true;
+        }
+        if (typeof target.setParamFloat === "function") {
+          target.setParamFloat(id, value);
+          return true;
+        }
+      } catch {
+        // Imported models can expose only one runtime-specific parameter API.
+      }
+    }
+  }
+  return false;
+}
+
 function normalizeTransform(transform: Live2DModelTransform): Live2DModelTransform {
   return {
     offsetX: clamp(transform.offsetX, MIN_MODEL_OFFSET, MAX_MODEL_OFFSET),
@@ -157,6 +187,9 @@ export const Live2DStage = forwardRef<Live2DStageHandle, Live2DStageProps>(
     const modelRef = useRef<any>(null);
     const baseFitRef = useRef<{ x: number; y: number; scale: number; width: number; height: number } | null>(null);
     const transformRef = useRef<Live2DModelTransform>(normalizeTransform(modelRecord.transform));
+    const mouthOpenRef = useRef(0);
+    const mouthOverrideActiveRef = useRef(false);
+    const mouthTickerRef = useRef<(() => void) | null>(null);
     const dragRef = useRef<{
       pointerId: number;
       startX: number;
@@ -184,6 +217,14 @@ export const Live2DStage = forwardRef<Live2DStageHandle, Live2DStageProps>(
       const transform = normalizeTransform(transformRef.current);
       live2dModel.scale.set(base.scale * transform.scale);
       live2dModel.position.set(base.x + base.width * transform.offsetX, base.y + base.height * transform.offsetY);
+    }
+
+    function applyMouthOpen(value = mouthOpenRef.current) {
+      const live2dModel = modelRef.current;
+      if (!live2dModel) {
+        return;
+      }
+      setModelParameter(live2dModel, MOUTH_OPEN_PARAMETER_IDS, clamp(value, 0, 1));
     }
 
     function emitTransformChange(transform: Live2DModelTransform, commitDelay = 0) {
@@ -264,6 +305,16 @@ export const Live2DStage = forwardRef<Live2DStageHandle, Live2DStageProps>(
         } catch {
           return;
         }
+      },
+      resetMouth() {
+        mouthOpenRef.current = 0;
+        mouthOverrideActiveRef.current = false;
+        applyMouthOpen(0);
+      },
+      setMouthOpen(value: number) {
+        mouthOpenRef.current = clamp(value, 0, 1);
+        mouthOverrideActiveRef.current = true;
+        applyMouthOpen();
       }
     }), [modelRecord]);
 
@@ -313,6 +364,13 @@ export const Live2DStage = forwardRef<Live2DStageHandle, Live2DStageProps>(
         }
         modelRef.current = model;
         app.stage.addChild(model);
+        const applyMouthOnTick = () => {
+          if (mouthOverrideActiveRef.current) {
+            applyMouthOpen();
+          }
+        };
+        mouthTickerRef.current = applyMouthOnTick;
+        app.ticker.add(applyMouthOnTick);
 
         const fitModel = () => {
           if (!hostRef.current || !appRef.current || !modelRef.current) {
@@ -376,11 +434,17 @@ export const Live2DStage = forwardRef<Live2DStageHandle, Live2DStageProps>(
         modelRef.current = null;
         baseFitRef.current = null;
         dragRef.current = null;
+        mouthOpenRef.current = 0;
+        mouthOverrideActiveRef.current = false;
         if (transformCommitTimerRef.current) {
           window.clearTimeout(transformCommitTimerRef.current);
           transformCommitTimerRef.current = null;
         }
         if (appRef.current) {
+          if (mouthTickerRef.current) {
+            appRef.current.ticker?.remove?.(mouthTickerRef.current);
+            mouthTickerRef.current = null;
+          }
           try {
             appRef.current.destroy(true, { children: true });
           } catch {

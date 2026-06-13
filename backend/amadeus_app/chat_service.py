@@ -11,7 +11,7 @@ from uuid import uuid4
 import httpx
 
 from .agent_registry import tool_registry
-from .domain import ChatStreamRequest, ModelProviderPreset, ModelSettings, VoiceSettings
+from .domain import ChatAttachment, ChatStreamRequest, ModelProviderPreset, ModelSettings, VoiceSettings
 from .model_adapter import build_chat_payload, should_read_reasoning
 from .personas import PersonaPreset, build_system_prompt, get_persona
 from .providers import get_provider
@@ -30,6 +30,7 @@ from .voice_service import (
     synthesize_local_segment_pcm_for_persona,
     write_local_pcm_audio,
 )
+from .vision.image_understand_agent import MAX_IMAGES as VISION_MAX_IMAGES, run_image_understand_agent
 
 
 def env_int(name: str, default: int) -> int:
@@ -142,10 +143,22 @@ class SegmentedVoiceCoordinator:
         self.announced_voice = False
         self.enabled = self._is_ready_for_voice()
         self.synchronize_text = self.enabled and voice_settings.sync_text_output
+        self.audio_urls_by_index: dict[int, str] = {}
 
     @property
     def should_delay_text(self) -> bool:
         return self.synchronize_text
+
+    def assistant_voice_payload(self) -> dict[str, Any]:
+        segments = [
+            {"index": index, "url": url}
+            for index, url in sorted(self.audio_urls_by_index.items())
+            if url
+        ]
+        return {
+            "audioUrls": [segment["url"] for segment in segments],
+            "segments": segments,
+        }
 
     def startup_events(self) -> list[str]:
         if not self.voice_settings.auto_play:
@@ -327,6 +340,8 @@ class SegmentedVoiceCoordinator:
     def _segment_events(self, segment: PreparedVoiceSegment) -> list[str]:
         events: list[str] = []
         if segment.url:
+            if segment.index >= 0:
+                self.audio_urls_by_index[segment.index] = segment.url
             events.append(
                 sse(
                     "audio",
@@ -376,10 +391,22 @@ class LocalConcatenatedVoiceCoordinator:
         self.announced_voice = False
         self.enabled = self.voice_settings.auto_play and self.voice_settings.tts_backend == "local"
         self.synchronize_text = False
+        self.audio_urls_by_index: dict[int, str] = {}
 
     @property
     def should_delay_text(self) -> bool:
         return False
+
+    def assistant_voice_payload(self) -> dict[str, Any]:
+        segments = [
+            {"index": index, "url": url}
+            for index, url in sorted(self.audio_urls_by_index.items())
+            if url
+        ]
+        return {
+            "audioUrls": [segment["url"] for segment in segments],
+            "segments": segments,
+        }
 
     def startup_events(self) -> list[str]:
         if not self.voice_settings.auto_play:
@@ -454,6 +481,7 @@ class LocalConcatenatedVoiceCoordinator:
             return
 
         audio = write_local_pcm_audio(b"".join(ordered_pcm))
+        self.audio_urls_by_index[0] = audio.url
         yield sse(
             "audio",
             {
@@ -941,6 +969,48 @@ def truncate_text(text: str, limit: int) -> str:
     return text[: max(0, limit - 20)].rstrip() + "\n...[truncated]"
 
 
+def chat_image_attachments(attachments: list[ChatAttachment]) -> list[ChatAttachment]:
+    return [
+        attachment
+        for attachment in attachments
+        if attachment.path.strip()
+        and (
+            attachment.media_type == "image"
+            or attachment.path.lower().endswith((".png", ".jpg", ".jpeg", ".webp", ".gif"))
+        )
+    ]
+
+
+def build_vision_enriched_user_content(content: str, description: str, attachments: list[ChatAttachment]) -> str:
+    image_lines = [
+        f"- {attachment.original_filename or attachment.filename or attachment.path}: {attachment.path}"
+        for attachment in attachments
+    ]
+    parts = [content.strip()]
+    parts.append(
+        "\n".join(
+            [
+                "<视觉理解摘要>",
+                f"图片：{len(attachments)} 张",
+                *image_lines,
+                "",
+                description.strip(),
+                "</视觉理解摘要>",
+            ]
+        )
+    )
+    return "\n\n".join(part for part in parts if part.strip())
+
+
+def vision_description_from_result(result: dict[str, Any]) -> str:
+    data = result.get("data")
+    if isinstance(data, dict):
+        description = str(data.get("description") or "").strip()
+        if description:
+            return description
+    return str(result.get("summary") or "").strip()
+
+
 async def stream_chat(
     request: ChatStreamRequest,
     *,
@@ -950,12 +1020,107 @@ async def stream_chat(
     persona = get_persona(request.persona_id)
     voice_settings = effective_voice_settings(request.voice)
     stored_conversation_id = request.conversation_id
+    chat_messages = [message.model_copy() for message in request.messages]
+    thinking_log: list[str] = []
+
+    image_attachments = chat_image_attachments(request.attachments)
+    if image_attachments:
+        last_user_message = next(
+            (
+                message
+                for message in reversed(chat_messages)
+                if message.role == "user" and message.content.strip()
+            ),
+            None,
+        )
+        if last_user_message is None:
+            yield sse("error", {"message": "图片理解需要同时提供用户问题或说明。"})
+            return
+        if len(image_attachments) > VISION_MAX_IMAGES:
+            yield sse("error", {"message": f"一次最多理解 {VISION_MAX_IMAGES} 张图片，请减少附件数量。"})
+            return
+        if not request.vision.enabled:
+            yield sse("error", {"message": "视觉理解已关闭，请在设置中开启视觉后再发送图片。"})
+            return
+
+        vision_call = ModelToolCall(
+            id=f"vision_{uuid4().hex[:8]}",
+            name="image_understand",
+            arguments=json.dumps(
+                {
+                    "attachments": [
+                        attachment.model_dump(by_alias=True)
+                        for attachment in image_attachments
+                    ],
+                    "prompt": last_user_message.content,
+                },
+                ensure_ascii=False,
+            ),
+        )
+        started_payload = tool_event_payload(
+            vision_call,
+            status="started",
+            arguments=safe_parse_tool_arguments(vision_call.arguments),
+        )
+        thinking_log.append(tool_thinking_line(started_payload))
+        thinking_log.append(tool_event_log_line(started_payload))
+        yield sse("status", {"phase": "vision"})
+        yield sse("tool", started_payload)
+
+        try:
+            vision_result = await run_image_understand_agent(
+                {
+                    "attachments": [
+                        attachment.model_dump(by_alias=True)
+                        for attachment in image_attachments
+                    ],
+                    "prompt": last_user_message.content,
+                    "model": request.model.model_dump(by_alias=True),
+                    "vision": request.vision.model_dump(by_alias=True),
+                }
+            )
+            vision_description = vision_description_from_result(vision_result)
+            if not vision_description:
+                raise RuntimeError("视觉模型未返回可用描述。")
+        except Exception as error:
+            message = str(error) or error.__class__.__name__
+            failed_payload = tool_event_payload(
+                vision_call,
+                status="failed",
+                arguments=safe_parse_tool_arguments(vision_call.arguments),
+                summary="图片理解失败。",
+                result=json.dumps({"ok": False, "error": message}, ensure_ascii=False),
+                result_payload={"ok": False, "error": message},
+                error=message,
+            )
+            thinking_log.append(tool_thinking_line(failed_payload))
+            thinking_log.append(tool_event_log_line(failed_payload))
+            yield sse("tool", failed_payload)
+            yield sse("error", {"message": f"图片理解失败：{message}"})
+            return
+
+        completed_payload = tool_event_payload(
+            vision_call,
+            status="completed",
+            arguments=safe_parse_tool_arguments(vision_call.arguments),
+            summary=vision_result.get("summary") or "图片理解完成。",
+            result=truncate_json({"ok": True, **vision_result}, CHAT_TOOL_RESULT_MAX_CHARS),
+            result_payload={"ok": True, **vision_result},
+        )
+        thinking_log.append(tool_thinking_line(completed_payload))
+        thinking_log.append(tool_event_log_line(completed_payload))
+        yield sse("tool", completed_payload)
+        last_user_message.content = build_vision_enriched_user_content(
+            last_user_message.content,
+            vision_description,
+            image_attachments,
+        )
 
     if storage is not None and stored_conversation_id is not None:
         last_user_message = next(
             (
                 message
-                for message in reversed(request.messages)
+                for message in reversed(chat_messages)
                 if message.role == "user" and message.content.strip()
             ),
             None,
@@ -973,8 +1138,9 @@ async def stream_chat(
                 return
 
     if provider.name == "演示模型" or settings.base_url.startswith("local://"):
+        demo_request = request.model_copy(update={"messages": chat_messages})
         async for chunk in _demo_stream(
-            request,
+            demo_request,
             storage=storage,
             persona=persona,
             voice_settings=voice_settings,
@@ -998,7 +1164,7 @@ async def stream_chat(
     payload_messages: list[dict[str, Any]] = [{"role": "system", "content": build_system_prompt(persona, request.mode)}]
     payload_messages.extend(
         {"role": message.role, "content": message.content}
-        for message in request.messages[-12:]
+        for message in chat_messages[-12:]
         if message.content.strip() and message.role in {"user", "assistant"}
     )
     headers = {"Content-Type": "application/json", "Accept": "text/event-stream"}
@@ -1006,7 +1172,6 @@ async def stream_chat(
         headers["Authorization"] = f"Bearer {settings.api_key}"
 
     state = ChatStreamState()
-    thinking_log: list[str] = []
     tools = chat_tool_schemas()
     voice_stream = build_voice_coordinator(
         persona=persona,
@@ -1117,6 +1282,7 @@ async def stream_chat(
     async for voice_event in voice_stream.drain_all():
         yield voice_event
 
+    assistant_voice = voice_stream.assistant_voice_payload()
     if storage is not None and stored_conversation_id is not None and state.displayed_buffer.strip():
         try:
             await storage.add_message(
@@ -1125,12 +1291,13 @@ async def stream_chat(
                 role="assistant",
                 content=state.displayed_buffer,
                 thinking="\n".join(item for item in thinking_log if item.strip()),
+                assistant_voice=assistant_voice,
             )
         except Exception as error:
             yield sse("error", {"message": f"写入助手消息失败：{error}"})
             return
 
-    yield sse("done", {"text": state.displayed_buffer})
+    yield sse("done", {"text": state.displayed_buffer, "assistantVoice": assistant_voice})
 
 
 async def _demo_stream(
@@ -1163,6 +1330,11 @@ async def _demo_stream(
             voice_stream=voice_stream,
         ):
             yield output_event
+    for voice_event in voice_stream.finish():
+        yield voice_event
+    async for voice_event in voice_stream.drain_all():
+        yield voice_event
+    assistant_voice = voice_stream.assistant_voice_payload()
     if storage is not None and request.conversation_id is not None and state.displayed_buffer.strip():
         try:
             await storage.add_message(
@@ -1170,16 +1342,13 @@ async def _demo_stream(
                 conversation_id=request.conversation_id,
                 role="assistant",
                 content=state.displayed_buffer,
+                assistant_voice=assistant_voice,
             )
         except Exception as error:
             voice_stream.cancel()
             yield sse("error", {"message": f"写入助手消息失败：{error}"})
             return
-    for voice_event in voice_stream.finish():
-        yield voice_event
-    async for voice_event in voice_stream.drain_all():
-        yield voice_event
-    yield sse("done", {"text": state.displayed_buffer})
+    yield sse("done", {"text": state.displayed_buffer, "assistantVoice": assistant_voice})
 
 
 async def _emit_generated_events(

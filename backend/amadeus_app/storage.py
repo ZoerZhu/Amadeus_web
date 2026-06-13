@@ -44,6 +44,7 @@ def _serialize_message(row: sqlite3.Row) -> dict[str, Any]:
         "role": row["role"],
         "content": row["content"],
         "thinking": row["thinking"],
+        "assistantVoice": _decode_json(row["assistant_voice"]),
         "createdAt": row["created_at"],
     }
 
@@ -101,6 +102,8 @@ class SQLiteStorage:
             CREATE TABLE IF NOT EXISTS app_settings (
                 user_id TEXT PRIMARY KEY,
                 model_settings TEXT NOT NULL DEFAULT '{}',
+                vision_settings TEXT NOT NULL DEFAULT '{}',
+                speech_input_settings TEXT NOT NULL DEFAULT '{}',
                 voice_settings TEXT NOT NULL DEFAULT '{}',
                 mode TEXT NOT NULL DEFAULT 'fast' CHECK (mode IN ('fast', 'thinking')),
                 updated_at TEXT NOT NULL
@@ -125,6 +128,7 @@ class SQLiteStorage:
                 role TEXT NOT NULL CHECK (role IN ('user', 'assistant')),
                 content TEXT NOT NULL,
                 thinking TEXT NOT NULL DEFAULT '',
+                assistant_voice TEXT NOT NULL DEFAULT '{}',
                 position INTEGER NOT NULL,
                 created_at TEXT NOT NULL,
                 UNIQUE (conversation_id, position)
@@ -134,6 +138,20 @@ class SQLiteStorage:
                 ON chat_messages (conversation_id, position ASC);
             """
         )
+        app_settings_columns = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(app_settings)").fetchall()
+        }
+        if "vision_settings" not in app_settings_columns:
+            conn.execute("ALTER TABLE app_settings ADD COLUMN vision_settings TEXT NOT NULL DEFAULT '{}'")
+        if "speech_input_settings" not in app_settings_columns:
+            conn.execute("ALTER TABLE app_settings ADD COLUMN speech_input_settings TEXT NOT NULL DEFAULT '{}'")
+        chat_message_columns = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(chat_messages)").fetchall()
+        }
+        if "assistant_voice" not in chat_message_columns:
+            conn.execute("ALTER TABLE chat_messages ADD COLUMN assistant_voice TEXT NOT NULL DEFAULT '{}'")
 
     async def get_settings(self, user_id: str) -> dict[str, Any] | None:
         async with self._lock:
@@ -143,7 +161,7 @@ class SQLiteStorage:
         conn = self.require_connection()
         row = conn.execute(
             """
-            SELECT model_settings, voice_settings, mode, updated_at
+            SELECT model_settings, vision_settings, speech_input_settings, voice_settings, mode, updated_at
             FROM app_settings
             WHERE user_id = ?
             """,
@@ -153,6 +171,8 @@ class SQLiteStorage:
             return None
         return {
             "model": _decode_json(row["model_settings"]),
+            "vision": _decode_json(row["vision_settings"]),
+            "speechInput": _decode_json(row["speech_input_settings"]),
             "voice": _decode_json(row["voice_settings"]),
             "mode": row["mode"],
             "updatedAt": row["updated_at"],
@@ -163,26 +183,32 @@ class SQLiteStorage:
         *,
         user_id: str,
         model: dict[str, Any],
+        vision: dict[str, Any],
+        speech_input: dict[str, Any],
         voice: dict[str, Any],
         mode: str,
     ) -> None:
         async with self._lock:
-            await asyncio.to_thread(self._save_settings_sync, user_id, model, voice, mode)
+            await asyncio.to_thread(self._save_settings_sync, user_id, model, vision, speech_input, voice, mode)
 
     def _save_settings_sync(
         self,
         user_id: str,
         model: dict[str, Any],
+        vision: dict[str, Any],
+        speech_input: dict[str, Any],
         voice: dict[str, Any],
         mode: str,
     ) -> None:
         conn = self.require_connection()
         conn.execute(
             """
-            INSERT INTO app_settings (user_id, model_settings, voice_settings, mode, updated_at)
-            VALUES (?, ?, ?, ?, ?)
+            INSERT INTO app_settings (user_id, model_settings, vision_settings, speech_input_settings, voice_settings, mode, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(user_id) DO UPDATE SET
                 model_settings = excluded.model_settings,
+                vision_settings = excluded.vision_settings,
+                speech_input_settings = excluded.speech_input_settings,
                 voice_settings = excluded.voice_settings,
                 mode = excluded.mode,
                 updated_at = excluded.updated_at
@@ -190,6 +216,8 @@ class SQLiteStorage:
             (
                 user_id,
                 json.dumps(model, ensure_ascii=False),
+                json.dumps(vision, ensure_ascii=False),
+                json.dumps(speech_input, ensure_ascii=False),
                 json.dumps(voice, ensure_ascii=False),
                 mode,
                 _now_iso(),
@@ -273,7 +301,7 @@ class SQLiteStorage:
             return None
         messages = conn.execute(
             """
-            SELECT id, role, content, thinking, created_at
+            SELECT id, role, content, thinking, assistant_voice, created_at
             FROM chat_messages
             WHERE conversation_id = ?
             ORDER BY position ASC
@@ -307,6 +335,7 @@ class SQLiteStorage:
         role: str,
         content: str,
         thinking: str = "",
+        assistant_voice: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         async with self._lock:
             return await asyncio.to_thread(
@@ -316,6 +345,7 @@ class SQLiteStorage:
                 role,
                 content,
                 thinking,
+                assistant_voice or {},
             )
 
     def _add_message_sync(
@@ -325,6 +355,7 @@ class SQLiteStorage:
         role: str,
         content: str,
         thinking: str,
+        assistant_voice: dict[str, Any],
     ) -> dict[str, Any]:
         conn = self.require_connection()
         message_id = str(uuid4())
@@ -351,10 +382,19 @@ class SQLiteStorage:
             ).fetchone()[0]
             conn.execute(
                 """
-                INSERT INTO chat_messages (id, conversation_id, role, content, thinking, position, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO chat_messages (id, conversation_id, role, content, thinking, assistant_voice, position, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (message_id, conversation_id, role, content, thinking, position, now),
+                (
+                    message_id,
+                    conversation_id,
+                    role,
+                    content,
+                    thinking,
+                    json.dumps(assistant_voice if role == "assistant" else {}, ensure_ascii=False),
+                    position,
+                    now,
+                ),
             )
             conn.execute(
                 """
@@ -371,7 +411,7 @@ class SQLiteStorage:
 
         row = conn.execute(
             """
-            SELECT id, role, content, thinking, created_at
+            SELECT id, role, content, thinking, assistant_voice, created_at
             FROM chat_messages
             WHERE id = ?
             """,
@@ -380,3 +420,62 @@ class SQLiteStorage:
         if row is None:
             raise RuntimeError("Failed to store message")
         return _serialize_message(row)
+
+    async def update_assistant_message_voice(
+        self,
+        *,
+        user_id: str,
+        conversation_id: UUID,
+        message_id: UUID,
+        assistant_voice: dict[str, Any],
+    ) -> bool:
+        async with self._lock:
+            return await asyncio.to_thread(
+                self._update_assistant_message_voice_sync,
+                user_id,
+                str(conversation_id),
+                str(message_id),
+                assistant_voice,
+            )
+
+    def _update_assistant_message_voice_sync(
+        self,
+        user_id: str,
+        conversation_id: str,
+        message_id: str,
+        assistant_voice: dict[str, Any],
+    ) -> bool:
+        conn = self.require_connection()
+        now = _now_iso()
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            cursor = conn.execute(
+                """
+                UPDATE chat_messages
+                SET assistant_voice = ?
+                WHERE id = ?
+                  AND conversation_id = ?
+                  AND role = 'assistant'
+                  AND EXISTS (
+                    SELECT 1
+                    FROM conversations
+                    WHERE conversations.id = chat_messages.conversation_id
+                      AND conversations.user_id = ?
+                  )
+                """,
+                (json.dumps(assistant_voice, ensure_ascii=False), message_id, conversation_id, user_id),
+            )
+            if cursor.rowcount:
+                conn.execute(
+                    """
+                    UPDATE conversations
+                    SET updated_at = ?
+                    WHERE id = ? AND user_id = ?
+                    """,
+                    (now, conversation_id, user_id),
+                )
+            conn.execute("COMMIT")
+            return cursor.rowcount > 0
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise

@@ -17,7 +17,6 @@ import type { ConversationSummary } from "../types";
 type LeftDockProps = {
   open: boolean;
   storageOnline: boolean;
-  storageError: string;
   conversations: ConversationSummary[];
   filteredConversations: ConversationSummary[];
   currentConversationId: string | null;
@@ -45,7 +44,6 @@ type LeftDockProps = {
 export function LeftDock({
   open,
   storageOnline,
-  storageError,
   conversations,
   filteredConversations,
   currentConversationId,
@@ -116,12 +114,6 @@ export function LeftDock({
             <Clock3 size={14} />
             最近
           </div>
-          {!storageOnline && (
-            <button className="history-item" type="button" disabled>
-              <span>PostgreSQL 未连接</span>
-              <small>{storageError || "offline"}</small>
-            </button>
-          )}
           {storageOnline && conversations.length === 0 && (
             <button className="history-item" type="button" disabled>
               <span>暂无历史</span>

@@ -13,6 +13,9 @@ export interface ChatMessage {
   id: string;
   role: ChatRole;
   content: string;
+  attachments?: ChatAttachment[];
+  voiceInput?: VoiceInputInfo;
+  assistantVoice?: AssistantVoiceInfo;
   thinking?: string;
   toolEvents?: ToolTraceEvent[];
   streaming?: boolean;
@@ -32,6 +35,26 @@ export interface ModelSettings {
   useRemote: boolean;
 }
 
+export interface VisionSettings {
+  enabled: boolean;
+  screenCaptureEnabled: boolean;
+  providerName: string;
+  baseUrl: string;
+  model: string;
+  apiKey: string;
+  useRemote: boolean;
+}
+
+export interface SpeechInputSettings {
+  enabled: boolean;
+  providerName: string;
+  baseUrl: string;
+  model: string;
+  apiKey: string;
+  language: string;
+  useRemote: boolean;
+}
+
 export interface VoiceSettings {
   ttsBackend: "local" | "cloud";
   siliconFlowApiKey: string;
@@ -44,6 +67,8 @@ export interface VoiceSettings {
 
 export interface StoredSettings {
   model: ModelSettings;
+  vision: VisionSettings;
+  speechInput: SpeechInputSettings;
   voice: VoiceSettings;
   mode: ChatMode;
   updatedAt?: string;
@@ -63,6 +88,7 @@ export interface StoredConversationMessage {
   role: ChatRole;
   content: string;
   thinking?: string;
+  assistantVoice?: AssistantVoiceInfo;
   createdAt: string;
 }
 
@@ -91,11 +117,33 @@ export interface AgentInvokeResponse {
 }
 
 export type UploadDevice = "host" | "mobile";
+export type UploadMediaType = "text" | "document" | "image" | "audio";
+
+export interface VoiceInputInfo {
+  audioUrl: string;
+  path: string;
+  filename: string;
+  contentType: string;
+  durationSeconds: number;
+  transcript: string;
+  waveform: number[];
+}
+
+export interface AssistantVoiceSegment {
+  index: number;
+  url: string;
+}
+
+export interface AssistantVoiceInfo {
+  audioUrls: string[];
+  segments?: AssistantVoiceSegment[];
+}
 
 export interface UploadedFileInfo {
   device: UploadDevice;
   date: string;
   textType: string;
+  mediaType: UploadMediaType;
   originalFilename: string;
   filename: string;
   path: string;
@@ -103,6 +151,30 @@ export interface UploadedFileInfo {
   sizeBytes: number;
   uploadedAt: string;
   readableByFileReader: boolean;
+  visionReadable: boolean;
+}
+
+export interface ChatAttachment {
+  path: string;
+  originalFilename: string;
+  filename: string;
+  mediaType: UploadMediaType;
+  contentType: string;
+}
+
+export interface VoiceInputTranscriptionResponse {
+  ok: boolean;
+  text: string;
+  error: string;
+  audio: {
+    url: string;
+    path: string;
+    filename: string;
+    contentType: string;
+    sizeBytes: number;
+    durationSeconds: number;
+    uploadedAt: string;
+  };
 }
 
 export interface FileUploadResponse {
@@ -136,7 +208,7 @@ export type StreamEvent =
   | { event: "audio"; payload: { url: string; index?: number; text?: string; syncText?: boolean } }
   | { event: "voice_error"; payload: { message: string; index?: number } }
   | { event: "error"; payload: { message: string } }
-  | { event: "done"; payload: { text: string } };
+  | { event: "done"; payload: { text: string; assistantVoice?: AssistantVoiceInfo } };
 
 export interface CodeTaskStreamRequest {
   taskId?: string;

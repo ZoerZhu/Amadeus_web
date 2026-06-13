@@ -1,5 +1,5 @@
 import type { ChangeEvent, DragEvent } from "react";
-import { BookOpenText, XCircle } from "lucide-react";
+import { BookOpenText, Image as ImageIcon, XCircle } from "lucide-react";
 import { ACCEPTED_UPLOAD_TYPES, uploadTypeLabel } from "../app/appSupport";
 import type { UploadedFileInfo } from "../types";
 
@@ -22,9 +22,20 @@ export function UploadAttachmentTray({ files, onRemove }: UploadAttachmentTrayPr
   return (
     <div className="upload-attachment-tray" aria-label="已上传文件">
       {files.map((file) => (
-        <div className="upload-attachment-card" key={file.path}>
+        <div className={`upload-attachment-card ${file.mediaType === "image" ? "is-image" : ""}`} key={file.path}>
           <div className="upload-attachment-icon">
-            <BookOpenText size={17} />
+            {file.mediaType === "image" ? (
+              <img
+                alt=""
+                src={`/api/files/download?path=${encodeURIComponent(file.path)}`}
+                onError={(event) => {
+                  event.currentTarget.style.display = "none";
+                }}
+              />
+            ) : (
+              <BookOpenText size={17} />
+            )}
+            {file.mediaType === "image" && <ImageIcon className="upload-attachment-fallback" size={17} />}
           </div>
           <div className="upload-attachment-copy">
             <strong title={file.originalFilename}>{file.originalFilename}</strong>
@@ -50,7 +61,7 @@ export function UploadPopover({ busy, onDrop, onFileChange }: UploadPopoverProps
     <div className="upload-popover glass-panel" onDragOver={(event) => event.preventDefault()} onDrop={onDrop}>
       <div className="upload-popover-head">
         <strong>上传文件</strong>
-        <span>{busy ? "上传中" : "文本 / 代码 / 数据"}</span>
+        <span>{busy ? "上传中" : "文本 / 代码 / 数据 / 图片"}</span>
       </div>
       <div className="upload-drop-zone">
         <span>拖拽文件到这里</span>

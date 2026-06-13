@@ -463,9 +463,7 @@
 }
 
 .field input:focus,
-.field select:focus,
-.composer textarea:focus,
-.floating-composer input:focus {
+.field select:focus {
   border-color: rgba(12, 12, 13, 0.34);
   box-shadow: 0 0 0 4px rgba(0, 0, 0, 0.055);
 }

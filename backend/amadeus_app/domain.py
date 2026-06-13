@@ -11,6 +11,7 @@ ChatRole = Literal["system", "user", "assistant"]
 VoiceBackend = Literal["local", "cloud"]
 AgentAction = Literal["call_tool", "call_agent", "query_capabilities"]
 AgentTargetType = Literal["tool", "agent", "auto"]
+AttachmentMediaType = Literal["text", "document", "image", "audio"]
 
 
 class ModelProviderPreset(BaseModel):
@@ -38,6 +39,30 @@ class ModelSettings(BaseModel):
     use_remote: bool = Field(default=True, alias="useRemote")
 
 
+class VisionSettings(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    enabled: bool = True
+    screen_capture_enabled: bool = Field(default=False, alias="screenCaptureEnabled")
+    provider_name: str = Field(default="", alias="providerName")
+    base_url: str = Field(default="", alias="baseUrl")
+    model: str = "gpt-4.1-mini"
+    api_key: str = Field(default="", alias="apiKey")
+    use_remote: bool = Field(default=True, alias="useRemote")
+
+
+class SpeechInputSettings(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    enabled: bool = True
+    provider_name: str = Field(default="小米 MiMo ASR", alias="providerName")
+    base_url: str = Field(default="https://api.xiaomimimo.com/v1", alias="baseUrl")
+    model: str = "mimo-v2.5-asr"
+    api_key: str = Field(default="", alias="apiKey")
+    language: str = "auto"
+    use_remote: bool = Field(default=True, alias="useRemote")
+
+
 class VoiceSettings(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
@@ -50,21 +75,45 @@ class VoiceSettings(BaseModel):
     gain: float = 0.0
 
 
+class ChatAttachment(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    path: str
+    original_filename: str = Field(default="", alias="originalFilename")
+    filename: str = ""
+    media_type: AttachmentMediaType = Field(default="text", alias="mediaType")
+    content_type: str = Field(default="", alias="contentType")
+
+
 class ChatStreamRequest(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
     messages: list[ChatMessage]
+    attachments: list[ChatAttachment] = Field(default_factory=list)
     conversation_id: UUID | None = Field(default=None, alias="conversationId")
     persona_id: str = Field(default="kurisu_amadeus", alias="personaId")
     mode: ChatMode = "fast"
     model: ModelSettings = Field(default_factory=ModelSettings)
+    vision: VisionSettings = Field(default_factory=VisionSettings)
+    speech_input: SpeechInputSettings = Field(default_factory=SpeechInputSettings, alias="speechInput")
     voice: VoiceSettings = Field(default_factory=VoiceSettings)
+
+
+class VisionUnderstandRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    prompt: str = ""
+    attachments: list[ChatAttachment] = Field(default_factory=list)
+    model: ModelSettings = Field(default_factory=ModelSettings)
+    vision: VisionSettings = Field(default_factory=VisionSettings)
 
 
 class VoiceSynthesisRequest(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
     text: str
+    conversation_id: UUID | None = Field(default=None, alias="conversationId")
+    message_id: UUID | None = Field(default=None, alias="messageId")
     persona_id: str = Field(default="kurisu_amadeus", alias="personaId")
     model: ModelSettings = Field(default_factory=ModelSettings)
     voice: VoiceSettings = Field(default_factory=VoiceSettings)
@@ -91,6 +140,8 @@ class SettingsSaveRequest(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
     model: ModelSettings = Field(default_factory=ModelSettings)
+    vision: VisionSettings = Field(default_factory=VisionSettings)
+    speech_input: SpeechInputSettings = Field(default_factory=SpeechInputSettings, alias="speechInput")
     voice: VoiceSettings = Field(default_factory=VoiceSettings)
     mode: ChatMode = "fast"
 

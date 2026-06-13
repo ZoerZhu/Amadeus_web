@@ -1,4 +1,4 @@
-const { app, BrowserWindow, dialog, ipcMain } = require("electron");
+const { app, BrowserWindow, desktopCapturer, dialog, ipcMain, screen } = require("electron");
 const { spawn, spawnSync } = require("child_process");
 const fs = require("fs");
 const path = require("path");
@@ -37,6 +37,7 @@ function startBackend() {
   ensureDir(path.join(userData, "generated_docs"));
   ensureDir(path.join(userData, "agent_uploads"));
   ensureDir(path.join(userData, "agent_state"));
+  ensureDir(path.join(userData, "user_voice"));
 
   backendProcess = spawn(backendPath, [], {
     cwd: userData,
@@ -51,6 +52,7 @@ function startBackend() {
       AMADEUS_UPLOAD_DIR: "agent_uploads",
       AMADEUS_TODO_TASK_STORE: "agent_state/todo_tasks.json",
       AMADEUS_AUDIO_DIR: path.join(runtimeDir, "audio"),
+      AMADEUS_USER_VOICE_DIR: "user_voice",
     },
   });
 
@@ -116,6 +118,31 @@ function stopBackend() {
   backendProcess.kill();
 }
 
+async function capturePrimaryScreen() {
+  const display = screen.getPrimaryDisplay();
+  const scaleFactor = display.scaleFactor || 1;
+  const thumbnailSize = {
+    width: Math.min(Math.round(display.size.width * scaleFactor), 1920),
+    height: Math.min(Math.round(display.size.height * scaleFactor), 1080),
+  };
+  const sources = await desktopCapturer.getSources({
+    types: ["screen"],
+    thumbnailSize,
+  });
+  if (!sources.length) {
+    throw new Error("No screen source available.");
+  }
+  const displayId = String(display.id);
+  const source = sources.find((item) => String(item.display_id || "") === displayId) || sources[0];
+  if (source.thumbnail.isEmpty()) {
+    throw new Error("Screen thumbnail is empty.");
+  }
+  return {
+    dataUrl: source.thumbnail.toDataURL(),
+    filename: `screen-${Date.now()}.png`,
+  };
+}
+
 app.whenReady().then(async () => {
   try {
     ipcMain.handle("amadeus:select-folder", async () => {
@@ -128,6 +155,7 @@ app.whenReady().then(async () => {
       }
       return result.filePaths[0];
     });
+    ipcMain.handle("amadeus:capture-screen", async () => capturePrimaryScreen());
     startBackend();
     await createWindow();
   } catch (error) {

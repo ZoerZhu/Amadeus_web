@@ -2,6 +2,7 @@ import { PointerEvent as ReactPointerEvent, useEffect, useMemo, useRef, useState
 import type { ChangeEvent, CSSProperties, DragEvent as ReactDragEvent, FormEvent } from "react";
 import {
   Bell,
+  Camera,
   ChevronLeft,
   ChevronRight,
   CircleStop,
@@ -41,6 +42,7 @@ import {
   streamTaskSummaryVoice,
   syncCodeTaskHistory,
   synthesizeVoice,
+  transcribeVoiceInput,
   uploadAgentFile
 } from "./api";
 import {
@@ -73,10 +75,14 @@ import type {
   ConversationSummary,
   ModelSettings,
   ProviderPreset,
+  SpeechInputSettings,
   StoredSettings,
   StreamEvent,
+  ChatAttachment,
   ToolTraceEvent,
   UploadedFileInfo,
+  VoiceInputInfo,
+  VisionSettings,
   VoiceSettings
 } from "./types";
 
@@ -89,6 +95,8 @@ import {
   CODE_TASK_MAX_HISTORY,
   DEFAULT_CODE_TASK_WORKSPACE,
   DEFAULT_MODEL_SETTINGS,
+  DEFAULT_SPEECH_INPUT_SETTINGS,
+  DEFAULT_VISION_SETTINGS,
   DEFAULT_VOICE_SETTINGS,
   EDGE_MARGIN,
   LIVE2D_ACTIVE_STORAGE_KEY,
@@ -117,8 +125,10 @@ import {
   loadStoredCodeTasks,
   loadStoredSettings,
   normalizeDisplayEmotion,
+  normalizeAssistantVoice,
   normalizeLive2dEmotion,
   normalizeMessageContent,
+  normalizeSpeechInputSettings,
   normalizeThinkingText,
   sanitizeFilename,
   toApiMessages,
@@ -141,6 +151,8 @@ export default function App() {
   const [conversations, setConversations] = useState<ConversationSummary[]>([]);
   const [currentConversationId, setCurrentConversationId] = useState<string | null>(null);
   const [modelSettings, setModelSettings] = useState<ModelSettings>(stored.model);
+  const [visionSettings, setVisionSettings] = useState<VisionSettings>(stored.vision);
+  const [speechInputSettings, setSpeechInputSettings] = useState<SpeechInputSettings>(stored.speechInput);
   const [voiceSettings, setVoiceSettings] = useState<VoiceSettings>(stored.voice);
   const [mode, setMode] = useState<ChatMode>(stored.mode);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -165,6 +177,8 @@ export default function App() {
   const [openSections, setOpenSections] = useState<Record<ConfigSection, boolean>>({
     profile: false,
     model: false,
+    vision: false,
+    speechInput: false,
     voice: false,
     live2d: false,
     interface: false
@@ -184,6 +198,11 @@ export default function App() {
   const [speaking, setSpeaking] = useState(false);
   const [voiceBusy, setVoiceBusy] = useState(false);
   const [uploadBusy, setUploadBusy] = useState(false);
+  const [screenCaptureBusy, setScreenCaptureBusy] = useState(false);
+  const [voiceInputBusy, setVoiceInputBusy] = useState(false);
+  const [voiceRecording, setVoiceRecording] = useState(false);
+  const [voiceRecordingSeconds, setVoiceRecordingSeconds] = useState(0);
+  const [voiceInputLevels, setVoiceInputLevels] = useState<number[]>(Array.from({ length: 18 }, () => 0.24));
   const [live2dReady, setLive2dReady] = useState(false);
   const [live2dError, setLive2dError] = useState("");
   const [minimumBootElapsed, setMinimumBootElapsed] = useState(false);
@@ -216,17 +235,37 @@ export default function App() {
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const audioQueueRef = useRef<AudioQueueItem[]>([]);
   const audioPlayingRef = useRef(false);
+  const floatingComposerInputRef = useRef<HTMLTextAreaElement | null>(null);
+  const panelComposerInputRef = useRef<HTMLTextAreaElement | null>(null);
+  const lipSyncAudioContextRef = useRef<AudioContext | null>(null);
+  const lipSyncAnimationFrameRef = useRef<number | null>(null);
+  const lipSyncTokenRef = useRef(0);
+  const lipSyncLevelRef = useRef(0);
   const textRevealFrameRef = useRef<number | null>(null);
   const textRevealTokenRef = useRef(0);
   const floatingMessageRef = useRef<HTMLDivElement | null>(null);
   const chatMessageRef = useRef<HTMLDivElement | null>(null);
   const taskMessageRef = useRef<HTMLDivElement | null>(null);
   const saveSettingsTimerRef = useRef<number | null>(null);
+  const voiceMediaRecorderRef = useRef<MediaRecorder | null>(null);
+  const voiceMediaStreamRef = useRef<MediaStream | null>(null);
+  const voiceAudioContextRef = useRef<AudioContext | null>(null);
+  const voiceAnimationFrameRef = useRef<number | null>(null);
+  const voiceDurationTimerRef = useRef<number | null>(null);
+  const voiceChunksRef = useRef<Blob[]>([]);
+  const voicePcmChunksRef = useRef<Float32Array[]>([]);
+  const voicePcmProcessorRef = useRef<ScriptProcessorNode | null>(null);
+  const voicePcmSilentGainRef = useRef<GainNode | null>(null);
+  const voicePcmSampleRateRef = useRef(48000);
+  const voiceRecordingStartedAtRef = useRef(0);
+  const voiceWaveformSamplesRef = useRef<number[]>([]);
 
   const selectedProvider = providers.find((provider) => provider.name === modelSettings.providerName);
-  const canSend = (input.trim().length > 0 || uploadedFiles.length > 0) && !isStreaming;
+  const canSend = (input.trim().length > 0 || uploadedFiles.length > 0) && !isStreaming && !voiceRecording && !voiceInputBusy;
   const canStartCodeTask = codeTaskInput.trim().length > 0 && !codeTaskRunning;
-  const visibleMessages = messages.filter((message) => message.content || message.streaming).slice(-8);
+  const visibleMessages = messages
+    .filter((message) => message.content || message.streaming || (message.attachments?.length ?? 0) > 0)
+    .slice(-8);
   const activeCodeTask = codeTasks.find((task) => task.id === activeCodeTaskId) ?? null;
   const visibleCodeTasks = useMemo(
     () => [...codeTasks].sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime()),
@@ -248,6 +287,39 @@ export default function App() {
   }, [conversations, historySearch]);
   const live2dLoadResolved = live2dReady || Boolean(live2dError);
   const loadingReady = minimumBootElapsed && live2dLoadResolved;
+
+  function speechInputSettingsForPersistence(): SpeechInputSettings {
+    if (speechInputSettings.providerName === DEFAULT_SPEECH_INPUT_SETTINGS.providerName && modelSettings.apiKey) {
+      return { ...speechInputSettings, apiKey: "" };
+    }
+    return speechInputSettings;
+  }
+
+  function speechInputSettingsForRequest(): SpeechInputSettings {
+    const settings = normalizeSpeechInputSettings(speechInputSettingsForPersistence());
+    if (settings.providerName === DEFAULT_SPEECH_INPUT_SETTINGS.providerName) {
+      return { ...settings, apiKey: modelSettings.apiKey || settings.apiKey };
+    }
+    return settings;
+  }
+
+  function resizeComposerTextarea(element: HTMLTextAreaElement | null) {
+    if (!element) {
+      return;
+    }
+    element.style.height = "auto";
+    const style = window.getComputedStyle(element);
+    const minHeight = Number.parseFloat(style.minHeight) || 0;
+    const maxHeight = Number.parseFloat(style.maxHeight) || element.scrollHeight;
+    const nextHeight = Math.max(minHeight, Math.min(element.scrollHeight, maxHeight));
+    element.style.height = `${nextHeight}px`;
+    element.style.overflowY = element.scrollHeight > maxHeight ? "auto" : "hidden";
+  }
+
+  function updateComposerInput(event: ChangeEvent<HTMLTextAreaElement>) {
+    setInput(event.target.value);
+    resizeComposerTextarea(event.currentTarget);
+  }
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -318,6 +390,16 @@ export default function App() {
         setStorageError("");
         if (remoteSettings) {
           setModelSettings((prev) => ({ ...prev, ...remoteSettings.model }));
+          setVisionSettings((prev) => ({ ...prev, ...(remoteSettings.vision ?? {}) }));
+          const normalizedSpeechInput = normalizeSpeechInputSettings(remoteSettings.speechInput);
+          setSpeechInputSettings(() => ({
+            ...normalizedSpeechInput,
+            apiKey:
+              normalizedSpeechInput.providerName === DEFAULT_SPEECH_INPUT_SETTINGS.providerName &&
+              remoteSettings.model?.apiKey
+                ? ""
+                : normalizedSpeechInput.apiKey
+          }));
           setVoiceSettings((prev) => ({ ...prev, ...remoteSettings.voice }));
           setMode(remoteSettings.mode);
         }
@@ -348,6 +430,8 @@ export default function App() {
       STORAGE_KEY,
       JSON.stringify({
         model: modelSettings,
+        vision: visionSettings,
+        speechInput: speechInputSettingsForPersistence(),
         voice: voiceSettings,
         mode
       })
@@ -362,13 +446,15 @@ export default function App() {
     saveSettingsTimerRef.current = window.setTimeout(() => {
       saveSettings({
         model: modelSettings,
+        vision: visionSettings,
+        speechInput: speechInputSettingsForPersistence(),
         voice: voiceSettings,
         mode
       }).catch((error) => {
         setStorageError(error instanceof Error ? error.message : "settings save failed");
       });
     }, 350);
-  }, [modelSettings, voiceSettings, mode, storageOnline]);
+  }, [modelSettings, visionSettings, speechInputSettings, voiceSettings, mode, storageOnline]);
 
   useEffect(() => {
     const payload = codeTasks.slice(0, CODE_TASK_MAX_HISTORY);
@@ -383,6 +469,20 @@ export default function App() {
       syncCodeTaskHistory(payload).catch(() => undefined);
     }, 500);
   }, [codeTasks]);
+
+  useEffect(() => {
+    if (
+      speechInputSettings.providerName === DEFAULT_SPEECH_INPUT_SETTINGS.providerName &&
+      modelSettings.apiKey &&
+      speechInputSettings.apiKey
+    ) {
+      setSpeechInputSettings((prev) => ({ ...prev, apiKey: "" }));
+    }
+  }, [
+    modelSettings.apiKey,
+    speechInputSettings.apiKey,
+    speechInputSettings.providerName
+  ]);
 
   useEffect(() => {
     const syncCurrentCodeTasks = () => {
@@ -534,6 +634,8 @@ export default function App() {
       if (mobileTaskViewFrameRef.current !== null) {
         window.cancelAnimationFrame(mobileTaskViewFrameRef.current);
       }
+      stopAudioPlayback();
+      cleanupVoiceRecordingResources();
     };
   }, []);
 
@@ -550,6 +652,11 @@ export default function App() {
     floatingMessageRef.current?.scrollTo({ top: floatingMessageRef.current.scrollHeight, behavior: "smooth" });
     chatMessageRef.current?.scrollTo({ top: chatMessageRef.current.scrollHeight, behavior: "smooth" });
   }, [messages, chatOpen]);
+
+  useEffect(() => {
+    resizeComposerTextarea(floatingComposerInputRef.current);
+    resizeComposerTextarea(panelComposerInputRef.current);
+  }, [input, chatOpen, voiceRecording]);
 
   useEffect(() => {
     taskMessageRef.current?.scrollTo({ top: taskMessageRef.current.scrollHeight, behavior: "auto" });
@@ -865,10 +972,195 @@ export default function App() {
     );
   }
 
+  function assistantVoiceAudioUrls(message: ChatMessage): string[] {
+    const voice = normalizeAssistantVoice(message.assistantVoice);
+    return voice?.audioUrls ?? [];
+  }
+
+  function setAssistantVoice(id: string, value: unknown) {
+    const voice = normalizeAssistantVoice(value);
+    if (!voice) {
+      return;
+    }
+    setMessages((prev) =>
+      prev.map((message) => (message.id === id ? { ...message, assistantVoice: voice } : message))
+    );
+  }
+
+  function appendAssistantVoiceAudio(id: string, url: string, index = 0) {
+    if (!url) {
+      return;
+    }
+    setMessages((prev) =>
+      prev.map((message) => {
+        if (message.id !== id) {
+          return message;
+        }
+        const current = normalizeAssistantVoice(message.assistantVoice);
+        const segmentMap = new Map<number, string>();
+        (current?.segments ?? current?.audioUrls.map((item, itemIndex) => ({ index: itemIndex, url: item })) ?? [])
+          .forEach((segment) => segmentMap.set(segment.index, segment.url));
+        segmentMap.set(Number.isFinite(index) ? index : segmentMap.size, url);
+        const segments = Array.from(segmentMap.entries())
+          .map(([segmentIndex, segmentUrl]) => ({ index: segmentIndex, url: segmentUrl }))
+          .filter((segment) => segment.url)
+          .sort((a, b) => a.index - b.index);
+        return {
+          ...message,
+          assistantVoice: {
+            audioUrls: segments.map((segment) => segment.url),
+            segments
+          }
+        };
+      })
+    );
+  }
+
+  function playAssistantVoiceUrls(urls: string[]) {
+    const playableUrls = urls.map((url) => url.trim()).filter(Boolean);
+    if (playableUrls.length === 0) {
+      return;
+    }
+    stopAudioPlayback();
+    playableUrls.forEach((url, index) => enqueueAudio({ url, index }));
+    live2dRef.current?.playEmotion("smile1");
+  }
+
+  function stopLive2DLipSync() {
+    lipSyncTokenRef.current += 1;
+    lipSyncLevelRef.current = 0;
+    if (lipSyncAnimationFrameRef.current !== null) {
+      window.cancelAnimationFrame(lipSyncAnimationFrameRef.current);
+      lipSyncAnimationFrameRef.current = null;
+    }
+    live2dRef.current?.resetMouth();
+    const context = lipSyncAudioContextRef.current;
+    lipSyncAudioContextRef.current = null;
+    if (context && context.state !== "closed") {
+      void context.close().catch(() => undefined);
+    }
+  }
+
+  function startLive2DLipSync(audio: HTMLAudioElement): () => void {
+    stopLive2DLipSync();
+    const token = lipSyncTokenRef.current;
+    let analyserStarted = false;
+
+    const isCurrentAudio = () => token === lipSyncTokenRef.current && audioRef.current === audio && !audio.ended && !audio.paused;
+
+    const startSyntheticLipSync = () => {
+      if (!isCurrentAudio() || lipSyncAnimationFrameRef.current !== null) {
+        return;
+      }
+      const startedAt = performance.now();
+      const step = () => {
+        if (!isCurrentAudio()) {
+          lipSyncAnimationFrameRef.current = null;
+          return;
+        }
+        const elapsed = (performance.now() - startedAt) / 1000;
+        const duration = Number.isFinite(audio.duration) && audio.duration > 0 ? audio.duration : 0;
+        const fadeIn = clamp((performance.now() - startedAt) / 180, 0, 1);
+        const fadeOut = duration > 0 ? clamp((duration - audio.currentTime) / 0.22, 0, 1) : 1;
+        const pulse = 0.38 + Math.sin(elapsed * 18) * 0.24 + Math.sin(elapsed * 31 + 0.8) * 0.18;
+        const target = clamp(pulse * fadeIn * fadeOut, 0, 0.92);
+        lipSyncLevelRef.current = lipSyncLevelRef.current * 0.5 + target * 0.5;
+        live2dRef.current?.setMouthOpen(lipSyncLevelRef.current);
+        lipSyncAnimationFrameRef.current = window.requestAnimationFrame(step);
+      };
+      step();
+    };
+
+    const startAnalyserLipSync = async () => {
+      if (analyserStarted) {
+        return;
+      }
+      analyserStarted = true;
+      const AudioContextCtor = window.AudioContext || (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+      if (!AudioContextCtor) {
+        startSyntheticLipSync();
+        return;
+      }
+
+      const context = new AudioContextCtor();
+      lipSyncAudioContextRef.current = context;
+      try {
+        if (context.state !== "running") {
+          await Promise.race([
+            context.resume().catch(() => undefined),
+            new Promise((resolve) => window.setTimeout(resolve, 140))
+          ]);
+        }
+        if (token !== lipSyncTokenRef.current || audioRef.current !== audio) {
+          if (context.state !== "closed") {
+            void context.close().catch(() => undefined);
+          }
+          return;
+        }
+        if (context.state !== "running") {
+          lipSyncAudioContextRef.current = null;
+          if (context.state !== "closed") {
+            void context.close().catch(() => undefined);
+          }
+          startSyntheticLipSync();
+          return;
+        }
+
+        const source = context.createMediaElementSource(audio);
+        const analyser = context.createAnalyser();
+        analyser.fftSize = 256;
+        source.connect(analyser);
+        analyser.connect(context.destination);
+        const data = new Uint8Array(analyser.fftSize);
+
+        const step = () => {
+          if (!isCurrentAudio()) {
+            lipSyncAnimationFrameRef.current = null;
+            return;
+          }
+          analyser.getByteTimeDomainData(data);
+          let total = 0;
+          for (let index = 0; index < data.length; index += 1) {
+            const sample = (data[index] - 128) / 128;
+            total += sample * sample;
+          }
+          const rms = Math.sqrt(total / data.length);
+          const target = clamp((rms - 0.012) * 8.2, 0, 1);
+          lipSyncLevelRef.current = lipSyncLevelRef.current * 0.58 + target * 0.42;
+          live2dRef.current?.setMouthOpen(lipSyncLevelRef.current);
+          lipSyncAnimationFrameRef.current = window.requestAnimationFrame(step);
+        };
+        step();
+      } catch {
+        if (lipSyncAudioContextRef.current === context) {
+          lipSyncAudioContextRef.current = null;
+        }
+        if (context.state !== "closed") {
+          void context.close().catch(() => undefined);
+        }
+        startSyntheticLipSync();
+      }
+    };
+
+    const handlePlaying = () => {
+      void startAnalyserLipSync();
+    };
+    audio.addEventListener("playing", handlePlaying, { once: true });
+    if (!audio.paused && !audio.ended) {
+      handlePlaying();
+    }
+
+    return () => {
+      audio.removeEventListener("playing", handlePlaying);
+      stopLive2DLipSync();
+    };
+  }
+
   function stopAudioPlayback() {
     audioQueueRef.current = [];
     audioPlayingRef.current = false;
     cancelSyncedTextReveal();
+    stopLive2DLipSync();
     if (audioRef.current) {
       audioRef.current.onended = null;
       audioRef.current.onerror = null;
@@ -967,6 +1259,7 @@ export default function App() {
 
     audioPlayingRef.current = true;
     let finishSyncedText: (() => void) | null = null;
+    let finishLipSync: (() => void) | null = null;
     let finished = false;
 
     const finish = () => {
@@ -975,6 +1268,7 @@ export default function App() {
       }
       finished = true;
       finishSyncedText?.();
+      finishLipSync?.();
       if (audioRef.current) {
         audioRef.current = null;
       }
@@ -989,6 +1283,7 @@ export default function App() {
     const nextUrl = `${item.url}${item.url.includes("?") ? "&" : "?"}t=${Date.now()}`;
     const audio = new Audio(nextUrl);
     audioRef.current = audio;
+    finishLipSync = startLive2DLipSync(audio);
     finishSyncedText =
       item.displayText && item.assistantId
         ? startSyncedTextReveal(item.assistantId, item.displayText, audio)
@@ -1008,6 +1303,359 @@ export default function App() {
       return;
     }
     setStatus("voice on");
+  }
+
+  function toChatAttachments(files: UploadedFileInfo[]): ChatAttachment[] {
+    return files.map((file) => ({
+      path: file.path,
+      originalFilename: file.originalFilename,
+      filename: file.filename,
+      mediaType: file.mediaType,
+      contentType: file.contentType
+    }));
+  }
+
+  function countImageAttachments(files: UploadedFileInfo[]): number {
+    return files.filter((file) => file.mediaType === "image" || file.visionReadable).length;
+  }
+
+  function dataUrlToFile(dataUrl: string, filename: string): File {
+    const [meta, payload = ""] = dataUrl.split(",", 2);
+    const contentType = /data:([^;]+);base64/i.exec(meta)?.[1] || "image/png";
+    const binary = atob(payload);
+    const bytes = new Uint8Array(binary.length);
+    for (let index = 0; index < binary.length; index += 1) {
+      bytes[index] = binary.charCodeAt(index);
+    }
+    return new File([bytes], filename, { type: contentType });
+  }
+
+  async function captureBrowserScreenshotFile(): Promise<File> {
+    if (!navigator.mediaDevices?.getDisplayMedia) {
+      throw new Error("当前环境不支持屏幕截图");
+    }
+    const stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: false });
+    try {
+      const video = document.createElement("video");
+      video.srcObject = stream;
+      video.muted = true;
+      await video.play();
+      await new Promise<void>((resolve) => {
+        if (video.videoWidth > 0 && video.videoHeight > 0) {
+          resolve();
+          return;
+        }
+        video.onloadedmetadata = () => resolve();
+      });
+      const canvas = document.createElement("canvas");
+      canvas.width = video.videoWidth || 1280;
+      canvas.height = video.videoHeight || 720;
+      const context = canvas.getContext("2d");
+      if (!context) {
+        throw new Error("无法创建截图画布");
+      }
+      context.drawImage(video, 0, 0, canvas.width, canvas.height);
+      const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, "image/png"));
+      if (!blob) {
+        throw new Error("截图生成失败");
+      }
+      return new File([blob], `screen-${Date.now()}.png`, { type: "image/png" });
+    } finally {
+      stream.getTracks().forEach((track) => track.stop());
+    }
+  }
+
+  async function captureScreenshotFile(): Promise<File> {
+    const desktopCapture = window.amadeusDesktop?.captureScreen;
+    if (desktopCapture) {
+      const result = await desktopCapture();
+      if (!result?.dataUrl) {
+        throw new Error("截图已取消");
+      }
+      return dataUrlToFile(result.dataUrl, result.filename || `screen-${Date.now()}.png`);
+    }
+    return await captureBrowserScreenshotFile();
+  }
+
+  async function captureScreenAttachment() {
+    if (!visionSettings.screenCaptureEnabled || uploadBusy || screenCaptureBusy) {
+      return;
+    }
+    setScreenCaptureBusy(true);
+    setStatus("screenshot");
+    try {
+      const file = await captureScreenshotFile();
+      await uploadFiles([file]);
+      setStatus("screenshot attached");
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "screenshot failed");
+    } finally {
+      setScreenCaptureBusy(false);
+    }
+  }
+
+  function cleanupVoiceRecordingResources() {
+    if (voiceAnimationFrameRef.current !== null) {
+      window.cancelAnimationFrame(voiceAnimationFrameRef.current);
+      voiceAnimationFrameRef.current = null;
+    }
+    if (voiceDurationTimerRef.current !== null) {
+      window.clearInterval(voiceDurationTimerRef.current);
+      voiceDurationTimerRef.current = null;
+    }
+    voiceMediaStreamRef.current?.getTracks().forEach((track) => track.stop());
+    voiceMediaStreamRef.current = null;
+    voicePcmProcessorRef.current?.disconnect();
+    voicePcmProcessorRef.current = null;
+    voicePcmSilentGainRef.current?.disconnect();
+    voicePcmSilentGainRef.current = null;
+    void voiceAudioContextRef.current?.close().catch(() => undefined);
+    voiceAudioContextRef.current = null;
+  }
+
+  function preferredVoiceInputMimeType(): string {
+    const candidates = [
+      "audio/webm;codecs=opus",
+      "audio/webm",
+      "audio/ogg;codecs=opus",
+      "audio/mp4"
+    ];
+    return candidates.find((type) => MediaRecorder.isTypeSupported(type)) ?? "";
+  }
+
+  function voiceInputFileExtension(mimeType: string): string {
+    if (mimeType.includes("wav") || mimeType.includes("wave")) {
+      return "wav";
+    }
+    if (mimeType.includes("ogg")) {
+      return "ogg";
+    }
+    if (mimeType.includes("mp4")) {
+      return "m4a";
+    }
+    return "webm";
+  }
+
+  function encodePcmChunksToWav(chunks: Float32Array[], sampleRate: number): Blob {
+    const samplesCount = chunks.reduce((total, chunk) => total + chunk.length, 0);
+    if (samplesCount === 0) {
+      return new Blob([], { type: "audio/wav" });
+    }
+    const bytesPerSample = 2;
+    const dataBytes = samplesCount * bytesPerSample;
+    const buffer = new ArrayBuffer(44 + dataBytes);
+    const view = new DataView(buffer);
+    let offset = 0;
+
+    const writeString = (value: string) => {
+      for (let index = 0; index < value.length; index += 1) {
+        view.setUint8(offset, value.charCodeAt(index));
+        offset += 1;
+      }
+    };
+
+    writeString("RIFF");
+    view.setUint32(offset, 36 + dataBytes, true);
+    offset += 4;
+    writeString("WAVE");
+    writeString("fmt ");
+    view.setUint32(offset, 16, true);
+    offset += 4;
+    view.setUint16(offset, 1, true);
+    offset += 2;
+    view.setUint16(offset, 1, true);
+    offset += 2;
+    view.setUint32(offset, sampleRate, true);
+    offset += 4;
+    view.setUint32(offset, sampleRate * bytesPerSample, true);
+    offset += 4;
+    view.setUint16(offset, bytesPerSample, true);
+    offset += 2;
+    view.setUint16(offset, 16, true);
+    offset += 2;
+    writeString("data");
+    view.setUint32(offset, dataBytes, true);
+    offset += 4;
+
+    for (const chunk of chunks) {
+      for (let index = 0; index < chunk.length; index += 1) {
+        const sample = clamp(chunk[index], -1, 1);
+        view.setInt16(offset, sample < 0 ? sample * 0x8000 : sample * 0x7fff, true);
+        offset += 2;
+      }
+    }
+
+    return new Blob([buffer], { type: "audio/wav" });
+  }
+
+  function normalizeWaveformSamples(samples: number[], count = 18): number[] {
+    if (samples.length === 0) {
+      return Array.from({ length: count }, () => 0.28);
+    }
+    const bucketSize = Math.max(1, Math.ceil(samples.length / count));
+    const bars: number[] = [];
+    for (let index = 0; index < count; index += 1) {
+      const bucket = samples.slice(index * bucketSize, (index + 1) * bucketSize);
+      const value = bucket.length > 0 ? bucket.reduce((total, item) => total + item, 0) / bucket.length : 0.22;
+      bars.push(clamp(value, 0.18, 1));
+    }
+    return bars;
+  }
+
+  function startVoiceLevelMonitor(stream: MediaStream) {
+    const AudioContextCtor = window.AudioContext || (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+    if (!AudioContextCtor) {
+      return;
+    }
+    const context = new AudioContextCtor();
+    void context.resume().catch(() => undefined);
+    const analyser = context.createAnalyser();
+    analyser.fftSize = 256;
+    const source = context.createMediaStreamSource(stream);
+    source.connect(analyser);
+    const data = new Uint8Array(analyser.frequencyBinCount);
+    voiceAudioContextRef.current = context;
+    voicePcmSampleRateRef.current = context.sampleRate || 48000;
+    if (typeof context.createScriptProcessor === "function") {
+      const processor = context.createScriptProcessor(4096, 1, 1);
+      const silentGain = context.createGain();
+      silentGain.gain.value = 0;
+      processor.onaudioprocess = (event) => {
+        const input = event.inputBuffer.getChannelData(0);
+        voicePcmChunksRef.current.push(new Float32Array(input));
+      };
+      source.connect(processor);
+      processor.connect(silentGain);
+      silentGain.connect(context.destination);
+      voicePcmProcessorRef.current = processor;
+      voicePcmSilentGainRef.current = silentGain;
+    }
+
+    const tick = () => {
+      analyser.getByteFrequencyData(data);
+      const average = data.reduce((total, value) => total + value, 0) / Math.max(1, data.length);
+      const level = clamp(average / 120, 0.16, 1);
+      voiceWaveformSamplesRef.current.push(level);
+      setVoiceInputLevels((prev) => [...prev.slice(1), level]);
+      voiceAnimationFrameRef.current = window.requestAnimationFrame(tick);
+    };
+    tick();
+  }
+
+  async function startVoiceInputRecording() {
+    if (isStreaming || voiceInputBusy || voiceRecording) {
+      return;
+    }
+    if (!speechInputSettings.enabled) {
+      setStatus("voice input off");
+      return;
+    }
+    if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === "undefined") {
+      setStatus("mic unsupported");
+      return;
+    }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const mimeType = preferredVoiceInputMimeType();
+      const recorder = new MediaRecorder(stream, mimeType ? { mimeType } : undefined);
+      voiceMediaRecorderRef.current = recorder;
+      voiceMediaStreamRef.current = stream;
+      voiceChunksRef.current = [];
+      voicePcmChunksRef.current = [];
+      voicePcmSampleRateRef.current = 48000;
+      voiceWaveformSamplesRef.current = [];
+      voiceRecordingStartedAtRef.current = Date.now();
+      setVoiceInputLevels(Array.from({ length: 18 }, () => 0.24));
+      setVoiceRecordingSeconds(0);
+
+      recorder.ondataavailable = (event) => {
+        if (event.data.size > 0) {
+          voiceChunksRef.current.push(event.data);
+        }
+      };
+      recorder.onstop = () => {
+        const durationSeconds = Math.max(0.4, (Date.now() - voiceRecordingStartedAtRef.current) / 1000);
+        const chunks = voiceChunksRef.current;
+        const audioType = recorder.mimeType || mimeType || "audio/webm";
+        const wavBlob = encodePcmChunksToWav(voicePcmChunksRef.current, voicePcmSampleRateRef.current);
+        const blob = wavBlob.size > 44 ? wavBlob : new Blob(chunks, { type: audioType });
+        const uploadType = wavBlob.size > 44 ? "audio/wav" : audioType;
+        const waveform = normalizeWaveformSamples(voiceWaveformSamplesRef.current);
+        cleanupVoiceRecordingResources();
+        setVoiceRecording(false);
+        setVoiceRecordingSeconds(0);
+        voiceMediaRecorderRef.current = null;
+        void processVoiceInputBlob(blob, uploadType, durationSeconds, waveform);
+      };
+
+      recorder.start();
+      startVoiceLevelMonitor(stream);
+      voiceDurationTimerRef.current = window.setInterval(() => {
+        setVoiceRecordingSeconds((Date.now() - voiceRecordingStartedAtRef.current) / 1000);
+      }, 150);
+      setVoiceRecording(true);
+      setStatus("listening");
+    } catch (error) {
+      cleanupVoiceRecordingResources();
+      setVoiceRecording(false);
+      setStatus(error instanceof Error ? error.message : "mic failed");
+    }
+  }
+
+  function stopVoiceInputRecording() {
+    const recorder = voiceMediaRecorderRef.current;
+    if (!recorder || recorder.state === "inactive") {
+      return;
+    }
+    setStatus("transcribing");
+    recorder.stop();
+  }
+
+  function toggleVoiceInputRecording() {
+    if (voiceRecording) {
+      stopVoiceInputRecording();
+      return;
+    }
+    void startVoiceInputRecording();
+  }
+
+  async function processVoiceInputBlob(blob: Blob, mimeType: string, durationSeconds: number, waveform: number[]) {
+    if (blob.size === 0) {
+      setStatus("empty voice");
+      return;
+    }
+    setVoiceInputBusy(true);
+    try {
+      const extension = voiceInputFileExtension(mimeType);
+      const file = new File([blob], `user-voice-${Date.now()}.${extension}`, { type: mimeType || "audio/webm" });
+      const result = await transcribeVoiceInput({
+        file,
+        durationSeconds,
+        model: modelSettings,
+        speechInput: speechInputSettingsForRequest()
+      });
+      const transcript = result.text.trim();
+      const voiceInput: VoiceInputInfo = {
+        audioUrl: result.audio.url,
+        path: result.audio.path,
+        filename: result.audio.filename,
+        contentType: result.audio.contentType,
+        durationSeconds: result.audio.durationSeconds || durationSeconds,
+        transcript,
+        waveform
+      };
+      if (!result.ok || !transcript) {
+        const errorText = result.error || "语音输入转写失败";
+        setStatus(errorText);
+        await sendVoiceInputMessage(`语音输入转写失败：${errorText}。请不要猜测语音内容，提示用户检查语音输入模型配置或重试。`, voiceInput);
+        return;
+      }
+      await sendVoiceInputMessage(transcript, voiceInput);
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "voice input failed");
+    } finally {
+      setVoiceInputBusy(false);
+    }
   }
 
   async function copyMessageText(text: string) {
@@ -1095,6 +1743,22 @@ export default function App() {
     return <UploadPopover busy={uploadBusy} onDrop={handleUploadDrop} onFileChange={handleFileSelection} />;
   }
 
+  function renderVoiceInputVisualizer(compact = false) {
+    return (
+      <div className={`voice-input-visualizer ${compact ? "is-compact" : ""}`} aria-label="正在录音">
+        <div className="voice-input-bars" aria-hidden="true">
+          {voiceInputLevels.map((level, index) => (
+            <span
+              key={`${index}-${voiceRecording ? "recording" : "idle"}`}
+              style={{ height: `${Math.round(8 + level * 25)}px` }}
+            />
+          ))}
+        </div>
+        <span className="voice-input-time">{Math.max(1, Math.round(voiceRecordingSeconds))}"</span>
+      </div>
+    );
+  }
+
   function live2DRuntimeLabel(record: Live2DModelRecord): string {
     return record.runtime === "cubism3" ? "moc3" : "moc";
   }
@@ -1143,17 +1807,32 @@ export default function App() {
     if (!text || message.role !== "assistant") {
       return;
     }
+    const cachedUrls = assistantVoiceAudioUrls(message);
+    if (cachedUrls.length > 0) {
+      playAssistantVoiceUrls(cachedUrls);
+      setStatus("done");
+      return;
+    }
     setVoiceBusy(true);
     setStatus("voice");
     try {
-      const url = await synthesizeVoice({
+      const result = await synthesizeVoice({
         text,
         model: modelSettings,
-        voice: voiceSettings
+        voice: voiceSettings,
+        conversationId: currentConversationId,
+        messageId: message.id
       });
-      stopAudioPlayback();
-      enqueueAudio({ url });
-      live2dRef.current?.playEmotion("smile1");
+      const assistantVoice =
+        normalizeAssistantVoice(result.assistantVoice) ??
+        normalizeAssistantVoice({
+          audioUrls: [result.audioUrl],
+          segments: [{ index: 0, url: result.audioUrl }]
+        });
+      if (assistantVoice) {
+        setAssistantVoice(message.id, assistantVoice);
+        playAssistantVoiceUrls(assistantVoice.audioUrls);
+      }
       setStatus("done");
     } catch (error) {
       setStatus(error instanceof Error ? error.message : "voice error");
@@ -1185,6 +1864,7 @@ export default function App() {
       return;
     }
     if (event.event === "audio") {
+      appendAssistantVoiceAudio(assistantId, event.payload.url, event.payload.index ?? 0);
       enqueueAudio({
         url: event.payload.url,
         assistantId,
@@ -1204,6 +1884,9 @@ export default function App() {
       return;
     }
     if (event.event === "done") {
+      if (event.payload.assistantVoice) {
+        setAssistantVoice(assistantId, event.payload.assistantVoice);
+      }
       finalizeAssistant(assistantId);
       setStatus("done");
     }
@@ -1215,6 +1898,11 @@ export default function App() {
     if (!text || isStreaming) {
       return;
     }
+    if (countImageAttachments(uploadedFiles) > 4) {
+      setStatus("最多 4 张图片");
+      return;
+    }
+    const attachments = toChatAttachments(uploadedFiles);
 
     abortRef.current?.abort();
     stopAudioPlayback();
@@ -1228,6 +1916,7 @@ export default function App() {
       id: createId(),
       role: "user",
       content: text,
+      attachments,
       createdAt: new Date().toISOString()
     };
     const assistantMessage: ChatMessage = {
@@ -1249,8 +1938,75 @@ export default function App() {
       await streamChat({
         conversationId,
         messages: toApiMessages([...messages, userMessage]),
+        attachments,
         mode,
         model: modelSettings,
+        vision: visionSettings,
+        voice: voiceSettings,
+        signal: controller.signal,
+        onEvent: (streamEvent) => handleStreamEvent(streamEvent, assistantMessage.id)
+      });
+    } catch (error) {
+      if (!controller.signal.aborted) {
+        appendAssistantDelta(assistantMessage.id, {
+          content: `请求失败：${error instanceof Error ? error.message : "未知错误"}`
+        });
+        setStatus("error");
+      }
+    } finally {
+      finalizeAssistant(assistantMessage.id);
+      setIsStreaming(false);
+      abortRef.current = null;
+      if (conversationId) {
+        void refreshConversations();
+      }
+    }
+  }
+
+  async function sendVoiceInputMessage(text: string, voiceInput: VoiceInputInfo) {
+    const content = text.trim();
+    if (!content || isStreaming) {
+      return;
+    }
+
+    abortRef.current?.abort();
+    stopAudioPlayback();
+    const controller = new AbortController();
+    abortRef.current = controller;
+    setIsStreaming(true);
+    setStatus("connecting");
+    const conversationId = await ensureConversation(content);
+
+    const userMessage: ChatMessage = {
+      id: createId(),
+      role: "user",
+      content,
+      voiceInput,
+      createdAt: new Date().toISOString()
+    };
+    const assistantMessage: ChatMessage = {
+      id: createId(),
+      role: "assistant",
+      content: "",
+      thinking: "",
+      streaming: true,
+      createdAt: new Date().toISOString()
+    };
+    setMessages((prev) => [...prev, userMessage, assistantMessage]);
+    setInput("");
+    setUploadedFiles([]);
+    setUploadPanelOpen(false);
+    setCurrentEmotion("neutral");
+    live2dRef.current?.playEmotion("neutral");
+
+    try {
+      await streamChat({
+        conversationId,
+        messages: toApiMessages([...messages, userMessage]),
+        attachments: [],
+        mode,
+        model: modelSettings,
+        vision: visionSettings,
         voice: voiceSettings,
         signal: controller.signal,
         onEvent: (streamEvent) => handleStreamEvent(streamEvent, assistantMessage.id)
@@ -2049,14 +2805,13 @@ export default function App() {
     setVoiceBusy(true);
     setStatus("voice");
     try {
-      const url = await synthesizeVoice({
+      const result = await synthesizeVoice({
         text: "これで音声のテストは完了。まったく、最初からそう言えばいいのに。",
         model: modelSettings,
         voice: voiceSettings
       });
-      stopAudioPlayback();
-      enqueueAudio({ url });
-      live2dRef.current?.playEmotion("smile1");
+      const assistantVoice = normalizeAssistantVoice(result.assistantVoice);
+      playAssistantVoiceUrls(assistantVoice?.audioUrls ?? [result.audioUrl]);
       setStatus("done");
     } catch (error) {
       setStatus(error instanceof Error ? error.message : "voice error");
@@ -2210,7 +2965,6 @@ export default function App() {
       <LeftDock
         open={menuOpen}
         storageOnline={storageOnline}
-        storageError={storageError}
         conversations={conversations}
         filteredConversations={filteredConversations}
         currentConversationId={currentConversationId}
@@ -2306,6 +3060,186 @@ export default function App() {
                 autoComplete="off"
               />
             </label>
+          </ConfigGroup>
+
+          <ConfigGroup
+            title="视觉"
+            icon={<Camera size={16} />}
+            open={openSections.vision}
+            onToggle={() => toggleSection("vision")}
+          >
+            <label className="switch-row">
+              <span>视觉理解</span>
+              <input
+                checked={visionSettings.enabled}
+                onChange={(event) => setVisionSettings((prev) => ({ ...prev, enabled: event.target.checked }))}
+                type="checkbox"
+              />
+            </label>
+            <label className="switch-row">
+              <span>截图入口</span>
+              <input
+                checked={visionSettings.screenCaptureEnabled}
+                onChange={(event) =>
+                  setVisionSettings((prev) => ({ ...prev, screenCaptureEnabled: event.target.checked }))
+                }
+                type="checkbox"
+              />
+            </label>
+            <label className="switch-row">
+              <span>远程视觉 API</span>
+              <input
+                checked={visionSettings.useRemote}
+                onChange={(event) => setVisionSettings((prev) => ({ ...prev, useRemote: event.target.checked }))}
+                type="checkbox"
+              />
+            </label>
+            <label className="field">
+              <span>Provider</span>
+              <select
+                value={visionSettings.providerName}
+                onChange={(event) => {
+                  const provider = providers.find((item) => item.name === event.target.value);
+                  setVisionSettings((prev) => ({
+                    ...prev,
+                    providerName: event.target.value,
+                    baseUrl: event.target.value ? provider?.baseUrl ?? prev.baseUrl : "",
+                    useRemote: event.target.value ? event.target.value !== "演示模型" : prev.useRemote
+                  }));
+                }}
+              >
+                <option value="">继承基础模型</option>
+                {providers.map((provider) => (
+                  <option key={provider.name} value={provider.name}>
+                    {provider.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="field">
+              <span>Base URL</span>
+              <input
+                value={visionSettings.baseUrl}
+                onChange={(event) => setVisionSettings((prev) => ({ ...prev, baseUrl: event.target.value }))}
+                placeholder={modelSettings.baseUrl || DEFAULT_MODEL_SETTINGS.baseUrl}
+              />
+            </label>
+            <label className="field">
+              <span>Vision Model</span>
+              <input
+                value={visionSettings.model}
+                onChange={(event) => setVisionSettings((prev) => ({ ...prev, model: event.target.value }))}
+                placeholder={DEFAULT_VISION_SETTINGS.model}
+              />
+            </label>
+            <label className="field">
+              <span>API Key</span>
+              <input
+                value={visionSettings.apiKey}
+                onChange={(event) => setVisionSettings((prev) => ({ ...prev, apiKey: event.target.value }))}
+                placeholder={modelSettings.apiKey ? "继承基础模型 Key" : ""}
+                type="password"
+                autoComplete="off"
+              />
+            </label>
+          </ConfigGroup>
+
+          <ConfigGroup
+            title="语音输入"
+            icon={<Mic size={16} />}
+            open={openSections.speechInput}
+            onToggle={() => toggleSection("speechInput")}
+          >
+            <label className="switch-row">
+              <span>语音输入</span>
+              <input
+                checked={speechInputSettings.enabled}
+                onChange={(event) => setSpeechInputSettings((prev) => ({ ...prev, enabled: event.target.checked }))}
+                type="checkbox"
+              />
+            </label>
+            <label className="switch-row">
+              <span>远程转写 API</span>
+              <input
+                checked={speechInputSettings.useRemote}
+                onChange={(event) => setSpeechInputSettings((prev) => ({ ...prev, useRemote: event.target.checked }))}
+                type="checkbox"
+              />
+            </label>
+            <label className="field">
+              <span>Provider</span>
+              <select
+                value={speechInputSettings.providerName}
+                onChange={(event) => {
+                  const provider = providers.find((item) => item.name === event.target.value);
+                  if (event.target.value === DEFAULT_SPEECH_INPUT_SETTINGS.providerName) {
+                    setSpeechInputSettings((prev) => ({
+                      ...prev,
+                      providerName: DEFAULT_SPEECH_INPUT_SETTINGS.providerName,
+                      baseUrl: DEFAULT_SPEECH_INPUT_SETTINGS.baseUrl,
+                      model: DEFAULT_SPEECH_INPUT_SETTINGS.model,
+                      language: DEFAULT_SPEECH_INPUT_SETTINGS.language,
+                      useRemote: true
+                    }));
+                    return;
+                  }
+                  setSpeechInputSettings((prev) => ({
+                    ...prev,
+                    providerName: event.target.value,
+                    baseUrl: event.target.value ? provider?.baseUrl ?? prev.baseUrl : DEFAULT_SPEECH_INPUT_SETTINGS.baseUrl,
+                    useRemote: event.target.value ? event.target.value !== "演示模型" : prev.useRemote
+                  }));
+                }}
+              >
+                <option value={DEFAULT_SPEECH_INPUT_SETTINGS.providerName}>小米 MiMo ASR</option>
+                {providers.map((provider) => (
+                  <option key={provider.name} value={provider.name}>
+                    {provider.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <label className="field">
+              <span>Base URL</span>
+              <input
+                value={speechInputSettings.baseUrl}
+                onChange={(event) => setSpeechInputSettings((prev) => ({ ...prev, baseUrl: event.target.value }))}
+                placeholder={DEFAULT_SPEECH_INPUT_SETTINGS.baseUrl}
+              />
+            </label>
+            <label className="field">
+              <span>ASR Model</span>
+              <input
+                value={speechInputSettings.model}
+                onChange={(event) => setSpeechInputSettings((prev) => ({ ...prev, model: event.target.value }))}
+                placeholder={DEFAULT_SPEECH_INPUT_SETTINGS.model}
+              />
+            </label>
+            <div className="inline-fields">
+              <label className="field">
+                <span>Language</span>
+                <input
+                  value={speechInputSettings.language}
+                  onChange={(event) => setSpeechInputSettings((prev) => ({ ...prev, language: event.target.value }))}
+                  placeholder="auto / zh / en"
+                />
+              </label>
+              <label className="field">
+                <span>API Key</span>
+                <input
+                  value={
+                    speechInputSettings.providerName === DEFAULT_SPEECH_INPUT_SETTINGS.providerName &&
+                    modelSettings.apiKey
+                      ? ""
+                      : speechInputSettings.apiKey
+                  }
+                  onChange={(event) => setSpeechInputSettings((prev) => ({ ...prev, apiKey: event.target.value }))}
+                  placeholder={modelSettings.apiKey ? "默认复用基础模型 Key" : "填写 MiMo API Key"}
+                  type="password"
+                  autoComplete="off"
+                />
+              </label>
+            </div>
           </ConfigGroup>
 
           <ConfigGroup
@@ -2455,7 +3389,10 @@ export default function App() {
         <div className="floating-messages" ref={floatingMessageRef}>
           {visibleMessages.map((message) => renderMessageBubble(message, "floating"))}
         </div>
-        <form className={`floating-composer glass-panel ${uploadedFiles.length > 0 ? "has-attachments" : ""}`} onSubmit={sendMessage}>
+        <form
+          className={`floating-composer glass-panel ${uploadedFiles.length > 0 ? "has-attachments" : ""} ${visionSettings.screenCaptureEnabled ? "has-screen-capture" : ""}`}
+          onSubmit={sendMessage}
+        >
           {renderUploadPanel()}
           {renderUploadedFiles()}
           <button
@@ -2468,17 +3405,35 @@ export default function App() {
           >
             <Plus size={20} />
           </button>
-          <input
-            value={input}
-            onChange={(event) => setInput(event.target.value)}
-            onKeyDown={(event) => {
-              if (event.key === "Enter" && !event.shiftKey) {
-                event.preventDefault();
-                void sendMessage();
-              }
-            }}
-            placeholder="有问题，尽管问"
-          />
+          {visionSettings.screenCaptureEnabled && (
+            <button
+              className={`round-tool screenshot-trigger ${screenCaptureBusy ? "is-busy" : ""}`}
+              disabled={uploadBusy || screenCaptureBusy}
+              onClick={() => void captureScreenAttachment()}
+              type="button"
+              aria-label="截图"
+              title="截图并作为图片附件"
+            >
+              <Camera size={18} />
+            </button>
+          )}
+          {voiceRecording ? (
+            renderVoiceInputVisualizer(true)
+          ) : (
+            <textarea
+              ref={floatingComposerInputRef}
+              value={input}
+              onChange={updateComposerInput}
+              onKeyDown={(event) => {
+                if (event.key === "Enter" && !event.shiftKey) {
+                  event.preventDefault();
+                  void sendMessage();
+                }
+              }}
+              placeholder="有问题，尽管问"
+              rows={1}
+            />
+          )}
           <button className="mode-select" type="button" onClick={() => setMode(mode === "fast" ? "thinking" : "fast")}>
             {mode === "fast" ? "Instant" : "Think"}
             <ChevronRight size={14} />
@@ -2491,6 +3446,16 @@ export default function App() {
             title={voiceSettings.autoPlay ? "关闭自动语音" : "开启自动语音"}
           >
             {voiceSettings.autoPlay ? <Volume2 size={18} /> : <Mic size={18} />}
+          </button>
+          <button
+            className={`round-tool voice-input-trigger ${voiceRecording ? "is-recording" : ""} ${voiceInputBusy ? "is-busy" : ""}`}
+            disabled={isStreaming || voiceInputBusy || !speechInputSettings.enabled}
+            onClick={toggleVoiceInputRecording}
+            type="button"
+            aria-label={voiceRecording ? "停止语音输入" : "开始语音输入"}
+            title={voiceRecording ? "停止语音输入" : "语音输入"}
+          >
+            {voiceRecording ? <CircleStop size={18} /> : <Mic2 size={18} />}
           </button>
           {isStreaming ? (
             <button className="round-send" onClick={stopStreaming} type="button" aria-label="停止">
@@ -2566,18 +3531,23 @@ export default function App() {
             <form className={`composer ${uploadedFiles.length > 0 ? "has-attachments" : ""}`} onSubmit={sendMessage}>
               {renderUploadPanel()}
               {renderUploadedFiles()}
-              <textarea
-                value={input}
-                onChange={(event) => setInput(event.target.value)}
-                onKeyDown={(event) => {
-                  if (event.key === "Enter" && !event.shiftKey) {
-                    event.preventDefault();
-                    void sendMessage();
-                  }
-                }}
-                placeholder="输入消息"
-                rows={3}
-              />
+              {voiceRecording ? (
+                renderVoiceInputVisualizer()
+              ) : (
+                <textarea
+                  ref={panelComposerInputRef}
+                  value={input}
+                  onChange={updateComposerInput}
+                  onKeyDown={(event) => {
+                    if (event.key === "Enter" && !event.shiftKey) {
+                      event.preventDefault();
+                      void sendMessage();
+                    }
+                  }}
+                  placeholder="输入消息"
+                  rows={3}
+                />
+              )}
               <div className="composer-actions">
                 <div className="composer-left-actions">
                   <button
@@ -2590,6 +3560,18 @@ export default function App() {
                   >
                     <Plus size={18} />
                   </button>
+                  {visionSettings.screenCaptureEnabled && (
+                    <button
+                      className={`round-tool composer-screenshot screenshot-trigger ${screenCaptureBusy ? "is-busy" : ""}`}
+                      disabled={uploadBusy || screenCaptureBusy}
+                      onClick={() => void captureScreenAttachment()}
+                      type="button"
+                      aria-label="截图"
+                      title="截图并作为图片附件"
+                    >
+                      <Camera size={17} />
+                    </button>
+                  )}
                   <button
                     className={`text-icon-button ${voiceSettings.autoPlay ? "is-active" : ""}`}
                     onClick={toggleAutoVoice}
@@ -2597,6 +3579,16 @@ export default function App() {
                   >
                     {voiceSettings.autoPlay ? <Volume2 size={16} /> : <VolumeX size={16} />}
                     语音
+                  </button>
+                  <button
+                    className={`round-tool voice-input-trigger ${voiceRecording ? "is-recording" : ""} ${voiceInputBusy ? "is-busy" : ""}`}
+                    disabled={isStreaming || voiceInputBusy || !speechInputSettings.enabled}
+                    onClick={toggleVoiceInputRecording}
+                    type="button"
+                    aria-label={voiceRecording ? "停止语音输入" : "开始语音输入"}
+                    title={voiceRecording ? "停止语音输入" : "语音输入"}
+                  >
+                    {voiceRecording ? <CircleStop size={17} /> : <Mic2 size={17} />}
                   </button>
                 </div>
                 {isStreaming ? (

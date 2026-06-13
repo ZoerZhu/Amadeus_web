@@ -72,6 +72,11 @@ TEXT_TYPE_BY_SUFFIX = {
     ".docx": "word",
     ".xls": "excel_legacy",
     ".xlsx": "excel",
+    ".png": "image",
+    ".jpg": "image",
+    ".jpeg": "image",
+    ".webp": "image",
+    ".gif": "image",
 }
 TEXT_TYPE_BY_MIME = {
     "application/json": "json",
@@ -91,7 +96,12 @@ TEXT_TYPE_BY_MIME = {
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document": "word",
     "application/vnd.ms-excel": "excel_legacy",
     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": "excel",
+    "image/png": "image",
+    "image/jpeg": "image",
+    "image/webp": "image",
+    "image/gif": "image",
 }
+IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
 
 
 class UploadValidationError(ValueError):
@@ -128,7 +138,11 @@ async def save_uploaded_text_file(
     target_dir.mkdir(parents=True, exist_ok=True)
     temp_path = target_dir / f".{filename}.{uuid4().hex}.tmp"
     size = await write_upload_to_temp(file, temp_path)
-    if should_validate_text_content(filename) and not looks_like_text(temp_path):
+    if is_image_upload(filename, content_type):
+        if not looks_like_image(temp_path):
+            temp_path.unlink(missing_ok=True)
+            raise UploadValidationError(f"Uploaded file content is not a supported image: {filename}")
+    elif should_validate_text_content(filename) and not looks_like_text(temp_path):
         temp_path.unlink(missing_ok=True)
         raise UploadValidationError(f"Uploaded file content is not text-like: {filename}")
 
@@ -147,7 +161,9 @@ async def save_uploaded_text_file(
         "contentType": content_type or mimetypes.guess_type(filename)[0] or "text/plain",
         "sizeBytes": size,
         "uploadedAt": current_time_iso(),
+        "mediaType": media_type_for_upload(filename, text_type),
         "readableByFileReader": is_readable_by_file_reader(filename),
+        "visionReadable": is_vision_readable(filename, content_type),
     }
 
 
@@ -218,7 +234,7 @@ def classify_text_type(filename: str, content_type: str) -> str:
         return TEXT_TYPE_BY_SUFFIX[suffix]
     if lower_name not in TEXT_SUFFIXES and suffix not in TEXT_SUFFIXES and suffix not in UPLOAD_DOCUMENT_SUFFIXES:
         guessed = mimetypes.guess_type(filename)[0] or ""
-        if not guessed.startswith("text/") and guessed not in TEXT_TYPE_BY_MIME:
+        if not guessed.startswith("text/") and guessed not in TEXT_TYPE_BY_MIME and content_type not in TEXT_TYPE_BY_MIME:
             return ""
 
     if content_type in TEXT_TYPE_BY_MIME:
@@ -232,12 +248,30 @@ def classify_text_type(filename: str, content_type: str) -> str:
 
 
 def should_validate_text_content(filename: str) -> bool:
-    return Path(filename).suffix.lower() not in UPLOAD_DOCUMENT_SUFFIXES
+    suffix = Path(filename).suffix.lower()
+    return suffix not in UPLOAD_DOCUMENT_SUFFIXES and suffix not in IMAGE_SUFFIXES
 
 
 def is_readable_by_file_reader(filename: str) -> bool:
     suffix = Path(filename).suffix.lower()
     return suffix not in UPLOAD_DOCUMENT_SUFFIXES or suffix in READABLE_DOCUMENT_SUFFIXES
+
+
+def is_image_upload(filename: str, content_type: str) -> bool:
+    suffix = Path(filename).suffix.lower()
+    return suffix in IMAGE_SUFFIXES or normalize_content_type(content_type).startswith("image/")
+
+
+def is_vision_readable(filename: str, content_type: str) -> bool:
+    return is_image_upload(filename, content_type)
+
+
+def media_type_for_upload(filename: str, text_type: str) -> str:
+    if text_type == "image" or Path(filename).suffix.lower() in IMAGE_SUFFIXES:
+        return "image"
+    if Path(filename).suffix.lower() in UPLOAD_DOCUMENT_SUFFIXES:
+        return "document"
+    return "text"
 
 
 def looks_like_text(path: Path) -> bool:
@@ -250,6 +284,19 @@ def looks_like_text(path: Path) -> bool:
             return True
         except UnicodeDecodeError:
             continue
+    return False
+
+
+def looks_like_image(path: Path) -> bool:
+    data = path.read_bytes()[:16]
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return True
+    if data.startswith(b"\xff\xd8\xff"):
+        return True
+    if data.startswith((b"GIF87a", b"GIF89a")):
+        return True
+    if len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return True
     return False
 
 

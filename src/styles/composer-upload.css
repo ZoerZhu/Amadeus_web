@@ -97,14 +97,23 @@
 .composer textarea {
   width: 100%;
   min-height: 78px;
-  max-height: 160px;
-  resize: vertical;
+  max-height: 122px;
+  height: 78px;
+  resize: none;
   border: 0;
   outline: 0;
+  overflow-y: hidden;
   background: transparent;
   color: var(--ink);
   font-size: 0.96rem;
   line-height: 1.45;
+}
+
+.composer textarea:focus,
+.composer textarea:focus-visible {
+  border: 0;
+  outline: 0;
+  box-shadow: none;
 }
 
 .composer textarea::placeholder {

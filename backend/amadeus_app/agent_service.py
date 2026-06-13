@@ -13,6 +13,7 @@ from .domain import AgentInvokeRequest
 from .file_tools.file_reader import run_file_reader
 from .search.web_search_agent import run_web_search_agent
 from .todo_task.todo_task_agent import run_todo_task_agent
+from .vision.image_understand_agent import run_image_understand_agent
 
 
 AGENTS = [
@@ -47,6 +48,12 @@ AGENTS = [
         "outputModes": ["file_content", "directory_entries", "metadata"],
     },
     {
+        "name": "image_understand_agent",
+        "description": "视觉理解 Agent：读取工作区内已上传图片或截图，调用 OpenAI-compatible 视觉模型，返回中文图像理解摘要。",
+        "inputModes": ["image", "text", "json"],
+        "outputModes": ["summary", "vision_description", "metadata"],
+    },
+    {
         "name": "todo_task_agent",
         "description": "LangGraph 待办任务图：规划任务、拆解子任务、持久化 JSON 任务状态，并支持列表、更新、完成、阻塞和归档。",
         "inputModes": ["text", "json"],
@@ -75,6 +82,7 @@ DOC_WRITER_KEYWORDS = (
     "write",
 )
 FILE_READER_KEYWORDS = ("读文件", "读取文件", "查看文件", "列目录", "文件列表", "file", "read file", "list files", "stat file")
+IMAGE_KEYWORDS = ("图片", "图像", "截图", "视觉", "image", "vision", "screenshot", "screen capture")
 TODO_TASK_KEYWORDS = ("待办", "todo", "任务列表", "创建任务", "新增任务", "任务规划", "任务拆解", "task list", "todo list")
 
 
@@ -112,8 +120,8 @@ def capabilities_response() -> dict[str, Any]:
                     "device": "host | mobile",
                     "overwrite": "boolean, default false",
                 },
-                "storagePattern": "agent_uploads/{device}/{yyyy-mm-dd}/{textType}/{originalFilename}",
-                "nextStep": "Use returned file.path with file_reader.",
+                "storagePattern": "agent_uploads/{device}/{yyyy-mm-dd}/{textType|image}/{originalFilename}",
+                "nextStep": "Use returned file.path with file_reader for documents/text, or image_understand_agent for images.",
             },
             "limits": {
                 "highRiskToolsEnabled": False,
@@ -156,6 +164,7 @@ async def call_agent(request: AgentInvokeRequest) -> dict[str, Any]:
         "web_search_agent",
         "doc_writer_agent",
         "file_reader_agent",
+        "image_understand_agent",
         "todo_task_agent",
     }:
         return error_response(
@@ -199,6 +208,8 @@ def resolve_agent_name(request: AgentInvokeRequest) -> str:
         return "todo_task_agent"
     if request.target == "file_reader_agent":
         return "file_reader_agent"
+    if request.target == "image_understand_agent":
+        return "image_understand_agent"
     if request.target == "doc_writer_agent":
         return "doc_writer_agent"
     if request.target == "web_search_agent":
@@ -224,6 +235,8 @@ def build_tool_args(request: AgentInvokeRequest) -> dict[str, Any]:
         path = infer_path_from_text(request.intent)
         if path:
             args["path"] = path
+    if request.intent and "prompt" not in args and request.target in {"image_understand", "image_understand_agent"}:
+        args["prompt"] = request.intent
     if "expression" not in args:
         expression = infer_expression(request.intent)
         if expression:
@@ -249,6 +262,9 @@ def infer_tool_name(request: AgentInvokeRequest) -> str:
         return "file_reader"
     if request.payload.get("path") and str(request.payload.get("action", "")).lower() in {"read", "list", "stat"}:
         return "file_reader"
+    if target == "image_understand_agent" or any(keyword in text for keyword in IMAGE_KEYWORDS):
+        if request.payload.get("attachments") or request.payload.get("images") or request.payload.get("path"):
+            return "image_understand"
     if target == "doc_writer_agent" or any(keyword in text for keyword in DOC_WRITER_KEYWORDS):
         return "doc_writer"
     if target == "web_search_agent" or any(keyword in text for keyword in SEARCH_KEYWORDS):
@@ -361,6 +377,12 @@ async def doc_writer(args: dict[str, Any]) -> dict[str, Any]:
 
 async def file_reader(args: dict[str, Any]) -> dict[str, Any]:
     return await run_file_reader(args)
+
+
+async def image_understand(args: dict[str, Any]) -> dict[str, Any]:
+    if "attachments" not in args and "images" not in args and args.get("path"):
+        args = {**args, "attachments": [{"path": args["path"], "mediaType": "image"}]}
+    return await run_image_understand_agent(args)
 
 
 async def todo_task(args: dict[str, Any]) -> dict[str, Any]:
@@ -577,6 +599,35 @@ def register_builtin_tools() -> None:
                 },
             },
             handler=file_reader,
+        )
+    )
+    tool_registry.register(
+        ToolDefinition(
+            name="image_understand",
+            description="调用 image_understand_agent 理解工作区内已上传图片或截图，返回中文视觉摘要；最多一次 4 张图片。",
+            parameters={
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "单张图片的工作区内相对路径"},
+                    "attachments": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "path": {"type": "string"},
+                                "originalFilename": {"type": "string"},
+                                "mediaType": {"type": "string", "enum": ["image"]},
+                                "contentType": {"type": "string"},
+                            },
+                            "required": ["path"],
+                        },
+                    },
+                    "prompt": {"type": "string", "description": "用户问题或视觉理解重点"},
+                    "vision": {"type": "object", "description": "可选视觉模型配置"},
+                    "model": {"type": "object", "description": "可选基础模型配置，用于继承 Provider/Base URL/API Key"},
+                },
+            },
+            handler=image_understand,
         )
     )
     tool_registry.register(

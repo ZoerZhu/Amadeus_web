@@ -1,9 +1,11 @@
+import { useState } from "react";
 import {
   BookOpenText,
   CheckCircle2,
   CircleDashed,
   Copy,
   ExternalLink,
+  Volume1,
   Search,
   Volume2,
   Wrench,
@@ -19,7 +21,7 @@ import {
   stripToolEventLines,
   stripToolResultTextFromThinking
 } from "../app/appSupport";
-import type { ChatMessage, ToolTraceEvent } from "../types";
+import type { ChatAttachment, ChatMessage, ToolTraceEvent } from "../types";
 
 type ChatMessageBubbleProps = {
   message: ChatMessage;
@@ -157,10 +159,85 @@ function formatToolArguments(value?: Record<string, unknown>): string {
   }
 }
 
+function renderMessageAttachments(message: ChatMessage, onPreview: (image: ChatAttachment) => void) {
+  const images = (message.attachments ?? []).filter((item) => item.mediaType === "image" && item.path);
+  if (images.length === 0) {
+    return null;
+  }
+  return (
+    <div className="message-attachment-preview" aria-label="图片附件">
+      {images.map((image) => {
+        const url = `/api/files/download?path=${encodeURIComponent(image.path)}`;
+        const label = image.originalFilename || image.filename || "图片";
+        return (
+          <button
+            className="message-image-thumb"
+            key={image.path}
+            onClick={() => onPreview(image)}
+            type="button"
+            title={`查看 ${label}`}
+          >
+            <img src={url} alt={label} loading="lazy" />
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 export function ChatMessageBubble({ message, surface, voiceBusy, onCopy, onPlay }: ChatMessageBubbleProps) {
+  const [previewImage, setPreviewImage] = useState<ChatAttachment | null>(null);
+  const [voicePlaying, setVoicePlaying] = useState(false);
   const isAssistant = message.role === "assistant";
   const content = message.content || (message.streaming ? "..." : "");
   const canUseText = message.content.trim().length > 0;
+  const showTextContent = content.trim().length > 0 && !(message.role === "user" && message.voiceInput);
+  const previewUrl = previewImage ? `/api/files/download?path=${encodeURIComponent(previewImage.path)}` : "";
+  const previewLabel = previewImage?.originalFilename || previewImage?.filename || "图片预览";
+
+  async function playUserVoiceInput() {
+    if (!message.voiceInput?.audioUrl || voicePlaying) {
+      return;
+    }
+    setVoicePlaying(true);
+    const audio = new Audio(`${message.voiceInput.audioUrl}${message.voiceInput.audioUrl.includes("?") ? "&" : "?"}t=${Date.now()}`);
+    const finish = () => setVoicePlaying(false);
+    audio.onended = finish;
+    audio.onerror = finish;
+    try {
+      await audio.play();
+    } catch {
+      finish();
+    }
+  }
+
+  function renderVoiceInputBubble() {
+    const voiceInput = message.voiceInput;
+    if (!voiceInput || message.role !== "user") {
+      return null;
+    }
+    const seconds = Math.max(1, Math.round(voiceInput.durationSeconds || 1));
+    const waveform = voiceInput.waveform.length > 0 ? voiceInput.waveform : Array.from({ length: 18 }, () => 0.35);
+    const width = Math.min(260, Math.max(116, 98 + seconds * 2.1));
+    return (
+      <button
+        className={`voice-message-bubble ${voicePlaying ? "is-playing" : ""}`}
+        onClick={() => void playUserVoiceInput()}
+        style={{ width }}
+        type="button"
+        aria-label={`播放语音消息 ${seconds} 秒`}
+        title={voiceInput.transcript || "播放语音消息"}
+      >
+        <Volume1 size={15} />
+        <span className="voice-message-bars" aria-hidden="true">
+          {waveform.slice(0, 18).map((level, index) => (
+            <i key={index} style={{ height: `${Math.round(7 + level * 22)}px` }} />
+          ))}
+        </span>
+        <span>{seconds}"</span>
+      </button>
+    );
+  }
 
   return (
     <article
@@ -172,9 +249,11 @@ export function ChatMessageBubble({ message, surface, voiceBusy, onCopy, onPlay 
       ].join(" ")}
     >
       {isAssistant && <div className="bubble-agent-name">Kurisu Amadeus</div>}
+      {renderMessageAttachments(message, setPreviewImage)}
       <div className={`${surface === "floating" ? "float-bubble" : "message-bubble"} ${isAssistant ? "is-assistant" : "is-user"}`}>
         {isAssistant && renderThinkingPanel(message)}
-        {renderMarkdownContent(content)}
+        {renderVoiceInputBubble()}
+        {showTextContent && renderMarkdownContent(content)}
       </div>
       <div className="bubble-meta">
         <time dateTime={message.createdAt}>{formatMessageTime(message.createdAt)}</time>
@@ -201,6 +280,17 @@ export function ChatMessageBubble({ message, surface, voiceBusy, onCopy, onPlay 
           </button>
         )}
       </div>
+      {previewImage && (
+        <div className="image-lightbox" role="dialog" aria-modal="true" aria-label={previewLabel} onClick={() => setPreviewImage(null)}>
+          <div className="image-lightbox-body" onClick={(event) => event.stopPropagation()}>
+            <button className="image-lightbox-close" onClick={() => setPreviewImage(null)} type="button" aria-label="关闭预览">
+              <XCircle size={22} />
+            </button>
+            <img src={previewUrl} alt={previewLabel} />
+            <div className="image-lightbox-caption">{previewLabel}</div>
+          </div>
+        </div>
+      )}
     </article>
   );
 }

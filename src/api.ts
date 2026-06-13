@@ -2,6 +2,8 @@ import type {
   AgentInvokeRequest,
   AgentInvokeResponse,
   ApiChatMessage,
+  AssistantVoiceInfo,
+  ChatAttachment,
   CodeTaskEvent,
   CodeTaskMobileViewSnapshot,
   CodeTaskQuestionReplyRequest,
@@ -12,10 +14,13 @@ import type {
   FileUploadResponse,
   ModelSettings,
   ProviderPreset,
+  SpeechInputSettings,
   StoredSettings,
   StreamEvent,
   TaskSummaryVoiceEvent,
   UploadDevice,
+  VoiceInputTranscriptionResponse,
+  VisionSettings,
   VoiceSettings
 } from "./types";
 
@@ -48,8 +53,10 @@ export async function fetchProviders(): Promise<ProviderPreset[]> {
 export async function streamChat(options: {
   conversationId?: string | null;
   messages: ApiChatMessage[];
+  attachments?: ChatAttachment[];
   mode: ChatMode;
   model: ModelSettings;
+  vision: VisionSettings;
   voice: VoiceSettings;
   signal?: AbortSignal;
   onEvent: (event: StreamEvent) => void;
@@ -60,9 +67,11 @@ export async function streamChat(options: {
     body: JSON.stringify({
       conversationId: options.conversationId || undefined,
       messages: options.messages,
+      attachments: options.attachments ?? [],
       personaId: "kurisu_amadeus",
       mode: options.mode,
       model: options.model,
+      vision: options.vision,
       voice: options.voice
     }),
     signal: options.signal
@@ -103,6 +112,8 @@ export async function saveSettings(settings: StoredSettings): Promise<void> {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       model: settings.model,
+      vision: settings.vision,
+      speechInput: settings.speechInput,
       voice: settings.voice,
       mode: settings.mode
     })
@@ -111,6 +122,31 @@ export async function saveSettings(settings: StoredSettings): Promise<void> {
   if (!response.ok) {
     throw new Error(data.detail || `settings ${response.status}`);
   }
+}
+
+export async function transcribeVoiceInput(options: {
+  file: File;
+  durationSeconds: number;
+  model: ModelSettings;
+  speechInput: SpeechInputSettings;
+  signal?: AbortSignal;
+}): Promise<VoiceInputTranscriptionResponse> {
+  const form = new FormData();
+  form.append("file", options.file, options.file.name);
+  form.append("durationSeconds", String(options.durationSeconds));
+  form.append("model", JSON.stringify(options.model));
+  form.append("speechInput", JSON.stringify(options.speechInput));
+
+  const response = await fetch("/api/voice-input/transcribe", {
+    method: "POST",
+    body: form,
+    signal: options.signal
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(data.detail || `voice input ${response.status}`);
+  }
+  return data;
 }
 
 export async function listConversations(): Promise<ConversationSummary[]> {
@@ -380,12 +416,16 @@ export async function synthesizeVoice(options: {
   text: string;
   model: ModelSettings;
   voice: VoiceSettings;
-}): Promise<string> {
+  conversationId?: string | null;
+  messageId?: string;
+}): Promise<{ audioUrl: string; assistantVoice?: AssistantVoiceInfo }> {
   const response = await fetch("/api/voice/synthesize", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       text: options.text,
+      conversationId: options.conversationId || undefined,
+      messageId: options.messageId || undefined,
       personaId: "kurisu_amadeus",
       model: options.model,
       voice: options.voice
@@ -395,7 +435,10 @@ export async function synthesizeVoice(options: {
   if (!response.ok) {
     throw new Error(data.detail || `voice ${response.status}`);
   }
-  return data.audioUrl;
+  return {
+    audioUrl: String(data.audioUrl || ""),
+    assistantVoice: data.assistantVoice
+  };
 }
 
 export async function synthesizeTaskSummaryVoice(options: {

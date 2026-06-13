@@ -41,7 +41,10 @@ from .domain import (
     CodeTaskViewPublishRequest,
     ConversationCreateRequest,
     SettingsSaveRequest,
+    ModelSettings,
+    SpeechInputSettings,
     TaskSummaryVoiceRequest,
+    VisionUnderstandRequest,
     VoiceCloneRequest,
     VoiceSynthesisRequest,
 )
@@ -56,6 +59,8 @@ from .uploads.file_upload_service import (
     UploadValidationError,
     save_uploaded_text_file,
 )
+from .vision.image_understand_agent import run_image_understand_agent
+from .voice_input_service import USER_VOICE_DIR, save_and_transcribe_voice_input
 from .voice_service import AUDIO_DIR, clone_kurisu_voice, prepare_task_summary_speech_text, synthesize_for_persona
 
 
@@ -90,6 +95,7 @@ app.add_middleware(
 )
 
 app.mount("/audio", StaticFiles(directory=AUDIO_DIR), name="audio")
+app.mount("/user-voice", StaticFiles(directory=USER_VOICE_DIR), name="user_voice")
 
 
 class FileUploadBase64Request(BaseModel):
@@ -145,9 +151,10 @@ def require_storage() -> SQLiteStorage:
 
 
 def upload_success_response(uploaded: dict) -> dict:
+    next_step = "可交给 image_understand_agent 理解。" if uploaded.get("mediaType") == "image" else "可交给 file_reader 读取。"
     return {
         "ok": True,
-        "summary": f"已上传 {uploaded['filename']} 到 {uploaded['path']}，可交给 file_reader 读取。",
+        "summary": f"已上传 {uploaded['filename']} 到 {uploaded['path']}，{next_step}",
         "file": uploaded,
         "data": {
             "file": uploaded,
@@ -258,10 +265,60 @@ async def save_settings(request: SettingsSaveRequest) -> dict:
     await require_storage().save_settings(
         user_id=DEFAULT_USER_ID,
         model=request.model.model_dump(by_alias=True),
+        vision=request.vision.model_dump(by_alias=True),
+        speech_input=request.speech_input.model_dump(by_alias=True),
         voice=request.voice.model_dump(by_alias=True),
         mode=request.mode,
     )
     return {"ok": True}
+
+
+@app.post("/api/voice-input/transcribe")
+async def voice_input_transcribe(
+    file: UploadFile = File(...),
+    model: str = Form("{}"),
+    speechInput: str = Form("{}"),
+    durationSeconds: float = Form(0),
+) -> dict:
+    try:
+        model_payload = json.loads(model) if model.strip() else {}
+        speech_payload = json.loads(speechInput) if speechInput.strip() else {}
+        result = await save_and_transcribe_voice_input(
+            file=file,
+            model_settings=ModelSettings.model_validate(model_payload),
+            speech_input_settings=SpeechInputSettings.model_validate(speech_payload),
+            duration_seconds=durationSeconds,
+        )
+    except json.JSONDecodeError as error:
+        raise HTTPException(status_code=400, detail="Invalid voice input settings JSON") from error
+    except Exception as error:
+        raise HTTPException(status_code=502, detail=str(error) or error.__class__.__name__) from error
+    return {
+        "ok": result.get("ok", False),
+        "text": result.get("text", ""),
+        "audio": result.get("audio", {}),
+        "error": result.get("error", ""),
+    }
+
+
+@app.post("/api/vision/understand")
+async def vision_understand(request: VisionUnderstandRequest) -> dict:
+    try:
+        result = await run_image_understand_agent(
+            {
+                "prompt": request.prompt,
+                "attachments": [item.model_dump(by_alias=True) for item in request.attachments],
+                "model": request.model.model_dump(by_alias=True),
+                "vision": request.vision.model_dump(by_alias=True),
+            }
+        )
+    except Exception as error:
+        raise HTTPException(status_code=502, detail=str(error) or error.__class__.__name__) from error
+    return {
+        "ok": True,
+        "summary": result.get("summary") or "图片理解完成。",
+        "data": result.get("data", {}),
+    }
 
 
 @app.get("/api/conversations")
@@ -941,7 +998,21 @@ async def voice_synthesize(request: VoiceSynthesisRequest) -> dict:
         raise HTTPException(status_code=502, detail=str(error) or error.__class__.__name__) from error
     if audio is None:
         raise HTTPException(status_code=400, detail="语音服务未返回音频，请检查当前语音模型配置。")
-    return {"audioUrl": audio.url}
+    assistant_voice = {
+        "audioUrls": [audio.url],
+        "segments": [{"index": 0, "url": audio.url}],
+    }
+    if request.conversation_id is not None and request.message_id is not None:
+        try:
+            await require_storage().update_assistant_message_voice(
+                user_id=DEFAULT_USER_ID,
+                conversation_id=request.conversation_id,
+                message_id=request.message_id,
+                assistant_voice=assistant_voice,
+            )
+        except Exception:
+            pass
+    return {"audioUrl": audio.url, "audioUrls": [audio.url], "assistantVoice": assistant_voice}
 
 
 @app.post("/api/voice/task-summary")

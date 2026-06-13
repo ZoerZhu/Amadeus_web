@@ -1,6 +1,8 @@
 ﻿import type { ReactNode } from "react";
 import type {
   ApiChatMessage,
+  AssistantVoiceInfo,
+  ChatAttachment,
   ChatMessage,
   ConversationDetail,
   CodeTaskMobileViewSnapshot,
@@ -9,6 +11,9 @@ import type {
   StoredSettings,
   ToolTraceEvent,
   UploadedFileInfo,
+  SpeechInputSettings,
+  VoiceInputInfo,
+  VisionSettings,
   VoiceSettings
 } from "../types";
 const STORAGE_KEY = "amadeus-web-settings-v1";
@@ -33,6 +38,26 @@ const DEFAULT_MODEL_SETTINGS: ModelSettings = {
   useRemote: true
 };
 
+const DEFAULT_VISION_SETTINGS: VisionSettings = {
+  enabled: true,
+  screenCaptureEnabled: false,
+  providerName: "",
+  baseUrl: "",
+  model: "gpt-4.1-mini",
+  apiKey: "",
+  useRemote: true
+};
+
+const DEFAULT_SPEECH_INPUT_SETTINGS: SpeechInputSettings = {
+  enabled: true,
+  providerName: "小米 MiMo ASR",
+  baseUrl: "https://api.xiaomimimo.com/v1",
+  model: "mimo-v2.5-asr",
+  apiKey: "",
+  language: "auto",
+  useRemote: true
+};
+
 const DEFAULT_VOICE_SETTINGS: VoiceSettings = {
   ttsBackend: "local",
   siliconFlowApiKey: "",
@@ -42,6 +67,21 @@ const DEFAULT_VOICE_SETTINGS: VoiceSettings = {
   speed: 1,
   gain: 0
 };
+
+function normalizeSpeechInputSettings(value?: Partial<SpeechInputSettings> | null): SpeechInputSettings {
+  const merged = { ...DEFAULT_SPEECH_INPUT_SETTINGS, ...(value ?? {}) };
+  if (!merged.providerName.trim() && !merged.baseUrl.trim() && (!merged.model.trim() || merged.model === "whisper-1")) {
+    return DEFAULT_SPEECH_INPUT_SETTINGS;
+  }
+  if (
+    merged.providerName === "SiliconFlow ASR" &&
+    merged.baseUrl === "https://api.siliconflow.cn/v1" &&
+    merged.model === "FunAudioLLM/SenseVoiceSmall"
+  ) {
+    return DEFAULT_SPEECH_INPUT_SETTINGS;
+  }
+  return merged;
+}
 const ACCEPTED_UPLOAD_TYPES = [
   ".txt",
   ".md",
@@ -74,7 +114,16 @@ const ACCEPTED_UPLOAD_TYPES = [
   ".docx",
   ".xls",
   ".xlsx",
+  ".png",
+  ".jpg",
+  ".jpeg",
+  ".webp",
+  ".gif",
   "text/*",
+  "image/png",
+  "image/jpeg",
+  "image/webp",
+  "image/gif",
   "application/json",
   "application/pdf",
   "application/msword",
@@ -83,7 +132,7 @@ const ACCEPTED_UPLOAD_TYPES = [
   "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 ].join(",");
 
-type ConfigSection = "profile" | "model" | "voice" | "live2d" | "interface";
+type ConfigSection = "profile" | "model" | "vision" | "speechInput" | "voice" | "live2d" | "interface";
 type AudioQueueItem = {
   url: string;
   assistantId?: string;
@@ -157,6 +206,7 @@ declare global {
   interface Window {
     amadeusDesktop?: {
       selectFolder?: () => Promise<string | null>;
+      captureScreen?: () => Promise<{ dataUrl: string; filename: string } | null>;
     };
   }
 }
@@ -196,12 +246,16 @@ function loadStoredSettings(): StoredSettings {
     const parsed = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? "");
     return {
       model: { ...DEFAULT_MODEL_SETTINGS, ...(parsed.model ?? {}) },
+      vision: { ...DEFAULT_VISION_SETTINGS, ...(parsed.vision ?? {}) },
+      speechInput: normalizeSpeechInputSettings(parsed.speechInput),
       voice: { ...DEFAULT_VOICE_SETTINGS, ...(parsed.voice ?? {}) },
       mode: parsed.mode === "thinking" ? "thinking" : "fast"
     };
   } catch {
     return {
       model: DEFAULT_MODEL_SETTINGS,
+      vision: DEFAULT_VISION_SETTINGS,
+      speechInput: DEFAULT_SPEECH_INPUT_SETTINGS,
       voice: DEFAULT_VOICE_SETTINGS,
       mode: "fast"
     };
@@ -213,11 +267,134 @@ function toApiMessages(messages: ChatMessage[]): ApiChatMessage[] {
     .filter((message) => message.content.trim())
     .map((message) => ({
       role: message.role,
-      content: message.content
+      content: message.role === "user" ? withUserVoiceInputContext(message.content, message.voiceInput) : message.content
     }));
 }
 
+function withUserVoiceInputContext(content: string, voiceInput?: VoiceInputInfo): string {
+  if (!voiceInput) {
+    return content;
+  }
+  return `${content.trim()}\n\n<用户语音输入>${JSON.stringify(voiceInput)}</用户语音输入>`;
+}
+
+function imageAttachmentFromParts(originalFilename: string, path: string): ChatAttachment {
+  const filename = path.split("/").pop() || originalFilename || "image";
+  return {
+    path,
+    originalFilename: originalFilename || filename,
+    filename,
+    mediaType: "image",
+    contentType: imageContentType(filename)
+  };
+}
+
+function imageContentType(filename: string): string {
+  const suffix = filename.split(".").pop()?.toLowerCase() ?? "";
+  if (suffix === "jpg" || suffix === "jpeg") {
+    return "image/jpeg";
+  }
+  if (suffix === "webp") {
+    return "image/webp";
+  }
+  if (suffix === "gif") {
+    return "image/gif";
+  }
+  return "image/png";
+}
+
+function extractImageAttachmentsFromContent(content: string): ChatAttachment[] {
+  const attachments = new Map<string, ChatAttachment>();
+  const add = (originalFilename: string, path: string) => {
+    const cleanPath = path.trim();
+    if (!cleanPath || attachments.has(cleanPath)) {
+      return;
+    }
+    attachments.set(cleanPath, imageAttachmentFromParts(originalFilename.trim(), cleanPath));
+  };
+
+  for (const match of content.matchAll(/已附加图片：([^\n]+)\n路径：([^\n]+)\n类型：image/g)) {
+    add(match[1], match[2]);
+  }
+  for (const match of content.matchAll(/^- ([^:\n]+):\s*(agent_uploads\/[^\s\n]+\.(?:png|jpe?g|webp|gif))$/gim)) {
+    add(match[1], match[2]);
+  }
+  return Array.from(attachments.values());
+}
+
+function extractVoiceInputFromContent(content: string): VoiceInputInfo | undefined {
+  const match = /<用户语音输入>([\s\S]*?)<\/用户语音输入>/.exec(content);
+  if (!match) {
+    return undefined;
+  }
+  try {
+    const value = JSON.parse(match[1]);
+    if (!value || typeof value !== "object") {
+      return undefined;
+    }
+    const record = value as Partial<VoiceInputInfo>;
+    if (!record.audioUrl || !record.path) {
+      return undefined;
+    }
+    return {
+      audioUrl: String(record.audioUrl),
+      path: String(record.path),
+      filename: String(record.filename || "voice.webm"),
+      contentType: String(record.contentType || "audio/webm"),
+      durationSeconds: Number(record.durationSeconds || 0),
+      transcript: String(record.transcript || ""),
+      waveform: Array.isArray(record.waveform)
+        ? record.waveform.map((item) => Number(item)).filter((item) => Number.isFinite(item)).slice(0, 32)
+        : []
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+function normalizeAssistantVoice(value: unknown): AssistantVoiceInfo | undefined {
+  if (!value || typeof value !== "object") {
+    return undefined;
+  }
+  const record = value as Partial<AssistantVoiceInfo>;
+  const segments = Array.isArray(record.segments)
+    ? record.segments
+        .map((segment, fallbackIndex) => ({
+          index: Number(segment?.index ?? fallbackIndex),
+          url: String(segment?.url || "")
+        }))
+        .filter((segment) => Number.isFinite(segment.index) && segment.url)
+        .sort((a, b) => a.index - b.index)
+    : [];
+  const audioUrls = (Array.isArray(record.audioUrls) ? record.audioUrls : [])
+    .map((url) => String(url || ""))
+    .filter(Boolean);
+  const urls = segments.length > 0 ? segments.map((segment) => segment.url) : audioUrls;
+  if (urls.length === 0) {
+    return undefined;
+  }
+  return {
+    audioUrls: urls,
+    segments: segments.length > 0 ? segments : urls.map((url, index) => ({ index, url }))
+  };
+}
+
+function stripUserVisionContext(content: string): string {
+  return content
+    .replace(/\n*<视觉理解摘要>[\s\S]*?<\/视觉理解摘要>\s*/g, "\n")
+    .replace(/\n*<用户语音输入>[\s\S]*?<\/用户语音输入>\s*/g, "\n")
+    .replace(
+      /(?:^|\n+)已附加图片：[^\n]+\n路径：[^\n]+\n类型：image\n请先根据视觉理解摘要回答，不要把图片当作普通文本文件读取。\s*/g,
+      "\n"
+    )
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
 function normalizeMessageContent(content: string, role: ChatMessage["role"]): string {
+  if (role === "user") {
+    return stripUserVisionContext(content);
+  }
   if (role !== "assistant") {
     return content;
   }
@@ -229,6 +406,9 @@ function toChatMessages(messages: ConversationDetail["messages"]): ChatMessage[]
     id: message.id,
     role: message.role,
     content: normalizeMessageContent(message.content, message.role),
+    attachments: message.role === "user" ? extractImageAttachmentsFromContent(message.content) : undefined,
+    voiceInput: message.role === "user" ? extractVoiceInputFromContent(message.content) : undefined,
+    assistantVoice: message.role === "assistant" ? normalizeAssistantVoice(message.assistantVoice) : undefined,
     thinking: message.thinking || "",
     createdAt: message.createdAt
   }));
@@ -294,20 +474,28 @@ function downloadText(filename: string, text: string, mimeType = "text/markdown;
   URL.revokeObjectURL(url);
 }
 
-function uploadedFilePromptLine(file: { originalFilename: string; path: string; textType: string }): string {
+function uploadedFilePromptLine(file: { originalFilename: string; path: string; textType: string; mediaType?: string }): string {
+  if (file.mediaType === "image") {
+    return `已附加图片：${file.originalFilename}\n路径：${file.path}\n类型：image\n请先根据视觉理解摘要回答，不要把图片当作普通文本文件读取。`;
+  }
   return `已上传文件：${file.originalFilename}\n路径：${file.path}\n类型：${file.textType}\n请在需要时调用 file_reader 读取并参考这个文件。`;
 }
 
 function composeMessageText(text: string, files: UploadedFileInfo[]): string {
   const content = text.trim();
-  const fileText = files.map(uploadedFilePromptLine).join("\n\n");
+  const nonImageFiles = files.filter((file) => file.mediaType !== "image" && !file.visionReadable);
+  const hasImages = files.length > nonImageFiles.length;
+  const fileText = nonImageFiles.map(uploadedFilePromptLine).join("\n\n");
   if (content && fileText) {
     return `${content}\n\n${fileText}`;
   }
-  return content || fileText;
+  return content || fileText || (hasImages ? "请理解这些图片。" : "");
 }
 
 function uploadTypeLabel(file: UploadedFileInfo): string {
+  if (file.mediaType === "image" || file.visionReadable) {
+    return "图片";
+  }
   const suffix = file.filename.split(".").pop()?.toLowerCase() ?? "";
   if (["pdf", "doc", "docx", "xls", "xlsx"].includes(suffix)) {
     return "文档";
@@ -1303,6 +1491,8 @@ export {
   CODE_TASK_MAX_HISTORY,
   DEFAULT_CODE_TASK_WORKSPACE,
   DEFAULT_MODEL_SETTINGS,
+  DEFAULT_SPEECH_INPUT_SETTINGS,
+  DEFAULT_VISION_SETTINGS,
   DEFAULT_VOICE_SETTINGS,
   EDGE_MARGIN,
   LIVE2D_ACTIVE_STORAGE_KEY,
@@ -1338,8 +1528,10 @@ export {
   loadStoredSettings,
   mergeToolEvents,
   normalizeDisplayEmotion,
+  normalizeAssistantVoice,
   normalizeLive2dEmotion,
   normalizeMessageContent,
+  normalizeSpeechInputSettings,
   normalizeThinkingText,
   renderMarkdownContent,
   sanitizeFilename,

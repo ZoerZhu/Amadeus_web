@@ -75,6 +75,16 @@ class VoiceSettings(BaseModel):
     gain: float = 0.0
 
 
+class DesktopAssistantSettings(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    subtitle_enabled: bool = Field(default=True, alias="subtitleEnabled")
+    voice_output_enabled: bool = Field(default=False, alias="voiceOutputEnabled")
+    auto_screenshot_enabled: bool = Field(default=False, alias="autoScreenshotEnabled")
+    screenshot_interval_seconds: int = Field(default=15, alias="screenshotIntervalSeconds")
+    camera_enabled: bool = Field(default=False, alias="cameraEnabled")
+
+
 class ChatAttachment(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
@@ -143,7 +153,21 @@ class SettingsSaveRequest(BaseModel):
     vision: VisionSettings = Field(default_factory=VisionSettings)
     speech_input: SpeechInputSettings = Field(default_factory=SpeechInputSettings, alias="speechInput")
     voice: VoiceSettings = Field(default_factory=VoiceSettings)
+    desktop_assistant: DesktopAssistantSettings = Field(default_factory=DesktopAssistantSettings, alias="desktopAssistant")
     mode: ChatMode = "fast"
+
+
+class DesktopObserveRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    prompt: str = ""
+    attachments: list[ChatAttachment] = Field(default_factory=list)
+    conversation_id: UUID | None = Field(default=None, alias="conversationId")
+    save_response: bool = Field(default=False, alias="saveResponse")
+    persona_id: str = Field(default="kurisu_amadeus", alias="personaId")
+    mode: ChatMode = "fast"
+    model: ModelSettings = Field(default_factory=ModelSettings)
+    vision: VisionSettings = Field(default_factory=VisionSettings)
 
 
 class ConversationCreateRequest(BaseModel):

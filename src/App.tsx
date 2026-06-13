@@ -32,6 +32,7 @@ import {
   fetchProviders,
   fetchSettings,
   listConversations,
+  observeDesktop,
   publishCodeTaskMobileView,
   replyCodeTaskQuestion,
   saveSettings,
@@ -73,6 +74,7 @@ import type {
   CodeTaskEvent,
   ConversationDetail,
   ConversationSummary,
+  DesktopAssistantSettings,
   ModelSettings,
   ProviderPreset,
   SpeechInputSettings,
@@ -94,6 +96,7 @@ import {
   CODE_TASK_MAX_DETAIL_TEXT,
   CODE_TASK_MAX_HISTORY,
   DEFAULT_CODE_TASK_WORKSPACE,
+  DEFAULT_DESKTOP_ASSISTANT_SETTINGS,
   DEFAULT_MODEL_SETTINGS,
   DEFAULT_SPEECH_INPUT_SETTINGS,
   DEFAULT_VISION_SETTINGS,
@@ -126,6 +129,7 @@ import {
   loadStoredSettings,
   normalizeDisplayEmotion,
   normalizeAssistantVoice,
+  normalizeDesktopAssistantSettings,
   normalizeLive2dEmotion,
   normalizeMessageContent,
   normalizeSpeechInputSettings,
@@ -154,6 +158,7 @@ export default function App() {
   const [visionSettings, setVisionSettings] = useState<VisionSettings>(stored.vision);
   const [speechInputSettings, setSpeechInputSettings] = useState<SpeechInputSettings>(stored.speechInput);
   const [voiceSettings, setVoiceSettings] = useState<VoiceSettings>(stored.voice);
+  const [desktopAssistantSettings, setDesktopAssistantSettings] = useState<DesktopAssistantSettings>(stored.desktopAssistant);
   const [mode, setMode] = useState<ChatMode>(stored.mode);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState("");
@@ -203,6 +208,11 @@ export default function App() {
   const [voiceRecording, setVoiceRecording] = useState(false);
   const [voiceRecordingSeconds, setVoiceRecordingSeconds] = useState(0);
   const [voiceInputLevels, setVoiceInputLevels] = useState<number[]>(Array.from({ length: 18 }, () => 0.24));
+  const [desktopAssistantMode, setDesktopAssistantMode] = useState(false);
+  const [desktopAssistantStatus, setDesktopAssistantStatus] = useState("待机");
+  const [desktopCameraAvailable, setDesktopCameraAvailable] = useState(false);
+  const [desktopCameraReason, setDesktopCameraReason] = useState("尚未检测摄像头");
+  const [desktopObserveBusy, setDesktopObserveBusy] = useState(false);
   const [live2dReady, setLive2dReady] = useState(false);
   const [live2dError, setLive2dError] = useState("");
   const [minimumBootElapsed, setMinimumBootElapsed] = useState(false);
@@ -210,6 +220,8 @@ export default function App() {
   const live2dRef = useRef<Live2DStageHandle | null>(null);
   const activeLive2DModelRef = useRef<Live2DModelRecord>(DEFAULT_LIVE2D_MODEL);
   const abortRef = useRef<AbortController | null>(null);
+  const isStreamingRef = useRef(false);
+  const voiceInputBusyRef = useRef(false);
   const codeTaskAbortRef = useRef<AbortController | null>(null);
   const codeTaskAssistantMessageIdRef = useRef<string | null>(null);
   const codeTaskFlushTimerRef = useRef<number | null>(null);
@@ -259,8 +271,26 @@ export default function App() {
   const voicePcmSampleRateRef = useRef(48000);
   const voiceRecordingStartedAtRef = useRef(0);
   const voiceWaveformSamplesRef = useRef<number[]>([]);
+  const desktopVadStreamRef = useRef<MediaStream | null>(null);
+  const desktopVadAudioContextRef = useRef<AudioContext | null>(null);
+  const desktopVadProcessorRef = useRef<ScriptProcessorNode | null>(null);
+  const desktopVadSourceRef = useRef<MediaStreamAudioSourceNode | null>(null);
+  const desktopVadSilentGainRef = useRef<GainNode | null>(null);
+  const desktopVadPreRollRef = useRef<Float32Array[]>([]);
+  const desktopVadSpeechChunksRef = useRef<Float32Array[]>([]);
+  const desktopVadWaveformRef = useRef<number[]>([]);
+  const desktopVadRecordingRef = useRef(false);
+  const desktopVadSpeechStartedAtRef = useRef(0);
+  const desktopVadLastVoiceAtRef = useRef(0);
+  const desktopVadNoiseFloorRef = useRef(0.012);
+  const desktopVadCooldownUntilRef = useRef(0);
+  const desktopAssistantModeRef = useRef(false);
+  const desktopAutoScreenshotTimerRef = useRef<number | null>(null);
+  const desktopDragRef = useRef<{ x: number; y: number } | null>(null);
+  const desktopObservationBusyRef = useRef(false);
 
   const selectedProvider = providers.find((provider) => provider.name === modelSettings.providerName);
+  const desktopAssistantAvailable = Boolean(window.amadeusDesktop?.setDesktopAssistantMode);
   const canSend = (input.trim().length > 0 || uploadedFiles.length > 0) && !isStreaming && !voiceRecording && !voiceInputBusy;
   const canStartCodeTask = codeTaskInput.trim().length > 0 && !codeTaskRunning;
   const visibleMessages = messages
@@ -401,6 +431,9 @@ export default function App() {
                 : normalizedSpeechInput.apiKey
           }));
           setVoiceSettings((prev) => ({ ...prev, ...remoteSettings.voice }));
+          setDesktopAssistantSettings((prev) =>
+            normalizeDesktopAssistantSettings({ ...prev, ...(remoteSettings.desktopAssistant ?? {}) })
+          );
           setMode(remoteSettings.mode);
         }
         setConversations(conversationItems);
@@ -433,6 +466,7 @@ export default function App() {
         vision: visionSettings,
         speechInput: speechInputSettingsForPersistence(),
         voice: voiceSettings,
+        desktopAssistant: desktopAssistantSettings,
         mode
       })
     );
@@ -449,12 +483,13 @@ export default function App() {
         vision: visionSettings,
         speechInput: speechInputSettingsForPersistence(),
         voice: voiceSettings,
+        desktopAssistant: desktopAssistantSettings,
         mode
       }).catch((error) => {
         setStorageError(error instanceof Error ? error.message : "settings save failed");
       });
     }, 350);
-  }, [modelSettings, visionSettings, speechInputSettings, voiceSettings, mode, storageOnline]);
+  }, [modelSettings, visionSettings, speechInputSettings, voiceSettings, desktopAssistantSettings, mode, storageOnline]);
 
   useEffect(() => {
     const payload = codeTasks.slice(0, CODE_TASK_MAX_HISTORY);
@@ -469,6 +504,57 @@ export default function App() {
       syncCodeTaskHistory(payload).catch(() => undefined);
     }, 500);
   }, [codeTasks]);
+
+  useEffect(() => {
+    isStreamingRef.current = isStreaming;
+  }, [isStreaming]);
+
+  useEffect(() => {
+    voiceInputBusyRef.current = voiceInputBusy;
+  }, [voiceInputBusy]);
+
+  useEffect(() => {
+    desktopAssistantModeRef.current = desktopAssistantMode;
+  }, [desktopAssistantMode]);
+
+  useEffect(() => {
+    if (!desktopAssistantMode) {
+      stopDesktopAssistantListening();
+      return;
+    }
+    void startDesktopAssistantListening();
+    return () => {
+      stopDesktopAssistantListening();
+    };
+  }, [desktopAssistantMode, speechInputSettings.enabled]);
+
+  useEffect(() => {
+    if (desktopAutoScreenshotTimerRef.current !== null) {
+      window.clearInterval(desktopAutoScreenshotTimerRef.current);
+      desktopAutoScreenshotTimerRef.current = null;
+    }
+    if (!desktopAssistantMode || !desktopAssistantSettings.autoScreenshotEnabled) {
+      return;
+    }
+    const intervalMs = clamp(desktopAssistantSettings.screenshotIntervalSeconds, 5, 120) * 1000;
+    desktopAutoScreenshotTimerRef.current = window.setInterval(() => {
+      void runDesktopAutoObservation();
+    }, intervalMs);
+    return () => {
+      if (desktopAutoScreenshotTimerRef.current !== null) {
+        window.clearInterval(desktopAutoScreenshotTimerRef.current);
+        desktopAutoScreenshotTimerRef.current = null;
+      }
+    };
+  }, [
+    desktopAssistantMode,
+    desktopAssistantSettings.autoScreenshotEnabled,
+    desktopAssistantSettings.screenshotIntervalSeconds,
+    currentConversationId,
+    modelSettings,
+    visionSettings,
+    voiceSettings
+  ]);
 
   useEffect(() => {
     if (
@@ -636,6 +722,7 @@ export default function App() {
       }
       stopAudioPlayback();
       cleanupVoiceRecordingResources();
+      stopDesktopAssistantListening();
     };
   }, []);
 
@@ -928,6 +1015,160 @@ export default function App() {
       setStorageError(error instanceof Error ? error.message : "conversation create failed");
       return null;
     }
+  }
+
+  function desktopAssistantConversationTitle(): string {
+    const value = new Date().toLocaleString("zh-CN", {
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit"
+    });
+    return `桌面助手 ${value}`;
+  }
+
+  async function createDesktopAssistantConversation(): Promise<string | null> {
+    if (!storageOnline) {
+      setMessages([]);
+      setCurrentConversationId(null);
+      return null;
+    }
+    try {
+      const conversation = await createConversation({
+        title: desktopAssistantConversationTitle(),
+        personaId: PERSONA_ID,
+        mode
+      });
+      setCurrentConversationId(conversation.id);
+      setConversations((prev) => [
+        conversation,
+        ...prev.filter((item) => item.id !== conversation.id)
+      ]);
+      setMessages([]);
+      return conversation.id;
+    } catch (error) {
+      setStorageError(error instanceof Error ? error.message : "desktop conversation create failed");
+      return currentConversationId;
+    }
+  }
+
+  async function refreshDesktopCameraAvailability() {
+    const apiAvailable = await window.amadeusDesktop?.getCameraAvailability?.().catch((error) => ({
+      available: false,
+      reason: error instanceof Error ? error.message : "摄像头检测失败"
+    }));
+    if (apiAvailable && !apiAvailable.available) {
+      setDesktopCameraAvailable(false);
+      setDesktopCameraReason(apiAvailable.reason || "摄像头不可用");
+      setDesktopAssistantSettings((prev) => ({ ...prev, cameraEnabled: false }));
+      return;
+    }
+    if (!navigator.mediaDevices?.enumerateDevices) {
+      setDesktopCameraAvailable(false);
+      setDesktopCameraReason("当前环境不支持摄像头检测");
+      setDesktopAssistantSettings((prev) => ({ ...prev, cameraEnabled: false }));
+      return;
+    }
+    try {
+      const devices = await navigator.mediaDevices.enumerateDevices();
+      const hasCamera = devices.some((device) => device.kind === "videoinput");
+      setDesktopCameraAvailable(hasCamera);
+      setDesktopCameraReason(hasCamera ? "" : "未检测到摄像头");
+      if (!hasCamera) {
+        setDesktopAssistantSettings((prev) => ({ ...prev, cameraEnabled: false }));
+      }
+    } catch (error) {
+      setDesktopCameraAvailable(false);
+      setDesktopCameraReason(error instanceof Error ? error.message : "摄像头权限不可用");
+      setDesktopAssistantSettings((prev) => ({ ...prev, cameraEnabled: false }));
+    }
+  }
+
+  async function toggleDesktopCamera() {
+    if (!desktopCameraAvailable) {
+      return;
+    }
+    if (desktopAssistantSettings.cameraEnabled) {
+      setDesktopAssistantSettings((prev) => ({ ...prev, cameraEnabled: false }));
+      return;
+    }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: false });
+      stream.getTracks().forEach((track) => track.stop());
+      setDesktopAssistantSettings((prev) => ({ ...prev, cameraEnabled: true }));
+      setDesktopCameraAvailable(true);
+      setDesktopCameraReason("");
+    } catch (error) {
+      setDesktopCameraAvailable(false);
+      setDesktopCameraReason(error instanceof Error ? error.message : "摄像头权限被拒绝");
+      setDesktopAssistantSettings((prev) => ({ ...prev, cameraEnabled: false }));
+    }
+  }
+
+  async function enterDesktopAssistantMode() {
+    if (!desktopAssistantAvailable) {
+      setStatus("desktop only");
+      return;
+    }
+    stopAudioPlayback();
+    abortRef.current?.abort();
+    setMenuOpen(false);
+    setConfigOpen(false);
+    setChatOpen(false);
+    setUploadedFiles([]);
+    setUploadPanelOpen(false);
+    setDesktopAssistantSettings((prev) => ({
+      ...prev,
+      voiceOutputEnabled: prev.voiceOutputEnabled || voiceSettings.autoPlay
+    }));
+    const result = await window.amadeusDesktop?.setDesktopAssistantMode?.(true).catch((error) => ({
+      ok: false,
+      reason: error instanceof Error ? error.message : "桌面助手窗口切换失败"
+    }));
+    if (result && !result.ok) {
+      setStatus(result.reason || "desktop assistant failed");
+      return;
+    }
+    await createDesktopAssistantConversation();
+    setDesktopAssistantMode(true);
+    setDesktopAssistantStatus("监听中");
+    void refreshDesktopCameraAvailability();
+  }
+
+  async function exitDesktopAssistantMode() {
+    setDesktopAssistantMode(false);
+    setDesktopAssistantStatus("待机");
+    stopDesktopAssistantListening();
+    if (desktopAutoScreenshotTimerRef.current !== null) {
+      window.clearInterval(desktopAutoScreenshotTimerRef.current);
+      desktopAutoScreenshotTimerRef.current = null;
+    }
+    await window.amadeusDesktop?.setDesktopAssistantMode?.(false).catch(() => undefined);
+  }
+
+  function startDesktopWindowDrag(event: ReactPointerEvent<HTMLDivElement>) {
+    if (!desktopAssistantMode || !window.amadeusDesktop?.moveAssistantWindow) {
+      return;
+    }
+    desktopDragRef.current = { x: event.clientX, y: event.clientY };
+    event.currentTarget.setPointerCapture(event.pointerId);
+  }
+
+  function moveDesktopWindowDrag(event: ReactPointerEvent<HTMLDivElement>) {
+    if (!desktopAssistantMode || !desktopDragRef.current || !window.amadeusDesktop?.moveAssistantWindow) {
+      return;
+    }
+    const dx = event.clientX - desktopDragRef.current.x;
+    const dy = event.clientY - desktopDragRef.current.y;
+    if (Math.abs(dx) < 1 && Math.abs(dy) < 1) {
+      return;
+    }
+    desktopDragRef.current = { x: event.clientX, y: event.clientY };
+    void window.amadeusDesktop.moveAssistantWindow({ dx, dy });
+  }
+
+  function stopDesktopWindowDrag() {
+    desktopDragRef.current = null;
   }
 
   function appendAssistantDelta(id: string, delta: Partial<ChatMessage>) {
@@ -1394,6 +1635,46 @@ export default function App() {
     }
   }
 
+  async function captureScreenUploadedAttachment(): Promise<UploadedFileInfo | null> {
+    setScreenCaptureBusy(true);
+    try {
+      const file = await captureScreenshotFile();
+      const uploaded = await uploadFilesForAttachments([file], false);
+      return uploaded[0] ?? null;
+    } catch (error) {
+      setStatus(error instanceof Error ? error.message : "screenshot failed");
+      return null;
+    } finally {
+      setScreenCaptureBusy(false);
+    }
+  }
+
+  function shouldCaptureScreenForPrompt(text: string): boolean {
+    const value = text.trim().toLowerCase();
+    if (!value) {
+      return false;
+    }
+    return [
+      "看屏幕",
+      "看看屏幕",
+      "查看屏幕",
+      "看一下屏幕",
+      "看下屏幕",
+      "屏幕上",
+      "我现在在干什么",
+      "我在干什么",
+      "这个报错",
+      "这个错误",
+      "当前画面",
+      "帮我看看",
+      "看一下这个",
+      "看下这个",
+      "what am i doing",
+      "look at my screen",
+      "see my screen"
+    ].some((keyword) => value.includes(keyword));
+  }
+
   function cleanupVoiceRecordingResources() {
     if (voiceAnimationFrameRef.current !== null) {
       window.cancelAnimationFrame(voiceAnimationFrameRef.current);
@@ -1619,6 +1900,156 @@ export default function App() {
     void startVoiceInputRecording();
   }
 
+  function desktopVadRms(samples: Float32Array): number {
+    let total = 0;
+    for (let index = 0; index < samples.length; index += 1) {
+      total += samples[index] * samples[index];
+    }
+    return Math.sqrt(total / Math.max(1, samples.length));
+  }
+
+  function desktopVadChunkDuration(chunks: Float32Array[], sampleRate: number): number {
+    const samples = chunks.reduce((total, chunk) => total + chunk.length, 0);
+    return samples / Math.max(1, sampleRate);
+  }
+
+  function keepDesktopVadPreRoll(chunk: Float32Array, sampleRate: number) {
+    desktopVadPreRollRef.current.push(chunk);
+    while (desktopVadChunkDuration(desktopVadPreRollRef.current, sampleRate) > 0.45) {
+      desktopVadPreRollRef.current.shift();
+    }
+  }
+
+  function resetDesktopVadSegment() {
+    desktopVadRecordingRef.current = false;
+    desktopVadSpeechChunksRef.current = [];
+    desktopVadWaveformRef.current = [];
+    desktopVadSpeechStartedAtRef.current = 0;
+    desktopVadLastVoiceAtRef.current = 0;
+  }
+
+  function finishDesktopVadSegment(sampleRate: number) {
+    const chunks = desktopVadSpeechChunksRef.current.slice();
+    const waveform = normalizeWaveformSamples(desktopVadWaveformRef.current);
+    const durationSeconds = Math.max(0, desktopVadChunkDuration(chunks, sampleRate));
+    resetDesktopVadSegment();
+    if (durationSeconds < 0.35 || chunks.length === 0) {
+      return;
+    }
+    desktopVadCooldownUntilRef.current = performance.now() + 900;
+    setDesktopAssistantStatus("识别中");
+    const blob = encodePcmChunksToWav(chunks, sampleRate);
+    void processVoiceInputBlob(blob, "audio/wav", durationSeconds, waveform);
+  }
+
+  async function startDesktopAssistantListening() {
+    if (desktopVadStreamRef.current || !desktopAssistantModeRef.current) {
+      return;
+    }
+    if (!speechInputSettings.enabled) {
+      setDesktopAssistantStatus("语音输入未开启");
+      return;
+    }
+    if (!navigator.mediaDevices?.getUserMedia) {
+      setDesktopAssistantStatus("麦克风不可用");
+      return;
+    }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const AudioContextCtor = window.AudioContext || (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
+      if (!AudioContextCtor) {
+        throw new Error("当前环境不支持 Web Audio");
+      }
+      const context = new AudioContextCtor();
+      await context.resume().catch(() => undefined);
+      const source = context.createMediaStreamSource(stream);
+      const processor = context.createScriptProcessor(4096, 1, 1);
+      const silentGain = context.createGain();
+      silentGain.gain.value = 0;
+      desktopVadStreamRef.current = stream;
+      desktopVadAudioContextRef.current = context;
+      desktopVadSourceRef.current = source;
+      desktopVadProcessorRef.current = processor;
+      desktopVadSilentGainRef.current = silentGain;
+      desktopVadPreRollRef.current = [];
+      resetDesktopVadSegment();
+
+      processor.onaudioprocess = (event) => {
+        if (!desktopAssistantModeRef.current) {
+          return;
+        }
+        const input = event.inputBuffer.getChannelData(0);
+        const chunk = new Float32Array(input);
+        const sampleRate = context.sampleRate || 48000;
+        const rms = desktopVadRms(chunk);
+        const now = performance.now();
+        const floor = desktopVadNoiseFloorRef.current;
+        const threshold = Math.max(0.018, floor * 3.0);
+        const voiceDetected = rms > threshold;
+        const level = clamp(rms * 18, 0.16, 1);
+        setVoiceInputLevels((prev) => [...prev.slice(1), level]);
+
+        if (!desktopVadRecordingRef.current && !voiceDetected) {
+          desktopVadNoiseFloorRef.current = floor * 0.96 + Math.min(rms, 0.05) * 0.04;
+        }
+        keepDesktopVadPreRoll(chunk, sampleRate);
+
+        if (isStreamingRef.current || voiceInputBusyRef.current || now < desktopVadCooldownUntilRef.current) {
+          return;
+        }
+
+        if (!desktopVadRecordingRef.current) {
+          if (!voiceDetected) {
+            setDesktopAssistantStatus("监听中");
+            return;
+          }
+          desktopVadRecordingRef.current = true;
+          desktopVadSpeechStartedAtRef.current = now - desktopVadChunkDuration(desktopVadPreRollRef.current, sampleRate) * 1000;
+          desktopVadLastVoiceAtRef.current = now;
+          desktopVadSpeechChunksRef.current = [...desktopVadPreRollRef.current, chunk];
+          desktopVadWaveformRef.current = [level];
+          setDesktopAssistantStatus("听到了");
+          return;
+        }
+
+        desktopVadSpeechChunksRef.current.push(chunk);
+        desktopVadWaveformRef.current.push(level);
+        if (voiceDetected) {
+          desktopVadLastVoiceAtRef.current = now;
+        }
+        const durationMs = now - desktopVadSpeechStartedAtRef.current;
+        const silenceMs = now - desktopVadLastVoiceAtRef.current;
+        if (silenceMs >= 900 || durationMs >= 25000) {
+          finishDesktopVadSegment(sampleRate);
+        }
+      };
+
+      source.connect(processor);
+      processor.connect(silentGain);
+      silentGain.connect(context.destination);
+      setDesktopAssistantStatus("监听中");
+    } catch (error) {
+      stopDesktopAssistantListening();
+      setDesktopAssistantStatus(error instanceof Error ? error.message : "麦克风启动失败");
+    }
+  }
+
+  function stopDesktopAssistantListening() {
+    desktopVadProcessorRef.current?.disconnect();
+    desktopVadSourceRef.current?.disconnect();
+    desktopVadSilentGainRef.current?.disconnect();
+    desktopVadStreamRef.current?.getTracks().forEach((track) => track.stop());
+    void desktopVadAudioContextRef.current?.close().catch(() => undefined);
+    desktopVadProcessorRef.current = null;
+    desktopVadSourceRef.current = null;
+    desktopVadSilentGainRef.current = null;
+    desktopVadStreamRef.current = null;
+    desktopVadAudioContextRef.current = null;
+    desktopVadPreRollRef.current = [];
+    desktopVadCooldownUntilRef.current = 0;
+    resetDesktopVadSegment();
+  }
+
   async function processVoiceInputBlob(blob: Blob, mimeType: string, durationSeconds: number, waveform: number[]) {
     if (blob.size === 0) {
       setStatus("empty voice");
@@ -1650,11 +2081,94 @@ export default function App() {
         await sendVoiceInputMessage(`语音输入转写失败：${errorText}。请不要猜测语音内容，提示用户检查语音输入模型配置或重试。`, voiceInput);
         return;
       }
-      await sendVoiceInputMessage(transcript, voiceInput);
+      const desktopVoice = desktopAssistantMode
+        ? { ...voiceSettings, autoPlay: desktopAssistantSettings.voiceOutputEnabled }
+        : voiceSettings;
+      let attachments: ChatAttachment[] = [];
+      if (desktopAssistantMode && shouldCaptureScreenForPrompt(transcript)) {
+        setDesktopAssistantStatus("查看屏幕");
+        const screenshot = await captureScreenUploadedAttachment();
+        attachments = screenshot ? toChatAttachments([screenshot]) : [];
+      }
+      setDesktopAssistantStatus("思考中");
+      await sendVoiceInputMessage(transcript, voiceInput, { attachments, voice: desktopVoice });
     } catch (error) {
       setStatus(error instanceof Error ? error.message : "voice input failed");
+      setDesktopAssistantStatus(error instanceof Error ? error.message : "语音失败");
     } finally {
       setVoiceInputBusy(false);
+    }
+  }
+
+  async function runDesktopAutoObservation() {
+    if (
+      !desktopAssistantModeRef.current ||
+      desktopObservationBusyRef.current ||
+      isStreamingRef.current ||
+      voiceInputBusyRef.current
+    ) {
+      return;
+    }
+    desktopObservationBusyRef.current = true;
+    setDesktopObserveBusy(true);
+    setDesktopAssistantStatus("观察中");
+    try {
+      const conversationId = currentConversationId || (await createDesktopAssistantConversation());
+      if (!conversationId) {
+        setDesktopAssistantStatus("历史不可用");
+        return;
+      }
+      const screenshot = await captureScreenUploadedAttachment();
+      if (!screenshot) {
+        setDesktopAssistantStatus("截图失败");
+        return;
+      }
+      const result = await observeDesktop({
+        prompt: "桌面自动观察：除非画面确实需要提醒或适合简短回应，否则不要回应。",
+        attachments: toChatAttachments([screenshot]),
+        conversationId,
+        saveResponse: true,
+        model: modelSettings,
+        vision: visionSettings
+      });
+      if (!result.shouldRespond || !result.assistantMessage) {
+        setDesktopAssistantStatus(result.reason || "监听中");
+        return;
+      }
+      const storedMessages = [result.userMessage, result.assistantMessage].filter(Boolean) as ConversationDetail["messages"];
+      const chatItems = toChatMessages(storedMessages);
+      setMessages((prev) => {
+        const existing = new Set(prev.map((message) => message.id));
+        return [...prev, ...chatItems.filter((message) => !existing.has(message.id))];
+      });
+      const assistant = chatItems.find((message) => message.role === "assistant");
+      if (assistant) {
+        setCurrentEmotion(normalizeDisplayEmotion(result.emotion));
+        live2dRef.current?.playEmotion(normalizeLive2dEmotion(result.emotion, result.emotion));
+        if (desktopAssistantSettings.voiceOutputEnabled) {
+          const speech = await synthesizeVoice({
+            text: assistant.content,
+            model: modelSettings,
+            voice: { ...voiceSettings, autoPlay: true },
+            conversationId,
+            messageId: assistant.id
+          });
+          const assistantVoice =
+            normalizeAssistantVoice(speech.assistantVoice) ??
+            normalizeAssistantVoice({ audioUrls: [speech.audioUrl], segments: [{ index: 0, url: speech.audioUrl }] });
+          if (assistantVoice) {
+            setAssistantVoice(assistant.id, assistantVoice);
+            playAssistantVoiceUrls(assistantVoice.audioUrls);
+          }
+        }
+      }
+      setDesktopAssistantStatus("监听中");
+      void refreshConversations();
+    } catch (error) {
+      setDesktopAssistantStatus(error instanceof Error ? error.message : "观察失败");
+    } finally {
+      desktopObservationBusyRef.current = false;
+      setDesktopObserveBusy(false);
     }
   }
 
@@ -1671,9 +2185,9 @@ export default function App() {
     }
   }
 
-  async function uploadFiles(files: File[]) {
+  async function uploadFilesForAttachments(files: File[], addToComposer = true): Promise<UploadedFileInfo[]> {
     if (files.length === 0) {
-      return;
+      return [];
     }
 
     setUploadBusy(true);
@@ -1689,18 +2203,26 @@ export default function App() {
         });
         uploaded.push(response.file);
       }
-      setUploadedFiles((prev) => {
-        const byPath = new Map(prev.map((file) => [file.path, file]));
-        uploaded.forEach((file) => byPath.set(file.path, file));
-        return Array.from(byPath.values());
-      });
-      setUploadPanelOpen(false);
+      if (addToComposer) {
+        setUploadedFiles((prev) => {
+          const byPath = new Map(prev.map((file) => [file.path, file]));
+          uploaded.forEach((file) => byPath.set(file.path, file));
+          return Array.from(byPath.values());
+        });
+        setUploadPanelOpen(false);
+      }
       setStatus(files.length > 1 ? `uploaded ${files.length}` : "uploaded");
+      return uploaded;
     } catch (error) {
       setStatus(error instanceof Error ? error.message : "upload failed");
+      return [];
     } finally {
       setUploadBusy(false);
     }
+  }
+
+  async function uploadFiles(files: File[]) {
+    await uploadFilesForAttachments(files, true);
   }
 
   async function handleFileSelection(event: ChangeEvent<HTMLInputElement>) {
@@ -1844,6 +2366,9 @@ export default function App() {
   function handleStreamEvent(event: StreamEvent, assistantId: string) {
     if (event.event === "status") {
       setStatus(event.payload.phase);
+      if (desktopAssistantModeRef.current) {
+        setDesktopAssistantStatus(event.payload.phase);
+      }
       return;
     }
     if (event.event === "content") {
@@ -1881,6 +2406,9 @@ export default function App() {
       appendAssistantDelta(assistantId, { content: `请求失败：${event.payload.message}` });
       finalizeAssistant(assistantId);
       setStatus("error");
+      if (desktopAssistantModeRef.current) {
+        setDesktopAssistantStatus(event.payload.message);
+      }
       return;
     }
     if (event.event === "done") {
@@ -1889,6 +2417,9 @@ export default function App() {
       }
       finalizeAssistant(assistantId);
       setStatus("done");
+      if (desktopAssistantModeRef.current) {
+        setDesktopAssistantStatus("监听中");
+      }
     }
   }
 
@@ -1963,7 +2494,11 @@ export default function App() {
     }
   }
 
-  async function sendVoiceInputMessage(text: string, voiceInput: VoiceInputInfo) {
+  async function sendVoiceInputMessage(
+    text: string,
+    voiceInput: VoiceInputInfo,
+    options: { attachments?: ChatAttachment[]; voice?: VoiceSettings } = {}
+  ) {
     const content = text.trim();
     if (!content || isStreaming) {
       return;
@@ -1981,6 +2516,7 @@ export default function App() {
       id: createId(),
       role: "user",
       content,
+      attachments: options.attachments,
       voiceInput,
       createdAt: new Date().toISOString()
     };
@@ -2003,11 +2539,11 @@ export default function App() {
       await streamChat({
         conversationId,
         messages: toApiMessages([...messages, userMessage]),
-        attachments: [],
+        attachments: options.attachments ?? [],
         mode,
         model: modelSettings,
         vision: visionSettings,
-        voice: voiceSettings,
+        voice: options.voice ?? voiceSettings,
         signal: controller.signal,
         onEvent: (streamEvent) => handleStreamEvent(streamEvent, assistantMessage.id)
       });
@@ -2910,13 +3446,121 @@ export default function App() {
     );
   }
 
+  function desktopAssistantSubtitleText(): string {
+    const latestAssistant = [...messages].reverse().find((message) => message.role === "assistant" && message.content.trim());
+    if (latestAssistant?.content.trim()) {
+      return latestAssistant.content.trim();
+    }
+    return desktopAssistantStatus;
+  }
+
+  function renderDesktopAssistantSubtitle() {
+    if (!desktopAssistantMode || !desktopAssistantSettings.subtitleEnabled) {
+      return null;
+    }
+    const text = desktopAssistantSubtitleText();
+    if (!text) {
+      return null;
+    }
+    return (
+      <div className="desktop-assistant-subtitle" aria-live="polite">
+        {text}
+      </div>
+    );
+  }
+
+  function renderDesktopAssistantControls() {
+    if (!desktopAssistantMode) {
+      return null;
+    }
+    const cameraTitle = desktopCameraAvailable
+      ? desktopAssistantSettings.cameraEnabled
+        ? "关闭摄像头检测"
+        : "开启摄像头检测"
+      : desktopCameraReason || "摄像头不可用";
+    return (
+      <div className="desktop-assistant-controls glass-panel">
+        <button
+          className={`round-tool ${desktopAssistantSettings.subtitleEnabled ? "is-active" : ""}`}
+          onClick={() =>
+            setDesktopAssistantSettings((prev) => ({ ...prev, subtitleEnabled: !prev.subtitleEnabled }))
+          }
+          type="button"
+          title={desktopAssistantSettings.subtitleEnabled ? "关闭字幕" : "开启字幕"}
+          aria-label={desktopAssistantSettings.subtitleEnabled ? "关闭字幕" : "开启字幕"}
+        >
+          <MessageCircle size={17} />
+        </button>
+        <button
+          className={`round-tool ${desktopAssistantSettings.voiceOutputEnabled ? "is-active" : ""}`}
+          onClick={() =>
+            setDesktopAssistantSettings((prev) => ({ ...prev, voiceOutputEnabled: !prev.voiceOutputEnabled }))
+          }
+          type="button"
+          title={desktopAssistantSettings.voiceOutputEnabled ? "关闭语音输出" : "开启语音输出"}
+          aria-label={desktopAssistantSettings.voiceOutputEnabled ? "关闭语音输出" : "开启语音输出"}
+        >
+          {desktopAssistantSettings.voiceOutputEnabled ? <Volume2 size={17} /> : <VolumeX size={17} />}
+        </button>
+        <button
+          className={`round-tool ${desktopAssistantSettings.cameraEnabled ? "is-active" : ""}`}
+          disabled={!desktopCameraAvailable}
+          onClick={() => void toggleDesktopCamera()}
+          type="button"
+          title={cameraTitle}
+          aria-label={cameraTitle}
+        >
+          <Camera size={17} />
+        </button>
+        <button
+          className={`round-tool ${desktopAssistantSettings.autoScreenshotEnabled ? "is-active" : ""} ${desktopObserveBusy ? "is-busy" : ""}`}
+          onClick={() =>
+            setDesktopAssistantSettings((prev) => ({ ...prev, autoScreenshotEnabled: !prev.autoScreenshotEnabled }))
+          }
+          type="button"
+          title={desktopAssistantSettings.autoScreenshotEnabled ? "关闭自动截图" : "开启自动截图"}
+          aria-label={desktopAssistantSettings.autoScreenshotEnabled ? "关闭自动截图" : "开启自动截图"}
+        >
+          <Camera size={17} />
+        </button>
+        <label className="desktop-assistant-frequency" title="自动截图频率">
+          <input
+            value={desktopAssistantSettings.screenshotIntervalSeconds}
+            min={5}
+            max={120}
+            step={5}
+            type="number"
+            onChange={(event) =>
+              setDesktopAssistantSettings((prev) => ({
+                ...prev,
+                screenshotIntervalSeconds: clamp(Number(event.target.value || 15), 5, 120)
+              }))
+            }
+            aria-label="自动截图频率秒数"
+          />
+          <span>s</span>
+        </label>
+        <button
+          className="round-tool"
+          onClick={() => void exitDesktopAssistantMode()}
+          type="button"
+          title="返回窗口"
+          aria-label="返回窗口"
+        >
+          <ChevronRight size={18} />
+        </button>
+      </div>
+    );
+  }
+
   return (
     <main
       className={[
         "app-shell",
         menuOpen ? "is-menu-open" : "",
         configOpen ? "is-config-open" : "",
-        chatOpen ? "is-chat-open" : ""
+        chatOpen ? "is-chat-open" : "",
+        desktopAssistantMode ? "is-desktop-assistant" : ""
       ].join(" ")}
       style={
         {
@@ -2925,11 +3569,18 @@ export default function App() {
         } as CSSProperties
       }
     >
-      <section className="stage-panel" aria-label="Amadeus Live2D canvas">
+      <section
+        className="stage-panel"
+        aria-label="Amadeus Live2D canvas"
+        onPointerDown={startDesktopWindowDrag}
+        onPointerMove={moveDesktopWindowDrag}
+        onPointerUp={stopDesktopWindowDrag}
+        onPointerCancel={stopDesktopWindowDrag}
+      >
         <Live2DStage
           ref={live2dRef}
           model={activeLive2DModel}
-          transformLocked={live2dTransformLocked}
+          transformLocked={desktopAssistantMode ? true : live2dTransformLocked}
           speaking={speaking}
           onTransformChange={handleLive2DTransformChange}
           onReady={() => {
@@ -2941,14 +3592,19 @@ export default function App() {
           }}
         />
       </section>
+      {renderDesktopAssistantSubtitle()}
+      {renderDesktopAssistantControls()}
 
       <TopBar
         modelSettings={modelSettings}
         providers={providers}
         selectedProvider={selectedProvider}
         mode={mode}
+        desktopAssistantAvailable={desktopAssistantAvailable}
         onProviderChange={applyProvider}
         onModeChange={setMode}
+        onOpenDesktopAssistant={() => void enterDesktopAssistantMode()}
+        onWindowCommand={(command) => void window.amadeusDesktop?.windowCommand?.(command)}
       />
 
       <button

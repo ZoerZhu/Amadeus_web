@@ -7,6 +7,7 @@ import type {
   ConversationDetail,
   CodeTaskMobileViewSnapshot,
   CodeTaskQuestionItem,
+  DesktopAssistantSettings,
   ModelSettings,
   StoredSettings,
   ToolTraceEvent,
@@ -67,6 +68,25 @@ const DEFAULT_VOICE_SETTINGS: VoiceSettings = {
   speed: 1,
   gain: 0
 };
+
+const DEFAULT_DESKTOP_ASSISTANT_SETTINGS: DesktopAssistantSettings = {
+  subtitleEnabled: true,
+  voiceOutputEnabled: false,
+  autoScreenshotEnabled: false,
+  screenshotIntervalSeconds: 15,
+  cameraEnabled: false
+};
+
+function normalizeDesktopAssistantSettings(value?: Partial<DesktopAssistantSettings> | null): DesktopAssistantSettings {
+  const merged = { ...DEFAULT_DESKTOP_ASSISTANT_SETTINGS, ...(value ?? {}) };
+  return {
+    subtitleEnabled: Boolean(merged.subtitleEnabled),
+    voiceOutputEnabled: Boolean(merged.voiceOutputEnabled),
+    autoScreenshotEnabled: Boolean(merged.autoScreenshotEnabled),
+    screenshotIntervalSeconds: clamp(Number(merged.screenshotIntervalSeconds || 15), 5, 120),
+    cameraEnabled: Boolean(merged.cameraEnabled)
+  };
+}
 
 function normalizeSpeechInputSettings(value?: Partial<SpeechInputSettings> | null): SpeechInputSettings {
   const merged = { ...DEFAULT_SPEECH_INPUT_SETTINGS, ...(value ?? {}) };
@@ -207,6 +227,10 @@ declare global {
     amadeusDesktop?: {
       selectFolder?: () => Promise<string | null>;
       captureScreen?: () => Promise<{ dataUrl: string; filename: string } | null>;
+      setDesktopAssistantMode?: (enabled: boolean) => Promise<{ ok: boolean; reason?: string }>;
+      moveAssistantWindow?: (delta: { dx: number; dy: number }) => Promise<{ ok: boolean; reason?: string }>;
+      getCameraAvailability?: () => Promise<{ available: boolean; reason?: string; source?: string }>;
+      windowCommand?: (command: "minimize" | "toggle-maximize" | "close") => Promise<{ ok: boolean; reason?: string }>;
     };
   }
 }
@@ -249,6 +273,7 @@ function loadStoredSettings(): StoredSettings {
       vision: { ...DEFAULT_VISION_SETTINGS, ...(parsed.vision ?? {}) },
       speechInput: normalizeSpeechInputSettings(parsed.speechInput),
       voice: { ...DEFAULT_VOICE_SETTINGS, ...(parsed.voice ?? {}) },
+      desktopAssistant: normalizeDesktopAssistantSettings(parsed.desktopAssistant),
       mode: parsed.mode === "thinking" ? "thinking" : "fast"
     };
   } catch {
@@ -257,6 +282,7 @@ function loadStoredSettings(): StoredSettings {
       vision: DEFAULT_VISION_SETTINGS,
       speechInput: DEFAULT_SPEECH_INPUT_SETTINGS,
       voice: DEFAULT_VOICE_SETTINGS,
+      desktopAssistant: DEFAULT_DESKTOP_ASSISTANT_SETTINGS,
       mode: "fast"
     };
   }
@@ -1490,6 +1516,7 @@ export {
   CODE_TASK_MAX_DETAIL_TEXT,
   CODE_TASK_MAX_HISTORY,
   DEFAULT_CODE_TASK_WORKSPACE,
+  DEFAULT_DESKTOP_ASSISTANT_SETTINGS,
   DEFAULT_MODEL_SETTINGS,
   DEFAULT_SPEECH_INPUT_SETTINGS,
   DEFAULT_VISION_SETTINGS,
@@ -1529,6 +1556,7 @@ export {
   mergeToolEvents,
   normalizeDisplayEmotion,
   normalizeAssistantVoice,
+  normalizeDesktopAssistantSettings,
   normalizeLive2dEmotion,
   normalizeMessageContent,
   normalizeSpeechInputSettings,

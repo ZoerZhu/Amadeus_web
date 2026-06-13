@@ -3,6 +3,7 @@
 @import "./styles/topbar-controls.css";
 @import "./styles/docks.css";
 @import "./styles/conversation.css";
+@import "./styles/desktop-assistant.css";
 @import "./styles/tasks.css";
 @import "./styles/messages-tools.css";
 @import "./styles/composer-upload.css";

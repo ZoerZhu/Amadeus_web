@@ -1,0 +1,114 @@
+.desktop-assistant-entry {
+  min-height: 38px;
+  padding: 0 12px;
+}
+
+.is-desktop-assistant {
+  overflow: hidden;
+  background: transparent;
+}
+
+.is-desktop-assistant .stage-panel {
+  inset: 0;
+  overflow: visible;
+  background: transparent;
+  cursor: grab;
+  pointer-events: auto;
+}
+
+.is-desktop-assistant .stage-panel:active {
+  cursor: grabbing;
+}
+
+.is-desktop-assistant .stage-panel::before,
+.is-desktop-assistant .top-bar,
+.is-desktop-assistant .avatar-launcher,
+.is-desktop-assistant .live2d-quick-controls,
+.is-desktop-assistant .emotion-chip,
+.is-desktop-assistant .left-dock,
+.is-desktop-assistant .config-dock,
+.is-desktop-assistant .floating-conversation,
+.is-desktop-assistant .chat-edge-toggle,
+.is-desktop-assistant .chat-panel {
+  display: none;
+}
+
+.is-desktop-assistant .live2d-stage {
+  inset: 0;
+  min-width: 320px;
+  min-height: 420px;
+}
+
+.desktop-assistant-subtitle {
+  position: fixed;
+  left: 18px;
+  top: 48%;
+  z-index: 22;
+  width: min(250px, calc(100vw - 40px));
+  max-height: 210px;
+  overflow-y: auto;
+  padding: 13px 15px;
+  border: 1px solid rgba(255, 255, 255, 0.28);
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.1);
+  backdrop-filter: blur(18px) saturate(1.25);
+  color: #101011;
+  box-shadow: 0 18px 58px rgba(0, 0, 0, 0.14);
+  font-size: 0.9rem;
+  line-height: 1.55;
+  text-shadow: 0 1px 12px rgba(255, 255, 255, 0.8);
+  transform: translateY(-50%);
+  white-space: pre-wrap;
+}
+
+.desktop-assistant-controls {
+  position: fixed;
+  left: 50%;
+  bottom: 14px;
+  z-index: 24;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-height: 54px;
+  padding: 8px 10px;
+  border-radius: var(--radius-pill);
+  background: rgba(255, 255, 255, 0.72);
+  transform: translateX(-50%);
+}
+
+.desktop-assistant-controls .round-tool.is-active {
+  color: #fff;
+  background: #101011;
+}
+
+.desktop-assistant-controls .round-tool.is-busy svg {
+  animation: upload-spin 900ms linear infinite;
+}
+
+.desktop-assistant-frequency {
+  display: inline-flex;
+  align-items: center;
+  min-height: 38px;
+  gap: 3px;
+  padding: 0 9px;
+  border: 1px solid rgba(12, 12, 13, 0.08);
+  border-radius: var(--radius-pill);
+  background: rgba(255, 255, 255, 0.62);
+  color: var(--ink-soft);
+  font-size: 0.78rem;
+}
+
+.desktop-assistant-frequency input {
+  width: 38px;
+  border: 0;
+  outline: 0;
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  text-align: center;
+}
+
+.desktop-assistant-frequency input::-webkit-outer-spin-button,
+.desktop-assistant-frequency input::-webkit-inner-spin-button {
+  margin: 0;
+}

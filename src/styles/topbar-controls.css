@@ -12,6 +12,7 @@
   border-radius: 24px;
   background: rgba(255, 255, 255, 0.64);
   transform: translateX(-50%);
+  -webkit-app-region: drag;
 }
 
 .brand-mark,
@@ -70,6 +71,19 @@
 
 .top-actions {
   gap: 8px;
+  -webkit-app-region: no-drag;
+}
+
+.brand-mark {
+  -webkit-app-region: drag;
+}
+
+.model-switch,
+.segmented-control,
+.text-icon-button,
+.window-controls,
+.window-controls button {
+  -webkit-app-region: no-drag;
 }
 
 .model-switch {
@@ -185,6 +199,33 @@
 .primary-button {
   color: #fff;
   background: #101011;
+}
+
+.window-controls {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding-left: 2px;
+}
+
+.window-controls button {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  color: var(--ink-soft);
+  background: rgba(255, 255, 255, 0.58);
+  transition:
+    background 160ms ease,
+    color 160ms ease,
+    transform 160ms ease;
+}
+
+.window-controls button:hover {
+  color: var(--ink);
+  background: rgba(255, 255, 255, 0.9);
+  transform: translateY(-1px);
 }
 
 .send-button,

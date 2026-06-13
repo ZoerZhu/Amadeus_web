@@ -65,11 +65,20 @@ export interface VoiceSettings {
   gain: number;
 }
 
+export interface DesktopAssistantSettings {
+  subtitleEnabled: boolean;
+  voiceOutputEnabled: boolean;
+  autoScreenshotEnabled: boolean;
+  screenshotIntervalSeconds: number;
+  cameraEnabled: boolean;
+}
+
 export interface StoredSettings {
   model: ModelSettings;
   vision: VisionSettings;
   speechInput: SpeechInputSettings;
   voice: VoiceSettings;
+  desktopAssistant: DesktopAssistantSettings;
   mode: ChatMode;
   updatedAt?: string;
 }
@@ -184,6 +193,26 @@ export interface FileUploadResponse {
   data: {
     file: UploadedFileInfo;
   };
+}
+
+export interface DesktopObserveRequest {
+  prompt: string;
+  attachments: ChatAttachment[];
+  conversationId?: string | null;
+  saveResponse?: boolean;
+  model: ModelSettings;
+  vision: VisionSettings;
+}
+
+export interface DesktopObserveResponse {
+  ok: boolean;
+  shouldRespond: boolean;
+  response: string;
+  emotion: string;
+  reason: string;
+  visionSummary: string;
+  userMessage?: StoredConversationMessage;
+  assistantMessage?: StoredConversationMessage;
 }
 
 export type ToolTraceStatus = "started" | "completed" | "failed";

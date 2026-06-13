@@ -8,6 +8,8 @@ import type {
   CodeTaskMobileViewSnapshot,
   CodeTaskQuestionReplyRequest,
   CodeTaskStreamRequest,
+  DesktopObserveRequest,
+  DesktopObserveResponse,
   ChatMode,
   ConversationDetail,
   ConversationSummary,
@@ -115,6 +117,7 @@ export async function saveSettings(settings: StoredSettings): Promise<void> {
       vision: settings.vision,
       speechInput: settings.speechInput,
       voice: settings.voice,
+      desktopAssistant: settings.desktopAssistant,
       mode: settings.mode
     })
   });
@@ -122,6 +125,27 @@ export async function saveSettings(settings: StoredSettings): Promise<void> {
   if (!response.ok) {
     throw new Error(data.detail || `settings ${response.status}`);
   }
+}
+
+export async function observeDesktop(options: DesktopObserveRequest): Promise<DesktopObserveResponse> {
+  const response = await fetch("/api/desktop/observe", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      prompt: options.prompt,
+      attachments: options.attachments,
+      conversationId: options.conversationId || undefined,
+      saveResponse: options.saveResponse ?? false,
+      personaId: "kurisu_amadeus",
+      model: options.model,
+      vision: options.vision
+    })
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(data.detail || `desktop observe ${response.status}`);
+  }
+  return data;
 }
 
 export async function transcribeVoiceInput(options: {

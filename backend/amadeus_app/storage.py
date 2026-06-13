@@ -105,6 +105,7 @@ class SQLiteStorage:
                 vision_settings TEXT NOT NULL DEFAULT '{}',
                 speech_input_settings TEXT NOT NULL DEFAULT '{}',
                 voice_settings TEXT NOT NULL DEFAULT '{}',
+                desktop_assistant_settings TEXT NOT NULL DEFAULT '{}',
                 mode TEXT NOT NULL DEFAULT 'fast' CHECK (mode IN ('fast', 'thinking')),
                 updated_at TEXT NOT NULL
             );
@@ -146,6 +147,8 @@ class SQLiteStorage:
             conn.execute("ALTER TABLE app_settings ADD COLUMN vision_settings TEXT NOT NULL DEFAULT '{}'")
         if "speech_input_settings" not in app_settings_columns:
             conn.execute("ALTER TABLE app_settings ADD COLUMN speech_input_settings TEXT NOT NULL DEFAULT '{}'")
+        if "desktop_assistant_settings" not in app_settings_columns:
+            conn.execute("ALTER TABLE app_settings ADD COLUMN desktop_assistant_settings TEXT NOT NULL DEFAULT '{}'")
         chat_message_columns = {
             row["name"]
             for row in conn.execute("PRAGMA table_info(chat_messages)").fetchall()
@@ -161,7 +164,7 @@ class SQLiteStorage:
         conn = self.require_connection()
         row = conn.execute(
             """
-            SELECT model_settings, vision_settings, speech_input_settings, voice_settings, mode, updated_at
+            SELECT model_settings, vision_settings, speech_input_settings, voice_settings, desktop_assistant_settings, mode, updated_at
             FROM app_settings
             WHERE user_id = ?
             """,
@@ -174,6 +177,7 @@ class SQLiteStorage:
             "vision": _decode_json(row["vision_settings"]),
             "speechInput": _decode_json(row["speech_input_settings"]),
             "voice": _decode_json(row["voice_settings"]),
+            "desktopAssistant": _decode_json(row["desktop_assistant_settings"]),
             "mode": row["mode"],
             "updatedAt": row["updated_at"],
         }
@@ -186,10 +190,20 @@ class SQLiteStorage:
         vision: dict[str, Any],
         speech_input: dict[str, Any],
         voice: dict[str, Any],
+        desktop_assistant: dict[str, Any],
         mode: str,
     ) -> None:
         async with self._lock:
-            await asyncio.to_thread(self._save_settings_sync, user_id, model, vision, speech_input, voice, mode)
+            await asyncio.to_thread(
+                self._save_settings_sync,
+                user_id,
+                model,
+                vision,
+                speech_input,
+                voice,
+                desktop_assistant,
+                mode,
+            )
 
     def _save_settings_sync(
         self,
@@ -198,18 +212,20 @@ class SQLiteStorage:
         vision: dict[str, Any],
         speech_input: dict[str, Any],
         voice: dict[str, Any],
+        desktop_assistant: dict[str, Any],
         mode: str,
     ) -> None:
         conn = self.require_connection()
         conn.execute(
             """
-            INSERT INTO app_settings (user_id, model_settings, vision_settings, speech_input_settings, voice_settings, mode, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO app_settings (user_id, model_settings, vision_settings, speech_input_settings, voice_settings, desktop_assistant_settings, mode, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(user_id) DO UPDATE SET
                 model_settings = excluded.model_settings,
                 vision_settings = excluded.vision_settings,
                 speech_input_settings = excluded.speech_input_settings,
                 voice_settings = excluded.voice_settings,
+                desktop_assistant_settings = excluded.desktop_assistant_settings,
                 mode = excluded.mode,
                 updated_at = excluded.updated_at
             """,
@@ -219,6 +235,7 @@ class SQLiteStorage:
                 json.dumps(vision, ensure_ascii=False),
                 json.dumps(speech_input, ensure_ascii=False),
                 json.dumps(voice, ensure_ascii=False),
+                json.dumps(desktop_assistant, ensure_ascii=False),
                 mode,
                 _now_iso(),
             ),

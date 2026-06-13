@@ -10,6 +10,7 @@ const HEALTH_URL = `${BACKEND_URL}/api/health`;
 let mainWindow = null;
 let backendProcess = null;
 let quitting = false;
+let normalWindowState = null;
 
 function resolveBackendPath() {
   const candidates = [
@@ -87,8 +88,10 @@ async function createWindow() {
     height: 820,
     minWidth: 960,
     minHeight: 640,
-    backgroundColor: "#05060a",
+    backgroundColor: "#00000000",
     title: "Amadeus",
+    frame: false,
+    transparent: true,
     webPreferences: {
       preload: path.join(__dirname, "preload.cjs"),
       contextIsolation: true,
@@ -98,6 +101,103 @@ async function createWindow() {
 
   await waitForBackend();
   await mainWindow.loadURL(BACKEND_URL);
+}
+
+function setDesktopAssistantMode(enabled) {
+  if (!mainWindow) {
+    return { ok: false, reason: "Window is not ready." };
+  }
+
+  if (enabled) {
+    if (!normalWindowState) {
+      normalWindowState = {
+        bounds: mainWindow.getBounds(),
+        minimumSize: mainWindow.getMinimumSize(),
+        resizable: mainWindow.isResizable(),
+        movable: mainWindow.isMovable(),
+        alwaysOnTop: mainWindow.isAlwaysOnTop(),
+      };
+    }
+    const display = screen.getDisplayMatching(mainWindow.getBounds());
+    const width = 460;
+    const height = 680;
+    const nextBounds = {
+      width,
+      height,
+      x: Math.round(display.workArea.x + display.workArea.width - width - 36),
+      y: Math.round(display.workArea.y + display.workArea.height - height - 36),
+    };
+    mainWindow.setMinimumSize(320, 420);
+    mainWindow.setResizable(false);
+    mainWindow.setMovable(true);
+    mainWindow.setAlwaysOnTop(true, "floating");
+    mainWindow.setSkipTaskbar(false);
+    mainWindow.setBackgroundColor("#00000000");
+    mainWindow.setBounds(nextBounds, true);
+    return { ok: true, bounds: nextBounds };
+  }
+
+  const state = normalWindowState;
+  normalWindowState = null;
+  mainWindow.setAlwaysOnTop(Boolean(state?.alwaysOnTop));
+  mainWindow.setResizable(state?.resizable ?? true);
+  mainWindow.setMovable(state?.movable ?? true);
+  mainWindow.setMinimumSize(...(state?.minimumSize ?? [960, 640]));
+  mainWindow.setBackgroundColor("#05060a");
+  if (state?.bounds) {
+    mainWindow.setBounds(state.bounds, true);
+  }
+  return { ok: true, bounds: mainWindow.getBounds() };
+}
+
+function moveAssistantWindow(delta) {
+  if (!mainWindow) {
+    return { ok: false, reason: "Window is not ready." };
+  }
+  const dx = Number(delta?.dx || 0);
+  const dy = Number(delta?.dy || 0);
+  if (!Number.isFinite(dx) || !Number.isFinite(dy)) {
+    return { ok: false, reason: "Invalid window delta." };
+  }
+  const bounds = mainWindow.getBounds();
+  const nextBounds = {
+    ...bounds,
+    x: Math.round(bounds.x + dx),
+    y: Math.round(bounds.y + dy),
+  };
+  mainWindow.setBounds(nextBounds, false);
+  return { ok: true, bounds: nextBounds };
+}
+
+async function getCameraAvailability() {
+  return {
+    available: true,
+    reason: "",
+    source: "electron",
+  };
+}
+
+function runWindowCommand(command) {
+  if (!mainWindow) {
+    return { ok: false, reason: "Window is not ready." };
+  }
+  if (command === "minimize") {
+    mainWindow.minimize();
+    return { ok: true };
+  }
+  if (command === "toggle-maximize") {
+    if (mainWindow.isMaximized()) {
+      mainWindow.unmaximize();
+    } else {
+      mainWindow.maximize();
+    }
+    return { ok: true, maximized: mainWindow.isMaximized() };
+  }
+  if (command === "close") {
+    mainWindow.close();
+    return { ok: true };
+  }
+  return { ok: false, reason: "Unknown window command." };
 }
 
 function stopBackend() {
@@ -156,6 +256,10 @@ app.whenReady().then(async () => {
       return result.filePaths[0];
     });
     ipcMain.handle("amadeus:capture-screen", async () => capturePrimaryScreen());
+    ipcMain.handle("amadeus:set-desktop-assistant-mode", async (_event, enabled) => setDesktopAssistantMode(Boolean(enabled)));
+    ipcMain.handle("amadeus:move-assistant-window", async (_event, delta) => moveAssistantWindow(delta));
+    ipcMain.handle("amadeus:get-camera-availability", async () => getCameraAvailability());
+    ipcMain.handle("amadeus:window-command", async (_event, command) => runWindowCommand(command));
     startBackend();
     await createWindow();
   } catch (error) {

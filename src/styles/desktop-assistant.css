@@ -3,15 +3,25 @@
   padding: 0 12px;
 }
 
+html.desktop-assistant-active,
+html.desktop-assistant-active body,
+html.desktop-assistant-active #root {
+  background: transparent !important;
+}
+
+body.desktop-assistant-active {
+  background-color: transparent !important;
+}
+
 .is-desktop-assistant {
   overflow: hidden;
-  background: transparent;
+  background: transparent !important;
 }
 
 .is-desktop-assistant .stage-panel {
   inset: 0;
   overflow: visible;
-  background: transparent;
+  background: transparent !important;
   cursor: grab;
   pointer-events: auto;
 }
@@ -37,6 +47,11 @@
   inset: 0;
   min-width: 320px;
   min-height: 420px;
+  background: transparent !important;
+}
+
+.is-desktop-assistant .live2d-canvas {
+  background: transparent !important;
 }
 
 .desktop-assistant-subtitle {
@@ -72,7 +87,11 @@
   min-height: 54px;
   padding: 8px 10px;
   border-radius: var(--radius-pill);
-  background: rgba(255, 255, 255, 0.72);
+  border: 0 !important;
+  background: transparent !important;
+  box-shadow: none !important;
+  backdrop-filter: none !important;
+  -webkit-backdrop-filter: none !important;
   transform: translateX(-50%);
 }
 

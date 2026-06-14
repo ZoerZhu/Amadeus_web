@@ -72,6 +72,7 @@ const DEFAULT_VOICE_SETTINGS: VoiceSettings = {
 const DEFAULT_DESKTOP_ASSISTANT_SETTINGS: DesktopAssistantSettings = {
   subtitleEnabled: true,
   voiceOutputEnabled: false,
+  autoVoiceInputEnabled: true,
   autoScreenshotEnabled: false,
   screenshotIntervalSeconds: 15,
   cameraEnabled: false
@@ -82,6 +83,7 @@ function normalizeDesktopAssistantSettings(value?: Partial<DesktopAssistantSetti
   return {
     subtitleEnabled: Boolean(merged.subtitleEnabled),
     voiceOutputEnabled: Boolean(merged.voiceOutputEnabled),
+    autoVoiceInputEnabled: Boolean(merged.autoVoiceInputEnabled),
     autoScreenshotEnabled: Boolean(merged.autoScreenshotEnabled),
     screenshotIntervalSeconds: clamp(Number(merged.screenshotIntervalSeconds || 15), 5, 120),
     cameraEnabled: Boolean(merged.cameraEnabled)
@@ -227,7 +229,7 @@ declare global {
     amadeusDesktop?: {
       selectFolder?: () => Promise<string | null>;
       captureScreen?: () => Promise<{ dataUrl: string; filename: string } | null>;
-      setDesktopAssistantMode?: (enabled: boolean) => Promise<{ ok: boolean; reason?: string }>;
+      setDesktopAssistantMode?: (enabled: boolean) => Promise<{ ok: boolean; reason?: string; externalWindow?: boolean }>;
       moveAssistantWindow?: (delta: { dx: number; dy: number }) => Promise<{ ok: boolean; reason?: string }>;
       getCameraAvailability?: () => Promise<{ available: boolean; reason?: string; source?: string }>;
       windowCommand?: (command: "minimize" | "toggle-maximize" | "close") => Promise<{ ok: boolean; reason?: string }>;

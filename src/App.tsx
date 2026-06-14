@@ -149,6 +149,9 @@ import {
 export default function App() {
   const stored = useMemo(loadStoredSettings, []);
   const storedCodeTasks = useMemo(loadStoredCodeTasks, []);
+  const launchedAsDesktopAssistant = useMemo(() => {
+    return new URLSearchParams(window.location.search).get("desktopAssistant") === "1";
+  }, []);
   const [providers, setProviders] = useState<ProviderPreset[]>([]);
   const [storageOnline, setStorageOnline] = useState(false);
   const [storageError, setStorageError] = useState("");
@@ -208,15 +211,16 @@ export default function App() {
   const [voiceRecording, setVoiceRecording] = useState(false);
   const [voiceRecordingSeconds, setVoiceRecordingSeconds] = useState(0);
   const [voiceInputLevels, setVoiceInputLevels] = useState<number[]>(Array.from({ length: 18 }, () => 0.24));
-  const [desktopAssistantMode, setDesktopAssistantMode] = useState(false);
+  const [desktopAssistantMode, setDesktopAssistantMode] = useState(launchedAsDesktopAssistant);
   const [desktopAssistantStatus, setDesktopAssistantStatus] = useState("待机");
+  const [desktopSubtitleVisibleUntil, setDesktopSubtitleVisibleUntil] = useState(0);
   const [desktopCameraAvailable, setDesktopCameraAvailable] = useState(false);
   const [desktopCameraReason, setDesktopCameraReason] = useState("尚未检测摄像头");
   const [desktopObserveBusy, setDesktopObserveBusy] = useState(false);
   const [live2dReady, setLive2dReady] = useState(false);
   const [live2dError, setLive2dError] = useState("");
   const [minimumBootElapsed, setMinimumBootElapsed] = useState(false);
-  const [enteredApp, setEnteredApp] = useState(false);
+  const [enteredApp, setEnteredApp] = useState(launchedAsDesktopAssistant);
   const live2dRef = useRef<Live2DStageHandle | null>(null);
   const activeLive2DModelRef = useRef<Live2DModelRecord>(DEFAULT_LIVE2D_MODEL);
   const abortRef = useRef<AbortController | null>(null);
@@ -286,8 +290,10 @@ export default function App() {
   const desktopVadCooldownUntilRef = useRef(0);
   const desktopAssistantModeRef = useRef(false);
   const desktopAutoScreenshotTimerRef = useRef<number | null>(null);
+  const desktopSubtitleTimerRef = useRef<number | null>(null);
   const desktopDragRef = useRef<{ x: number; y: number } | null>(null);
   const desktopObservationBusyRef = useRef(false);
+  const desktopAssistantLaunchInitializedRef = useRef(false);
 
   const selectedProvider = providers.find((provider) => provider.name === modelSettings.providerName);
   const desktopAssistantAvailable = Boolean(window.amadeusDesktop?.setDesktopAssistantMode);
@@ -515,18 +521,55 @@ export default function App() {
 
   useEffect(() => {
     desktopAssistantModeRef.current = desktopAssistantMode;
+    document.documentElement.classList.toggle("desktop-assistant-active", desktopAssistantMode);
+    document.body.classList.toggle("desktop-assistant-active", desktopAssistantMode);
+    return () => {
+      document.documentElement.classList.remove("desktop-assistant-active");
+      document.body.classList.remove("desktop-assistant-active");
+    };
   }, [desktopAssistantMode]);
 
   useEffect(() => {
-    if (!desktopAssistantMode) {
+    if (!launchedAsDesktopAssistant || !storageOnline || desktopAssistantLaunchInitializedRef.current) {
+      return;
+    }
+    desktopAssistantLaunchInitializedRef.current = true;
+    stopAudioPlayback();
+    abortRef.current?.abort();
+    setMenuOpen(false);
+    setConfigOpen(false);
+    setChatOpen(false);
+    setUploadedFiles([]);
+    setUploadPanelOpen(false);
+    setDesktopAssistantSettings((prev) => ({
+      ...prev,
+      voiceOutputEnabled: prev.voiceOutputEnabled || voiceSettings.autoPlay
+    }));
+    setDesktopAssistantMode(true);
+    setDesktopAssistantStatus("监听中");
+    void createDesktopAssistantConversation();
+    void refreshDesktopCameraAvailability();
+  }, [launchedAsDesktopAssistant, storageOnline, voiceSettings.autoPlay]);
+
+  useEffect(() => {
+    if (!desktopAssistantMode || !desktopAssistantSettings.autoVoiceInputEnabled) {
       stopDesktopAssistantListening();
+      if (desktopAssistantMode && !desktopAssistantSettings.autoVoiceInputEnabled && !voiceRecording && !voiceInputBusy) {
+        setDesktopAssistantStatus("手动语音");
+      }
       return;
     }
     void startDesktopAssistantListening();
     return () => {
       stopDesktopAssistantListening();
     };
-  }, [desktopAssistantMode, speechInputSettings.enabled]);
+  }, [
+    desktopAssistantMode,
+    desktopAssistantSettings.autoVoiceInputEnabled,
+    speechInputSettings.enabled,
+    voiceRecording,
+    voiceInputBusy
+  ]);
 
   useEffect(() => {
     if (desktopAutoScreenshotTimerRef.current !== null) {
@@ -719,6 +762,9 @@ export default function App() {
       }
       if (mobileTaskViewFrameRef.current !== null) {
         window.cancelAnimationFrame(mobileTaskViewFrameRef.current);
+      }
+      if (desktopSubtitleTimerRef.current !== null) {
+        window.clearTimeout(desktopSubtitleTimerRef.current);
       }
       stopAudioPlayback();
       cleanupVoiceRecordingResources();
@@ -1105,6 +1151,44 @@ export default function App() {
     }
   }
 
+  function toggleDesktopAutoVoiceInput() {
+    const nextEnabled = !desktopAssistantSettings.autoVoiceInputEnabled;
+    if (nextEnabled && voiceRecording) {
+      stopVoiceInputRecording();
+    }
+    if (!nextEnabled) {
+      stopDesktopAssistantListening();
+      setDesktopAssistantStatus("手动语音");
+    }
+    setDesktopAssistantSettings((prev) => ({
+      ...prev,
+      autoVoiceInputEnabled: nextEnabled
+    }));
+  }
+
+  function retainDesktopSubtitleAfterOutput() {
+    if (!desktopAssistantModeRef.current) {
+      return;
+    }
+    const visibleUntil = Date.now() + 60_000;
+    setDesktopSubtitleVisibleUntil(visibleUntil);
+    if (desktopSubtitleTimerRef.current !== null) {
+      window.clearTimeout(desktopSubtitleTimerRef.current);
+    }
+    desktopSubtitleTimerRef.current = window.setTimeout(() => {
+      desktopSubtitleTimerRef.current = null;
+      setDesktopSubtitleVisibleUntil((current) => (current === visibleUntil ? 0 : current));
+    }, 60_000);
+  }
+
+  function clearDesktopSubtitleRetention() {
+    if (desktopSubtitleTimerRef.current !== null) {
+      window.clearTimeout(desktopSubtitleTimerRef.current);
+      desktopSubtitleTimerRef.current = null;
+    }
+    setDesktopSubtitleVisibleUntil(0);
+  }
+
   async function enterDesktopAssistantMode() {
     if (!desktopAssistantAvailable) {
       setStatus("desktop only");
@@ -1121,12 +1205,17 @@ export default function App() {
       ...prev,
       voiceOutputEnabled: prev.voiceOutputEnabled || voiceSettings.autoPlay
     }));
-    const result = await window.amadeusDesktop?.setDesktopAssistantMode?.(true).catch((error) => ({
+    const result: { ok: boolean; reason?: string; externalWindow?: boolean } | undefined =
+      await window.amadeusDesktop?.setDesktopAssistantMode?.(true).catch((error) => ({
       ok: false,
       reason: error instanceof Error ? error.message : "桌面助手窗口切换失败"
     }));
     if (result && !result.ok) {
       setStatus(result.reason || "desktop assistant failed");
+      return;
+    }
+    if (result?.externalWindow) {
+      setStatus("desktop assistant opened");
       return;
     }
     await createDesktopAssistantConversation();
@@ -1138,6 +1227,7 @@ export default function App() {
   async function exitDesktopAssistantMode() {
     setDesktopAssistantMode(false);
     setDesktopAssistantStatus("待机");
+    clearDesktopSubtitleRetention();
     stopDesktopAssistantListening();
     if (desktopAutoScreenshotTimerRef.current !== null) {
       window.clearInterval(desktopAutoScreenshotTimerRef.current);
@@ -1876,10 +1966,16 @@ export default function App() {
       }, 150);
       setVoiceRecording(true);
       setStatus("listening");
+      if (desktopAssistantModeRef.current) {
+        setDesktopAssistantStatus("录音中");
+      }
     } catch (error) {
       cleanupVoiceRecordingResources();
       setVoiceRecording(false);
       setStatus(error instanceof Error ? error.message : "mic failed");
+      if (desktopAssistantModeRef.current) {
+        setDesktopAssistantStatus(error instanceof Error ? error.message : "麦克风启动失败");
+      }
     }
   }
 
@@ -1889,6 +1985,9 @@ export default function App() {
       return;
     }
     setStatus("transcribing");
+    if (desktopAssistantModeRef.current) {
+      setDesktopAssistantStatus("识别中");
+    }
     recorder.stop();
   }
 
@@ -2143,6 +2242,7 @@ export default function App() {
       });
       const assistant = chatItems.find((message) => message.role === "assistant");
       if (assistant) {
+        retainDesktopSubtitleAfterOutput();
         setCurrentEmotion(normalizeDisplayEmotion(result.emotion));
         live2dRef.current?.playEmotion(normalizeLive2dEmotion(result.emotion, result.emotion));
         if (desktopAssistantSettings.voiceOutputEnabled) {
@@ -2416,6 +2516,7 @@ export default function App() {
         setAssistantVoice(assistantId, event.payload.assistantVoice);
       }
       finalizeAssistant(assistantId);
+      retainDesktopSubtitleAfterOutput();
       setStatus("done");
       if (desktopAssistantModeRef.current) {
         setDesktopAssistantStatus("监听中");
@@ -3448,10 +3549,13 @@ export default function App() {
 
   function desktopAssistantSubtitleText(): string {
     const latestAssistant = [...messages].reverse().find((message) => message.role === "assistant" && message.content.trim());
-    if (latestAssistant?.content.trim()) {
+    if (!latestAssistant) {
+      return "";
+    }
+    if (latestAssistant.streaming || desktopSubtitleVisibleUntil > Date.now()) {
       return latestAssistant.content.trim();
     }
-    return desktopAssistantStatus;
+    return "";
   }
 
   function renderDesktopAssistantSubtitle() {
@@ -3502,6 +3606,27 @@ export default function App() {
         >
           {desktopAssistantSettings.voiceOutputEnabled ? <Volume2 size={17} /> : <VolumeX size={17} />}
         </button>
+        <button
+          className={`round-tool ${desktopAssistantSettings.autoVoiceInputEnabled ? "is-active" : ""}`}
+          onClick={toggleDesktopAutoVoiceInput}
+          type="button"
+          title={desktopAssistantSettings.autoVoiceInputEnabled ? "关闭自动语音输入" : "开启自动语音输入"}
+          aria-label={desktopAssistantSettings.autoVoiceInputEnabled ? "关闭自动语音输入" : "开启自动语音输入"}
+        >
+          <Mic size={17} />
+        </button>
+        {!desktopAssistantSettings.autoVoiceInputEnabled && (
+          <button
+            className={`round-tool voice-input-trigger ${voiceRecording ? "is-recording" : ""} ${voiceInputBusy ? "is-busy" : ""}`}
+            disabled={voiceInputBusy || isStreaming}
+            onClick={toggleVoiceInputRecording}
+            type="button"
+            title={voiceRecording ? "停止语音输入" : "手动语音输入"}
+            aria-label={voiceRecording ? "停止语音输入" : "手动语音输入"}
+          >
+            {voiceRecording ? <CircleStop size={17} /> : <Mic2 size={17} />}
+          </button>
+        )}
         <button
           className={`round-tool ${desktopAssistantSettings.cameraEnabled ? "is-active" : ""}`}
           disabled={!desktopCameraAvailable}

@@ -68,6 +68,7 @@ export interface VoiceSettings {
 export interface DesktopAssistantSettings {
   subtitleEnabled: boolean;
   voiceOutputEnabled: boolean;
+  autoVoiceInputEnabled: boolean;
   autoScreenshotEnabled: boolean;
   screenshotIntervalSeconds: number;
   cameraEnabled: boolean;

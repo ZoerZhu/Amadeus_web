@@ -8,6 +8,7 @@ const BACKEND_URL = `http://127.0.0.1:${BACKEND_PORT}`;
 const HEALTH_URL = `${BACKEND_URL}/api/health`;
 
 let mainWindow = null;
+let assistantWindow = null;
 let backendProcess = null;
 let quitting = false;
 let normalWindowState = null;
@@ -103,6 +104,54 @@ async function createWindow() {
   await mainWindow.loadURL(BACKEND_URL);
 }
 
+async function createAssistantWindow() {
+  if (assistantWindow && !assistantWindow.isDestroyed()) {
+    assistantWindow.focus();
+    return assistantWindow;
+  }
+  const anchorBounds = mainWindow?.getBounds() || screen.getPrimaryDisplay().workArea;
+  const display = screen.getDisplayMatching(anchorBounds);
+  const width = 460;
+  const height = 680;
+  const bounds = {
+    width,
+    height,
+    x: Math.round(display.workArea.x + display.workArea.width - width - 36),
+    y: Math.round(display.workArea.y + display.workArea.height - height - 36),
+  };
+  assistantWindow = new BrowserWindow({
+    ...bounds,
+    minWidth: 320,
+    minHeight: 420,
+    resizable: false,
+    movable: true,
+    frame: false,
+    transparent: true,
+    backgroundColor: "#00000000",
+    titleBarStyle: "hidden",
+    hasShadow: false,
+    thickFrame: false,
+    skipTaskbar: true,
+    alwaysOnTop: true,
+    webPreferences: {
+      preload: path.join(__dirname, "preload.cjs"),
+      contextIsolation: true,
+      nodeIntegration: false,
+    },
+  });
+  assistantWindow.setAlwaysOnTop(true, "floating");
+  assistantWindow.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
+  assistantWindow.on("closed", () => {
+    assistantWindow = null;
+    if (!quitting && mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.show();
+      mainWindow.focus();
+    }
+  });
+  await assistantWindow.loadURL(`${BACKEND_URL}/?desktopAssistant=1`);
+  return assistantWindow;
+}
+
 function setDesktopAssistantMode(enabled) {
   if (!mainWindow) {
     return { ok: false, reason: "Window is not ready." };
@@ -118,27 +167,25 @@ function setDesktopAssistantMode(enabled) {
         alwaysOnTop: mainWindow.isAlwaysOnTop(),
       };
     }
-    const display = screen.getDisplayMatching(mainWindow.getBounds());
-    const width = 460;
-    const height = 680;
-    const nextBounds = {
-      width,
-      height,
-      x: Math.round(display.workArea.x + display.workArea.width - width - 36),
-      y: Math.round(display.workArea.y + display.workArea.height - height - 36),
-    };
-    mainWindow.setMinimumSize(320, 420);
-    mainWindow.setResizable(false);
-    mainWindow.setMovable(true);
-    mainWindow.setAlwaysOnTop(true, "floating");
-    mainWindow.setSkipTaskbar(false);
-    mainWindow.setBackgroundColor("#00000000");
-    mainWindow.setBounds(nextBounds, true);
-    return { ok: true, bounds: nextBounds };
+    createAssistantWindow()
+      .then(() => {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.hide();
+        }
+      })
+      .catch((error) => {
+        dialog.showErrorBox("桌面助手启动失败", error instanceof Error ? error.message : String(error));
+      });
+    return { ok: true, externalWindow: true };
   }
 
   const state = normalWindowState;
   normalWindowState = null;
+  if (assistantWindow && !assistantWindow.isDestroyed()) {
+    const windowToClose = assistantWindow;
+    assistantWindow = null;
+    windowToClose.close();
+  }
   mainWindow.setAlwaysOnTop(Boolean(state?.alwaysOnTop));
   mainWindow.setResizable(state?.resizable ?? true);
   mainWindow.setMovable(state?.movable ?? true);
@@ -147,11 +194,14 @@ function setDesktopAssistantMode(enabled) {
   if (state?.bounds) {
     mainWindow.setBounds(state.bounds, true);
   }
+  mainWindow.show();
+  mainWindow.focus();
   return { ok: true, bounds: mainWindow.getBounds() };
 }
 
-function moveAssistantWindow(delta) {
-  if (!mainWindow) {
+function moveAssistantWindow(delta, sourceWindow) {
+  const targetWindow = sourceWindow || assistantWindow || mainWindow;
+  if (!targetWindow || targetWindow.isDestroyed()) {
     return { ok: false, reason: "Window is not ready." };
   }
   const dx = Number(delta?.dx || 0);
@@ -159,13 +209,13 @@ function moveAssistantWindow(delta) {
   if (!Number.isFinite(dx) || !Number.isFinite(dy)) {
     return { ok: false, reason: "Invalid window delta." };
   }
-  const bounds = mainWindow.getBounds();
+  const bounds = targetWindow.getBounds();
   const nextBounds = {
     ...bounds,
     x: Math.round(bounds.x + dx),
     y: Math.round(bounds.y + dy),
   };
-  mainWindow.setBounds(nextBounds, false);
+  targetWindow.setBounds(nextBounds, false);
   return { ok: true, bounds: nextBounds };
 }
 
@@ -177,24 +227,25 @@ async function getCameraAvailability() {
   };
 }
 
-function runWindowCommand(command) {
-  if (!mainWindow) {
+function runWindowCommand(command, sourceWindow) {
+  const targetWindow = sourceWindow || mainWindow;
+  if (!targetWindow || targetWindow.isDestroyed()) {
     return { ok: false, reason: "Window is not ready." };
   }
   if (command === "minimize") {
-    mainWindow.minimize();
+    targetWindow.minimize();
     return { ok: true };
   }
   if (command === "toggle-maximize") {
-    if (mainWindow.isMaximized()) {
-      mainWindow.unmaximize();
+    if (targetWindow.isMaximized()) {
+      targetWindow.unmaximize();
     } else {
-      mainWindow.maximize();
+      targetWindow.maximize();
     }
-    return { ok: true, maximized: mainWindow.isMaximized() };
+    return { ok: true, maximized: targetWindow.isMaximized() };
   }
   if (command === "close") {
-    mainWindow.close();
+    targetWindow.close();
     return { ok: true };
   }
   return { ok: false, reason: "Unknown window command." };
@@ -257,9 +308,9 @@ app.whenReady().then(async () => {
     });
     ipcMain.handle("amadeus:capture-screen", async () => capturePrimaryScreen());
     ipcMain.handle("amadeus:set-desktop-assistant-mode", async (_event, enabled) => setDesktopAssistantMode(Boolean(enabled)));
-    ipcMain.handle("amadeus:move-assistant-window", async (_event, delta) => moveAssistantWindow(delta));
+    ipcMain.handle("amadeus:move-assistant-window", async (event, delta) => moveAssistantWindow(delta, BrowserWindow.fromWebContents(event.sender)));
     ipcMain.handle("amadeus:get-camera-availability", async () => getCameraAvailability());
-    ipcMain.handle("amadeus:window-command", async (_event, command) => runWindowCommand(command));
+    ipcMain.handle("amadeus:window-command", async (event, command) => runWindowCommand(command, BrowserWindow.fromWebContents(event.sender)));
     startBackend();
     await createWindow();
   } catch (error) {

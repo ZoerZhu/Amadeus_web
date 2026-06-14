@@ -80,6 +80,7 @@ class DesktopAssistantSettings(BaseModel):
 
     subtitle_enabled: bool = Field(default=True, alias="subtitleEnabled")
     voice_output_enabled: bool = Field(default=False, alias="voiceOutputEnabled")
+    auto_voice_input_enabled: bool = Field(default=True, alias="autoVoiceInputEnabled")
     auto_screenshot_enabled: bool = Field(default=False, alias="autoScreenshotEnabled")
     screenshot_interval_seconds: int = Field(default=15, alias="screenshotIntervalSeconds")
     camera_enabled: bool = Field(default=False, alias="cameraEnabled")

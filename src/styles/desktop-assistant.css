@@ -18,16 +18,18 @@ body.desktop-assistant-active {
   background: transparent !important;
 }
 
+.is-desktop-assistant.is-desktop-assistant-exiting {
+  opacity: 0;
+  pointer-events: none;
+  background: transparent !important;
+}
+
 .is-desktop-assistant .stage-panel {
   inset: 0;
   overflow: visible;
   background: transparent !important;
-  cursor: grab;
-  pointer-events: auto;
-}
-
-.is-desktop-assistant .stage-panel:active {
-  cursor: grabbing;
+  cursor: default;
+  pointer-events: none;
 }
 
 .is-desktop-assistant .stage-panel::before,
@@ -48,10 +50,30 @@ body.desktop-assistant-active {
   min-width: 320px;
   min-height: 420px;
   background: transparent !important;
+  pointer-events: none;
 }
 
 .is-desktop-assistant .live2d-canvas {
   background: transparent !important;
+}
+
+.desktop-assistant-drag-zone {
+  position: absolute;
+  left: 25%;
+  top: 8%;
+  z-index: 14;
+  width: 58%;
+  height: 78%;
+  border-radius: 44% 44% 28% 28%;
+  clip-path: polygon(34% 0, 70% 0, 88% 18%, 100% 74%, 78% 100%, 20% 100%, 0 74%, 12% 18%);
+  cursor: grab;
+  pointer-events: auto;
+  touch-action: none;
+  user-select: none;
+}
+
+.desktop-assistant-drag-zone:active {
+  cursor: grabbing;
 }
 
 .desktop-assistant-subtitle {
@@ -74,6 +96,7 @@ body.desktop-assistant-active {
   text-shadow: 0 1px 12px rgba(255, 255, 255, 0.8);
   transform: translateY(-50%);
   white-space: pre-wrap;
+  pointer-events: auto;
 }
 
 .desktop-assistant-controls {
@@ -93,6 +116,7 @@ body.desktop-assistant-active {
   backdrop-filter: none !important;
   -webkit-backdrop-filter: none !important;
   transform: translateX(-50%);
+  pointer-events: auto;
 }
 
 .desktop-assistant-controls .round-tool.is-active {

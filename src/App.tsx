@@ -212,6 +212,7 @@ export default function App() {
   const [voiceRecordingSeconds, setVoiceRecordingSeconds] = useState(0);
   const [voiceInputLevels, setVoiceInputLevels] = useState<number[]>(Array.from({ length: 18 }, () => 0.24));
   const [desktopAssistantMode, setDesktopAssistantMode] = useState(launchedAsDesktopAssistant);
+  const [desktopAssistantExiting, setDesktopAssistantExiting] = useState(false);
   const [desktopAssistantStatus, setDesktopAssistantStatus] = useState("待机");
   const [desktopSubtitleVisibleUntil, setDesktopSubtitleVisibleUntil] = useState(0);
   const [desktopCameraAvailable, setDesktopCameraAvailable] = useState(false);
@@ -291,7 +292,10 @@ export default function App() {
   const desktopAssistantModeRef = useRef(false);
   const desktopAutoScreenshotTimerRef = useRef<number | null>(null);
   const desktopSubtitleTimerRef = useRef<number | null>(null);
-  const desktopDragRef = useRef<{ x: number; y: number } | null>(null);
+  const desktopDragRef = useRef<{ pointerId: number; x: number; y: number } | null>(null);
+  const desktopDragFrameRef = useRef<number | null>(null);
+  const desktopDragPendingDeltaRef = useRef<{ dx: number; dy: number } | null>(null);
+  const desktopMousePassthroughRef = useRef<boolean | null>(null);
   const desktopObservationBusyRef = useRef(false);
   const desktopAssistantLaunchInitializedRef = useRef(false);
 
@@ -530,6 +534,20 @@ export default function App() {
   }, [desktopAssistantMode]);
 
   useEffect(() => {
+    const unsubscribe = window.amadeusDesktop?.onDesktopAssistantModeChanged?.((enabled) => {
+      if (enabled) {
+        return;
+      }
+      setDesktopAssistantExiting(false);
+      setDesktopAssistantMode(false);
+      cleanupDesktopAssistantRuntime();
+    });
+    return () => {
+      unsubscribe?.();
+    };
+  }, []);
+
+  useEffect(() => {
     if (!launchedAsDesktopAssistant || !storageOnline || desktopAssistantLaunchInitializedRef.current) {
       return;
     }
@@ -570,6 +588,46 @@ export default function App() {
     voiceRecording,
     voiceInputBusy
   ]);
+
+  useEffect(() => {
+    if (!desktopAssistantMode || !window.amadeusDesktop?.setAssistantMousePassthrough) {
+      return;
+    }
+
+    const setPassthrough = (ignore: boolean) => {
+      if (desktopMousePassthroughRef.current === ignore) {
+        return;
+      }
+      desktopMousePassthroughRef.current = ignore;
+      void window.amadeusDesktop?.setAssistantMousePassthrough?.(ignore).catch(() => undefined);
+    };
+
+    const isPointCapturedByDesktopAssistant = (x: number, y: number) => {
+      if (desktopDragRef.current) {
+        return true;
+      }
+      const element = document.elementFromPoint(x, y);
+      if (element?.closest(".desktop-assistant-controls, .desktop-assistant-subtitle, .desktop-assistant-drag-zone")) {
+        return true;
+      }
+      return false;
+    };
+
+    const handleMove = (event: MouseEvent) => {
+      setPassthrough(!isPointCapturedByDesktopAssistant(event.clientX, event.clientY));
+    };
+    const handleLeave = () => setPassthrough(true);
+
+    window.addEventListener("mousemove", handleMove, { passive: true });
+    window.addEventListener("mouseleave", handleLeave);
+    setPassthrough(true);
+    return () => {
+      window.removeEventListener("mousemove", handleMove);
+      window.removeEventListener("mouseleave", handleLeave);
+      desktopMousePassthroughRef.current = null;
+      void window.amadeusDesktop?.setAssistantMousePassthrough?.(false).catch(() => undefined);
+    };
+  }, [desktopAssistantMode]);
 
   useEffect(() => {
     if (desktopAutoScreenshotTimerRef.current !== null) {
@@ -765,6 +823,9 @@ export default function App() {
       }
       if (desktopSubtitleTimerRef.current !== null) {
         window.clearTimeout(desktopSubtitleTimerRef.current);
+      }
+      if (desktopDragFrameRef.current !== null) {
+        window.cancelAnimationFrame(desktopDragFrameRef.current);
       }
       stopAudioPlayback();
       cleanupVoiceRecordingResources();
@@ -1189,11 +1250,24 @@ export default function App() {
     setDesktopSubtitleVisibleUntil(0);
   }
 
+  function cleanupDesktopAssistantRuntime() {
+    setDesktopAssistantStatus("待机");
+    clearDesktopSubtitleRetention();
+    stopDesktopWindowDrag();
+    setDesktopAssistantPassthrough(false);
+    stopDesktopAssistantListening();
+    if (desktopAutoScreenshotTimerRef.current !== null) {
+      window.clearInterval(desktopAutoScreenshotTimerRef.current);
+      desktopAutoScreenshotTimerRef.current = null;
+    }
+  }
+
   async function enterDesktopAssistantMode() {
     if (!desktopAssistantAvailable) {
       setStatus("desktop only");
       return;
     }
+    setDesktopAssistantExiting(false);
     stopAudioPlayback();
     abortRef.current?.abort();
     setMenuOpen(false);
@@ -1225,40 +1299,84 @@ export default function App() {
   }
 
   async function exitDesktopAssistantMode() {
-    setDesktopAssistantMode(false);
-    setDesktopAssistantStatus("待机");
-    clearDesktopSubtitleRetention();
-    stopDesktopAssistantListening();
-    if (desktopAutoScreenshotTimerRef.current !== null) {
-      window.clearInterval(desktopAutoScreenshotTimerRef.current);
-      desktopAutoScreenshotTimerRef.current = null;
+    if (launchedAsDesktopAssistant) {
+      setDesktopAssistantExiting(true);
+      stopDesktopWindowDrag();
+      setDesktopAssistantPassthrough(false);
+      const result = await window.amadeusDesktop?.setDesktopAssistantMode?.(false).catch(() => undefined);
+      if (result && !result.ok) {
+        setDesktopAssistantExiting(false);
+        cleanupDesktopAssistantRuntime();
+        setDesktopAssistantMode(false);
+      }
+      return;
     }
+    cleanupDesktopAssistantRuntime();
+    setDesktopAssistantMode(false);
     await window.amadeusDesktop?.setDesktopAssistantMode?.(false).catch(() => undefined);
   }
 
-  function startDesktopWindowDrag(event: ReactPointerEvent<HTMLDivElement>) {
-    if (!desktopAssistantMode || !window.amadeusDesktop?.moveAssistantWindow) {
+  function flushDesktopWindowDragDelta() {
+    desktopDragFrameRef.current = null;
+    const delta = desktopDragPendingDeltaRef.current;
+    desktopDragPendingDeltaRef.current = null;
+    if (!delta || !window.amadeusDesktop?.moveAssistantWindow) {
       return;
     }
-    desktopDragRef.current = { x: event.clientX, y: event.clientY };
+    void window.amadeusDesktop.moveAssistantWindow(delta);
+  }
+
+  function setDesktopAssistantPassthrough(ignore: boolean) {
+    desktopMousePassthroughRef.current = ignore;
+    void window.amadeusDesktop?.setAssistantMousePassthrough?.(ignore).catch(() => undefined);
+  }
+
+  function startDesktopWindowDrag(event: ReactPointerEvent<HTMLDivElement>) {
+    if (!desktopAssistantMode || event.button !== 0 || !window.amadeusDesktop?.moveAssistantWindow) {
+      return;
+    }
+    setDesktopAssistantPassthrough(false);
+    desktopDragRef.current = { pointerId: event.pointerId, x: event.screenX, y: event.screenY };
     event.currentTarget.setPointerCapture(event.pointerId);
+    event.preventDefault();
   }
 
   function moveDesktopWindowDrag(event: ReactPointerEvent<HTMLDivElement>) {
-    if (!desktopAssistantMode || !desktopDragRef.current || !window.amadeusDesktop?.moveAssistantWindow) {
+    const drag = desktopDragRef.current;
+    if (!desktopAssistantMode || !drag || drag.pointerId !== event.pointerId || !window.amadeusDesktop?.moveAssistantWindow) {
       return;
     }
-    const dx = event.clientX - desktopDragRef.current.x;
-    const dy = event.clientY - desktopDragRef.current.y;
+    const dx = event.screenX - drag.x;
+    const dy = event.screenY - drag.y;
     if (Math.abs(dx) < 1 && Math.abs(dy) < 1) {
       return;
     }
-    desktopDragRef.current = { x: event.clientX, y: event.clientY };
-    void window.amadeusDesktop.moveAssistantWindow({ dx, dy });
+    desktopDragRef.current = { pointerId: drag.pointerId, x: event.screenX, y: event.screenY };
+    const pending = desktopDragPendingDeltaRef.current;
+    desktopDragPendingDeltaRef.current = pending
+      ? { dx: pending.dx + dx, dy: pending.dy + dy }
+      : { dx, dy };
+    if (desktopDragFrameRef.current === null) {
+      desktopDragFrameRef.current = window.requestAnimationFrame(flushDesktopWindowDragDelta);
+    }
   }
 
-  function stopDesktopWindowDrag() {
+  function stopDesktopWindowDrag(event?: ReactPointerEvent<HTMLDivElement>) {
+    if (event && desktopDragRef.current?.pointerId === event.pointerId && event.currentTarget.hasPointerCapture(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    if (desktopDragFrameRef.current !== null) {
+      window.cancelAnimationFrame(desktopDragFrameRef.current);
+      flushDesktopWindowDragDelta();
+    }
     desktopDragRef.current = null;
+    if (event) {
+      const element = document.elementFromPoint(event.clientX, event.clientY);
+      const remainsInteractive = Boolean(
+        element?.closest(".desktop-assistant-controls, .desktop-assistant-subtitle, .desktop-assistant-drag-zone")
+      );
+      setDesktopAssistantPassthrough(!remainsInteractive);
+    }
   }
 
   function appendAssistantDelta(id: string, delta: Partial<ChatMessage>) {
@@ -3573,6 +3691,23 @@ export default function App() {
     );
   }
 
+  function renderDesktopAssistantDragZone() {
+    if (!desktopAssistantMode) {
+      return null;
+    }
+    return (
+      <div
+        className="desktop-assistant-drag-zone"
+        aria-label="拖动桌面助手"
+        onPointerDown={startDesktopWindowDrag}
+        onPointerMove={moveDesktopWindowDrag}
+        onPointerUp={stopDesktopWindowDrag}
+        onPointerCancel={stopDesktopWindowDrag}
+        onLostPointerCapture={stopDesktopWindowDrag}
+      />
+    );
+  }
+
   function renderDesktopAssistantControls() {
     if (!desktopAssistantMode) {
       return null;
@@ -3685,7 +3820,8 @@ export default function App() {
         menuOpen ? "is-menu-open" : "",
         configOpen ? "is-config-open" : "",
         chatOpen ? "is-chat-open" : "",
-        desktopAssistantMode ? "is-desktop-assistant" : ""
+        desktopAssistantMode ? "is-desktop-assistant" : "",
+        desktopAssistantExiting ? "is-desktop-assistant-exiting" : ""
       ].join(" ")}
       style={
         {
@@ -3697,10 +3833,6 @@ export default function App() {
       <section
         className="stage-panel"
         aria-label="Amadeus Live2D canvas"
-        onPointerDown={startDesktopWindowDrag}
-        onPointerMove={moveDesktopWindowDrag}
-        onPointerUp={stopDesktopWindowDrag}
-        onPointerCancel={stopDesktopWindowDrag}
       >
         <Live2DStage
           ref={live2dRef}
@@ -3716,6 +3848,7 @@ export default function App() {
             setLive2dError(message);
           }}
         />
+        {renderDesktopAssistantDragZone()}
       </section>
       {renderDesktopAssistantSubtitle()}
       {renderDesktopAssistantControls()}

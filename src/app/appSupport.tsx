@@ -231,6 +231,8 @@ declare global {
       captureScreen?: () => Promise<{ dataUrl: string; filename: string } | null>;
       setDesktopAssistantMode?: (enabled: boolean) => Promise<{ ok: boolean; reason?: string; externalWindow?: boolean }>;
       moveAssistantWindow?: (delta: { dx: number; dy: number }) => Promise<{ ok: boolean; reason?: string }>;
+      setAssistantMousePassthrough?: (ignore: boolean) => Promise<{ ok: boolean; reason?: string }>;
+      onDesktopAssistantModeChanged?: (callback: (enabled: boolean) => void) => () => void;
       getCameraAvailability?: () => Promise<{ available: boolean; reason?: string; source?: string }>;
       windowCommand?: (command: "minimize" | "toggle-maximize" | "close") => Promise<{ ok: boolean; reason?: string }>;
     };

@@ -152,7 +152,20 @@ async function createAssistantWindow() {
   return assistantWindow;
 }
 
-function setDesktopAssistantMode(enabled) {
+function hideAndCloseWindowSoon(targetWindow) {
+  if (!targetWindow || targetWindow.isDestroyed() || targetWindow === mainWindow) {
+    return;
+  }
+  targetWindow.setIgnoreMouseEvents(false);
+  targetWindow.hide();
+  setTimeout(() => {
+    if (!targetWindow.isDestroyed()) {
+      targetWindow.close();
+    }
+  }, 0);
+}
+
+function setDesktopAssistantMode(enabled, sourceWindow) {
   if (!mainWindow) {
     return { ok: false, reason: "Window is not ready." };
   }
@@ -181,10 +194,16 @@ function setDesktopAssistantMode(enabled) {
 
   const state = normalWindowState;
   normalWindowState = null;
+  const windowsToClose = new Set();
   if (assistantWindow && !assistantWindow.isDestroyed()) {
-    const windowToClose = assistantWindow;
-    assistantWindow = null;
-    windowToClose.close();
+    windowsToClose.add(assistantWindow);
+  }
+  if (sourceWindow && !sourceWindow.isDestroyed() && sourceWindow !== mainWindow) {
+    windowsToClose.add(sourceWindow);
+  }
+  for (const windowToClose of windowsToClose) {
+    windowToClose.setIgnoreMouseEvents(false);
+    windowToClose.hide();
   }
   mainWindow.setAlwaysOnTop(Boolean(state?.alwaysOnTop));
   mainWindow.setResizable(state?.resizable ?? true);
@@ -196,6 +215,13 @@ function setDesktopAssistantMode(enabled) {
   }
   mainWindow.show();
   mainWindow.focus();
+  notifyMainDesktopAssistantMode(false);
+  for (const windowToClose of windowsToClose) {
+    hideAndCloseWindowSoon(windowToClose);
+    if (windowToClose === assistantWindow) {
+      assistantWindow = null;
+    }
+  }
   return { ok: true, bounds: mainWindow.getBounds() };
 }
 
@@ -217,6 +243,22 @@ function moveAssistantWindow(delta, sourceWindow) {
   };
   targetWindow.setBounds(nextBounds, false);
   return { ok: true, bounds: nextBounds };
+}
+
+function setAssistantMousePassthrough(ignore, sourceWindow) {
+  const targetWindow = sourceWindow || assistantWindow;
+  if (!targetWindow || targetWindow.isDestroyed()) {
+    return { ok: false, reason: "Window is not ready." };
+  }
+  targetWindow.setIgnoreMouseEvents(Boolean(ignore), { forward: true });
+  return { ok: true };
+}
+
+function notifyMainDesktopAssistantMode(enabled) {
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    return;
+  }
+  mainWindow.webContents.send("amadeus:desktop-assistant-mode-changed", Boolean(enabled));
 }
 
 async function getCameraAvailability() {
@@ -307,8 +349,13 @@ app.whenReady().then(async () => {
       return result.filePaths[0];
     });
     ipcMain.handle("amadeus:capture-screen", async () => capturePrimaryScreen());
-    ipcMain.handle("amadeus:set-desktop-assistant-mode", async (_event, enabled) => setDesktopAssistantMode(Boolean(enabled)));
+    ipcMain.handle("amadeus:set-desktop-assistant-mode", async (event, enabled) =>
+      setDesktopAssistantMode(Boolean(enabled), BrowserWindow.fromWebContents(event.sender))
+    );
     ipcMain.handle("amadeus:move-assistant-window", async (event, delta) => moveAssistantWindow(delta, BrowserWindow.fromWebContents(event.sender)));
+    ipcMain.handle("amadeus:set-assistant-mouse-passthrough", async (event, ignore) =>
+      setAssistantMousePassthrough(Boolean(ignore), BrowserWindow.fromWebContents(event.sender))
+    );
     ipcMain.handle("amadeus:get-camera-availability", async () => getCameraAvailability());
     ipcMain.handle("amadeus:window-command", async (event, command) => runWindowCommand(command, BrowserWindow.fromWebContents(event.sender)));
     startBackend();

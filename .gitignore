@@ -55,3 +55,6 @@ yarn-debug.log*
 Thumbs.db
 
 user_voice/
+docs/
+.trae/
+.amadeus/

@@ -112,6 +112,18 @@ class FileUploadBase64Request(BaseModel):
     overwrite: bool = False
 
 
+class VoiceInputBase64Request(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    filename: str
+    data_base64: str = Field(alias="dataBase64")
+    content_type: str = Field(default="", alias="contentType")
+    duration_seconds: float = Field(default=0, alias="durationSeconds")
+    use_host_settings: bool = Field(default=True, alias="useHostSettings")
+    model: ModelSettings = Field(default_factory=ModelSettings)
+    speech_input: SpeechInputSettings = Field(default_factory=SpeechInputSettings, alias="speechInput")
+
+
 class InMemoryUploadFile:
     def __init__(self, *, filename: str, content_type: str, data: bytes) -> None:
         self.filename = filename
@@ -155,7 +167,12 @@ def require_storage() -> SQLiteStorage:
 
 
 def upload_success_response(uploaded: dict) -> dict:
-    next_step = "可交给 image_understand_agent 理解。" if uploaded.get("mediaType") == "image" else "可交给 file_reader 读取。"
+    if uploaded.get("mediaType") == "image":
+        next_step = "可交给 image_understand_agent 理解。"
+    elif uploaded.get("mediaType") == "audio":
+        next_step = "可交给语音输入模型转写。"
+    else:
+        next_step = "可交给 file_reader 读取。"
     return {
         "ok": True,
         "summary": f"已上传 {uploaded['filename']} 到 {uploaded['path']}，{next_step}",
@@ -175,6 +192,22 @@ async def save_upload_or_raise(file: object, *, device: str, overwrite: bool) ->
         raise HTTPException(status_code=413, detail=str(error)) from error
     except UploadValidationError as error:
         raise HTTPException(status_code=415, detail=str(error)) from error
+
+
+def decode_base64_payload(data_base64: str) -> bytes:
+    payload = data_base64.strip()
+    if "," in payload and payload.lower().startswith("data:"):
+        payload = payload.split(",", 1)[1]
+    return base64.b64decode(payload, validate=True)
+
+
+async def get_saved_settings_payload() -> dict[str, Any]:
+    if not storage.connected:
+        return {}
+    try:
+        return await storage.get_settings(DEFAULT_USER_ID) or {}
+    except Exception:
+        return {}
 
 
 @app.get("/api/health")
@@ -209,7 +242,30 @@ async def agent_capabilities() -> dict:
 
 @app.post("/api/agent/invoke")
 async def agent_invoke(request: AgentInvokeRequest) -> dict:
-    return await invoke_agent_request(request)
+    return await invoke_agent_request(await enrich_agent_media_request(request))
+
+
+async def enrich_agent_media_request(request: AgentInvokeRequest) -> AgentInvokeRequest:
+    if not agent_request_uses_image_understand(request):
+        return request
+    stored_settings = await get_saved_settings_payload()
+    payload = dict(request.payload)
+    if "model" not in payload and isinstance(stored_settings.get("model"), dict):
+        payload["model"] = stored_settings["model"]
+    if "vision" not in payload and isinstance(stored_settings.get("vision"), dict):
+        payload["vision"] = stored_settings["vision"]
+    if payload == request.payload:
+        return request
+    return request.model_copy(update={"payload": payload})
+
+
+def agent_request_uses_image_understand(request: AgentInvokeRequest) -> bool:
+    target = request.target.strip().lower()
+    if target in {"image_understand", "image_understand_agent"}:
+        return True
+    payload_text = json.dumps(request.payload, ensure_ascii=False).lower()
+    raw_text = json.dumps(request.raw_arguments, ensure_ascii=False).lower()
+    return "image_understand" in payload_text or "image_understand" in raw_text
 
 
 @app.post("/api/files/upload")
@@ -225,10 +281,7 @@ async def upload_file(
 @app.post("/api/files/upload-base64")
 async def upload_file_base64(request: FileUploadBase64Request) -> dict:
     try:
-        payload = request.data_base64.strip()
-        if "," in payload and payload.lower().startswith("data:"):
-            payload = payload.split(",", 1)[1]
-        data = base64.b64decode(payload, validate=True)
+        data = decode_base64_payload(request.data_base64)
     except (binascii.Error, ValueError) as error:
         raise HTTPException(status_code=400, detail="Invalid base64 file payload") from error
     file = InMemoryUploadFile(
@@ -296,6 +349,42 @@ async def voice_input_transcribe(
         )
     except json.JSONDecodeError as error:
         raise HTTPException(status_code=400, detail="Invalid voice input settings JSON") from error
+    except Exception as error:
+        raise HTTPException(status_code=502, detail=str(error) or error.__class__.__name__) from error
+    return {
+        "ok": result.get("ok", False),
+        "text": result.get("text", ""),
+        "audio": result.get("audio", {}),
+        "error": result.get("error", ""),
+    }
+
+
+@app.post("/api/voice-input/transcribe-base64")
+async def voice_input_transcribe_base64(request: VoiceInputBase64Request) -> dict:
+    try:
+        data = decode_base64_payload(request.data_base64)
+    except (binascii.Error, ValueError) as error:
+        raise HTTPException(status_code=400, detail="Invalid base64 voice payload") from error
+
+    stored_settings = await get_saved_settings_payload() if request.use_host_settings else {}
+    model_payload = stored_settings.get("model") if isinstance(stored_settings.get("model"), dict) else request.model.model_dump(by_alias=True)
+    speech_payload = (
+        stored_settings.get("speechInput")
+        if isinstance(stored_settings.get("speechInput"), dict)
+        else request.speech_input.model_dump(by_alias=True)
+    )
+    file = InMemoryUploadFile(
+        filename=request.filename,
+        content_type=request.content_type,
+        data=data,
+    )
+    try:
+        result = await save_and_transcribe_voice_input(
+            file=file,
+            model_settings=ModelSettings.model_validate(model_payload),
+            speech_input_settings=SpeechInputSettings.model_validate(speech_payload),
+            duration_seconds=request.duration_seconds,
+        )
     except Exception as error:
         raise HTTPException(status_code=502, detail=str(error) or error.__class__.__name__) from error
     return {

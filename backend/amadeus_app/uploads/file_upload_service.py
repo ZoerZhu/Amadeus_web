@@ -77,6 +77,15 @@ TEXT_TYPE_BY_SUFFIX = {
     ".jpeg": "image",
     ".webp": "image",
     ".gif": "image",
+    ".wav": "audio",
+    ".mp3": "audio",
+    ".m4a": "audio",
+    ".mp4": "audio",
+    ".mpeg": "audio",
+    ".mpga": "audio",
+    ".ogg": "audio",
+    ".oga": "audio",
+    ".webm": "audio",
 }
 TEXT_TYPE_BY_MIME = {
     "application/json": "json",
@@ -100,8 +109,19 @@ TEXT_TYPE_BY_MIME = {
     "image/jpeg": "image",
     "image/webp": "image",
     "image/gif": "image",
+    "audio/wav": "audio",
+    "audio/wave": "audio",
+    "audio/x-wav": "audio",
+    "audio/mpeg": "audio",
+    "audio/mp3": "audio",
+    "audio/mp4": "audio",
+    "audio/x-m4a": "audio",
+    "audio/ogg": "audio",
+    "audio/webm": "audio",
+    "video/webm": "audio",
 }
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
+AUDIO_SUFFIXES = {".wav", ".mp3", ".m4a", ".mp4", ".mpeg", ".mpga", ".ogg", ".oga", ".webm"}
 
 
 class UploadValidationError(ValueError):
@@ -249,11 +269,13 @@ def classify_text_type(filename: str, content_type: str) -> str:
 
 def should_validate_text_content(filename: str) -> bool:
     suffix = Path(filename).suffix.lower()
-    return suffix not in UPLOAD_DOCUMENT_SUFFIXES and suffix not in IMAGE_SUFFIXES
+    return suffix not in UPLOAD_DOCUMENT_SUFFIXES and suffix not in IMAGE_SUFFIXES and suffix not in AUDIO_SUFFIXES
 
 
 def is_readable_by_file_reader(filename: str) -> bool:
     suffix = Path(filename).suffix.lower()
+    if suffix in AUDIO_SUFFIXES:
+        return False
     return suffix not in UPLOAD_DOCUMENT_SUFFIXES or suffix in READABLE_DOCUMENT_SUFFIXES
 
 
@@ -269,6 +291,8 @@ def is_vision_readable(filename: str, content_type: str) -> bool:
 def media_type_for_upload(filename: str, text_type: str) -> str:
     if text_type == "image" or Path(filename).suffix.lower() in IMAGE_SUFFIXES:
         return "image"
+    if text_type == "audio" or Path(filename).suffix.lower() in AUDIO_SUFFIXES:
+        return "audio"
     if Path(filename).suffix.lower() in UPLOAD_DOCUMENT_SUFFIXES:
         return "document"
     return "text"

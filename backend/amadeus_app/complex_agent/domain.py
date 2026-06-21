@@ -13,6 +13,53 @@ from pydantic import BaseModel, ConfigDict, Field
 
 
 # ---------------------------------------------------------------------------
+# OpenCode routing
+# ---------------------------------------------------------------------------
+
+RoutingMatchType = Literal["keyword", "regex"]
+RoutingDecisionMethod = Literal["force_allow", "force_deny", "rule", "llm_rejudge"]
+
+
+class OpencodeRoutingRule(BaseModel):
+    """A single scoring rule for OpenCode routing."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    id: str
+    name: str
+    weight: int  # positive = allow signal, negative = deny signal
+    keywords: list[str] = Field(default_factory=list)
+    match_type: RoutingMatchType = Field(default="keyword", alias="matchType")
+    description: str = ""
+
+
+class OpencodeRoutingConfig(BaseModel):
+    """Configuration for OpenCode complexity-based routing."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    enabled: bool = True
+    allow_threshold: int = Field(default=60, alias="allowThreshold")
+    ambiguous_threshold: int = Field(default=40, alias="ambiguousThreshold")
+    allow_llm_rejudge: bool = Field(default=True, alias="allowLlmRejudge")
+    force_allow_keywords: list[str] = Field(default_factory=list, alias="forceAllowKeywords")
+    force_deny_keywords: list[str] = Field(default_factory=list, alias="forceDenyKeywords")
+    rules: list[OpencodeRoutingRule] = Field(default_factory=list)
+
+
+class OpencodeRoutingDecision(BaseModel):
+    """The result of an OpenCode routing evaluation."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    allowed: bool
+    score: int
+    matched_rules: list[str] = Field(default_factory=list, alias="matchedRules")
+    reason: str = ""
+    method: RoutingDecisionMethod = "rule"
+
+
+# ---------------------------------------------------------------------------
 # Agent settings
 # ---------------------------------------------------------------------------
 
@@ -33,6 +80,9 @@ class AgentSettings(BaseModel):
     rollback_enabled: bool = Field(default=True, alias="rollbackEnabled")
     browser_enabled: bool = Field(default=False, alias="browserEnabled")
     opencode_enabled: bool = Field(default=True, alias="opencodeEnabled")
+    opencode_routing: OpencodeRoutingConfig = Field(
+        default_factory=OpencodeRoutingConfig, alias="opencodeRouting"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -142,6 +192,7 @@ AgentEventKind = Literal[
     "artifact",
     "question",
     "sampling",
+    "opencode_routing",
     "error",
     "done",
 ]

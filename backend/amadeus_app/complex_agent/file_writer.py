@@ -31,9 +31,23 @@ BLOCKED_WRITE_PATHS = {
 }
 
 
+# Code file extensions that require OpenCode routing approval to write.
+# When OpenCode is not allowed for a task, file_writer rejects these.
+CODE_FILE_EXTENSIONS: set[str] = {
+    ".py", ".ts", ".tsx", ".js", ".jsx", ".c", ".cpp", ".java", ".go",
+    ".rs", ".cs", ".php", ".rb", ".swift", ".kt", ".vue", ".svelte",
+}
+
+
 def _is_blocked(path: Path) -> bool:
     parts = set(path.parts)
     return bool(parts & BLOCKED_WRITE_PATHS)
+
+
+def _is_code_file(path: str) -> bool:
+    """Check if the path has a code file extension."""
+    suffix = Path(path).suffix.lower()
+    return suffix in CODE_FILE_EXTENSIONS
 
 
 def _resolve_workspace_path(workspace: str, relative_path: str) -> Path:
@@ -126,8 +140,23 @@ def _guess_mime(path: Path) -> str:
     }.get(suffix, "application/octet-stream")
 
 
-def make_file_writer_tool(*, storage, task_id: str, workspace: str, artifact_root: str) -> UnifiedTool:
-    """Build a task-scoped ``file_writer`` tool."""
+def make_file_writer_tool(
+    *,
+    storage,
+    task_id: str,
+    workspace: str,
+    artifact_root: str,
+    code_write_allowed_fn: "Callable[[], bool] | None" = None,
+) -> UnifiedTool:
+    """Build a task-scoped ``file_writer`` tool.
+
+    When ``code_write_allowed_fn`` is provided and returns ``False``, writing
+    files with code extensions (``.py``, ``.ts``, etc.) is rejected. This
+    enforces the OpenCode routing policy: code modifications must go through
+    ``opencode_delegate`` when it is available, or be output as text suggestions
+    when it is not.
+    """
+    from typing import Callable  # local import to avoid top-level typing issues
 
     async def handler(args: dict[str, Any]) -> dict[str, Any]:
         path = str(args.get("path", "")).strip()
@@ -137,6 +166,17 @@ def make_file_writer_tool(*, storage, task_id: str, workspace: str, artifact_roo
         mode = str(args.get("mode", "write")).lower()
         if mode not in {"write", "append"}:
             return {"ok": False, "error": f"invalid mode: {mode}"}
+        # Code-file protection: when OpenCode is not allowed, reject code files.
+        if code_write_allowed_fn is not None and not code_write_allowed_fn():
+            if _is_code_file(path):
+                return {
+                    "ok": False,
+                    "error": (
+                        f"Writing code file '{path}' requires OpenCode routing approval. "
+                        f"Use opencode_delegate for code modifications, or output "
+                        f"analysis and suggestions as text instead."
+                    ),
+                }
         return await controlled_file_write(
             storage=storage,
             task_id=task_id,
@@ -153,7 +193,8 @@ def make_file_writer_tool(*, storage, task_id: str, workspace: str, artifact_roo
         name="file_writer",
         description="Write or append text to a file inside the task workspace. "
                     "Creates a snapshot of the existing file for rollback. "
-                    "Blocked paths: .env, .git, node_modules, .venv.",
+                    "Blocked paths: .env, .git, node_modules, .venv. "
+                    "Code files (.py/.ts/.tsx/.js/etc.) require OpenCode routing approval.",
         parameters={
             "type": "object",
             "properties": {

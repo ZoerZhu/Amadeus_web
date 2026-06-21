@@ -262,3 +262,130 @@ class TestRoutingScoring:
         )
         # "搜索代码" matches "查代码" rule → negative score
         assert decision.score < 40
+
+
+# ---------------------------------------------------------------------------
+# file_writer code-file protection
+# ---------------------------------------------------------------------------
+
+import tempfile  # noqa: E402
+from pathlib import Path  # noqa: E402
+
+from backend.amadeus_app.complex_agent.file_writer import (  # noqa: E402
+    CODE_FILE_EXTENSIONS,
+    make_file_writer_tool,
+)
+from backend.amadeus_app.storage import SQLiteStorage  # noqa: E402
+
+
+async def _make_storage_with_task():
+    """Return (storage, task_id) with a real task record for FK constraints."""
+    from backend.amadeus_app.complex_agent import agent_storage
+    s = SQLiteStorage(":memory:")
+    await s.connect()
+    task = await agent_storage.create_agent_task(
+        s,
+        user_id="u",
+        title="t",
+        prompt="p",
+        workspace_path=".",
+        conversation_id=None,
+        active_skill_ids=[],
+        settings={"trustMode": True},
+        budget={"rounds": 0},
+    )
+    return s, task["id"]
+
+
+class TestFileWriterCodeProtection:
+    @pytest.mark.asyncio
+    async def test_code_write_allowed_writes_py(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            storage, task_id = await _make_storage_with_task()
+            try:
+                tool = make_file_writer_tool(
+                    storage=storage, task_id=task_id, workspace=tmp,
+                    artifact_root=tmp, code_write_allowed_fn=lambda: True,
+                )
+                result = await tool.handler({"path": "foo.py", "content": "print(1)"})
+                assert result["ok"] is True
+                assert (Path(tmp) / "foo.py").exists()
+            finally:
+                await storage.close()
+
+    @pytest.mark.asyncio
+    async def test_code_write_blocked_rejects_py(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            storage, task_id = await _make_storage_with_task()
+            try:
+                tool = make_file_writer_tool(
+                    storage=storage, task_id=task_id, workspace=tmp,
+                    artifact_root=tmp, code_write_allowed_fn=lambda: False,
+                )
+                result = await tool.handler({"path": "foo.py", "content": "print(1)"})
+                assert result["ok"] is False
+                assert "OpenCode" in result["error"] or "opencode" in result["error"].lower()
+                assert not (Path(tmp) / "foo.py").exists()
+            finally:
+                await storage.close()
+
+    @pytest.mark.asyncio
+    async def test_code_write_blocked_allows_md(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            storage, task_id = await _make_storage_with_task()
+            try:
+                tool = make_file_writer_tool(
+                    storage=storage, task_id=task_id, workspace=tmp,
+                    artifact_root=tmp, code_write_allowed_fn=lambda: False,
+                )
+                result = await tool.handler({"path": "report.md", "content": "# Hello"})
+                assert result["ok"] is True
+                assert (Path(tmp) / "report.md").exists()
+            finally:
+                await storage.close()
+
+    @pytest.mark.asyncio
+    async def test_code_write_blocked_allows_json(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            storage, task_id = await _make_storage_with_task()
+            try:
+                tool = make_file_writer_tool(
+                    storage=storage, task_id=task_id, workspace=tmp,
+                    artifact_root=tmp, code_write_allowed_fn=lambda: False,
+                )
+                result = await tool.handler({"path": "data.json", "content": "{}"})
+                assert result["ok"] is True
+            finally:
+                await storage.close()
+
+    @pytest.mark.asyncio
+    async def test_code_write_blocked_rejects_tsx(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            storage, task_id = await _make_storage_with_task()
+            try:
+                tool = make_file_writer_tool(
+                    storage=storage, task_id=task_id, workspace=tmp,
+                    artifact_root=tmp, code_write_allowed_fn=lambda: False,
+                )
+                result = await tool.handler({"path": "comp.tsx", "content": "export const X = () => null"})
+                assert result["ok"] is False
+            finally:
+                await storage.close()
+
+    @pytest.mark.asyncio
+    async def test_default_code_write_allowed_is_true(self):
+        """When code_write_allowed_fn is not passed, default is True (backward compat)."""
+        with tempfile.TemporaryDirectory() as tmp:
+            storage, task_id = await _make_storage_with_task()
+            try:
+                tool = make_file_writer_tool(
+                    storage=storage, task_id=task_id, workspace=tmp, artifact_root=tmp,
+                )
+                result = await tool.handler({"path": "foo.py", "content": "print(1)"})
+                assert result["ok"] is True
+            finally:
+                await storage.close()
+
+    def test_code_file_extensions_includes_common_types(self):
+        for ext in [".py", ".ts", ".tsx", ".js", ".jsx", ".go", ".rs", ".java", ".vue", ".svelte"]:
+            assert ext in CODE_FILE_EXTENSIONS

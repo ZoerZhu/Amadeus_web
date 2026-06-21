@@ -4,10 +4,10 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-from .domain import ChatMode
+from .domain import ChatMode, DEFAULT_PERSONA_ID
 
 
-KURISU_PERSONA_ID = "kurisu_amadeus"
+KURISU_PERSONA_ID = DEFAULT_PERSONA_ID
 KURISU_REFERENCE_TEXT = (
     "ふんよくも私の正体を聞けたものだ私はマセ効率世界で最も才能のある女性科学者よ"
     "でもクリスチーナって呼ばないでそのニックネームは好きじゃないのよ"
@@ -109,10 +109,16 @@ def get_persona(persona_id: str) -> PersonaPreset:
     return KURISU_PERSONA
 
 
-def build_system_prompt(persona: PersonaPreset, mode: ChatMode, user_name: str = "用户") -> str:
+def build_system_prompt(
+    persona: PersonaPreset,
+    mode: ChatMode,
+    user_name: str = "用户",
+    *,
+    memory_context: str = "",
+) -> str:
     if persona.id == KURISU_PERSONA_ID:
-        return _build_kurisu_prompt(persona, mode, user_name)
-    return _build_generic_prompt(persona, mode, user_name)
+        return _build_kurisu_prompt(persona, mode, user_name, memory_context)
+    return _build_generic_prompt(persona, mode, user_name, memory_context)
 
 
 def current_prompt_time_text() -> str:
@@ -124,13 +130,15 @@ def current_prompt_time_text() -> str:
     return f"北京时间 {now}"
 
 
-def _build_generic_prompt(persona: PersonaPreset, mode: ChatMode, user_name: str) -> str:
+def _build_generic_prompt(
+    persona: PersonaPreset, mode: ChatMode, user_name: str, memory_context: str = "",
+) -> str:
     mode_rule = (
         "当前为快速模式：不要生成推理过程，直接回答，减少铺垫。"
         if mode == "fast"
         else "当前为思考模式：可以使用模型推理通道进行分析，最终回答只保留结论和必要解释。"
     )
-    return (
+    prompt = (
         "你是 Amaduse Web App 中的个性化智能 Agent。"
         f"当前人格：{persona.name}。语气：{persona.tone}。"
         f"人格设定：{persona.base_personality}"
@@ -141,9 +149,14 @@ def _build_generic_prompt(persona: PersonaPreset, mode: ChatMode, user_name: str
         "neutral, anger, joy, sadness, shy, smile, surprise, unhappy。"
         "根据你的回复内容和语气选择最匹配的情感。标签输出后换行再写正文。"
     )
+    if memory_context:
+        prompt = f"{prompt}\n{memory_context}"
+    return prompt
 
 
-def _build_kurisu_prompt(persona: PersonaPreset, mode: ChatMode, user_name: str) -> str:
+def _build_kurisu_prompt(
+    persona: PersonaPreset, mode: ChatMode, user_name: str, memory_context: str = "",
+) -> str:
     lines = [
         "<Instruction>",
         "你是 Amaduse Web App 中的个性化智能 Agent。",
@@ -176,9 +189,11 @@ def _build_kurisu_prompt(persona: PersonaPreset, mode: ChatMode, user_name: str)
             "<EmotionTag>每次回复时，在内容最前面输出情感标签 [emotion:xxx]，xxx 为以下之一：neutral, anger, joy, sadness, shy, smile, surprise, unhappy。根据你的回复内容和语气选择最匹配的情感。标签输出后换行再写正文。示例：[emotion:joy]\\n你这个问题倒是挺有意思的。</EmotionTag>",
             "<AgentCapabilities>当前 Web 版已接入文本生成、语音生成与 Live2D 情绪反馈。工具调用、长期记忆、多模态输入和本地/远程 agent 执行器会通过后端 registry 扩展；尚未接入的真实操作不要伪造完成。</AgentCapabilities>",
             "</RuntimeContext>",
-            "</Instruction>",
         ]
     )
+    if memory_context:
+        lines.append(memory_context)
+    lines.append("</Instruction>")
     return "\n".join(lines)
 
 

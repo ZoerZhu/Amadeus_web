@@ -66,7 +66,8 @@ class SQLiteStorage:
     async def connect(self) -> None:
         if self.connection is not None:
             return
-        self.database_path.parent.mkdir(parents=True, exist_ok=True)
+        if str(self.database_path) != ":memory:":
+            self.database_path.parent.mkdir(parents=True, exist_ok=True)
         connection = sqlite3.connect(
             self.database_path,
             check_same_thread=False,
@@ -137,6 +138,107 @@ class SQLiteStorage:
 
             CREATE INDEX IF NOT EXISTS chat_messages_conversation_position_idx
                 ON chat_messages (conversation_id, position ASC);
+
+            -- ===== Memory System Tables =====
+
+            CREATE TABLE IF NOT EXISTS memory_nodes (
+                id              TEXT PRIMARY KEY,
+                user_id         TEXT NOT NULL,
+                parent_id       TEXT REFERENCES memory_nodes(id) ON DELETE CASCADE,
+                node_type       TEXT NOT NULL
+                                CHECK (node_type IN ('root', 'domain', 'topic', 'cluster', 'leaf')),
+                domain          TEXT NOT NULL DEFAULT '',
+                label           TEXT NOT NULL,
+                path            TEXT NOT NULL DEFAULT '',
+                depth           INTEGER NOT NULL DEFAULT 0,
+                summary         TEXT NOT NULL DEFAULT '',
+                full_content    TEXT NOT NULL DEFAULT '',
+                category        TEXT NOT NULL DEFAULT 'general'
+                                CHECK (category IN ('general','fact','decision','preference','summary','technical','task_state','tool_result')),
+                keywords        TEXT NOT NULL DEFAULT '[]',
+                project_id      TEXT,
+                conversation_id TEXT,
+                source_message_ids TEXT NOT NULL DEFAULT '[]',
+                source_summary  TEXT NOT NULL DEFAULT '',
+                importance      REAL NOT NULL DEFAULT 0.5,
+                confidence      REAL NOT NULL DEFAULT 0.7,
+                access_count    INTEGER NOT NULL DEFAULT 0,
+                leaf_count      INTEGER NOT NULL DEFAULT 0,
+                last_accessed_at TEXT,
+                created_at      TEXT NOT NULL,
+                updated_at      TEXT NOT NULL,
+                expires_at      TEXT,
+                is_active       INTEGER NOT NULL DEFAULT 1
+            );
+
+            CREATE INDEX IF NOT EXISTS memory_nodes_parent_idx
+                ON memory_nodes (user_id, parent_id, is_active);
+            CREATE INDEX IF NOT EXISTS memory_nodes_domain_idx
+                ON memory_nodes (user_id, domain, node_type, is_active);
+            CREATE INDEX IF NOT EXISTS memory_nodes_project_idx
+                ON memory_nodes (project_id, is_active) WHERE project_id IS NOT NULL;
+            CREATE INDEX IF NOT EXISTS memory_nodes_path_idx
+                ON memory_nodes (user_id, path);
+            CREATE INDEX IF NOT EXISTS memory_nodes_updated_idx
+                ON memory_nodes (user_id, updated_at DESC);
+
+            CREATE TABLE IF NOT EXISTS memory_edges (
+                parent_id       TEXT NOT NULL REFERENCES memory_nodes(id) ON DELETE CASCADE,
+                child_id        TEXT NOT NULL REFERENCES memory_nodes(id) ON DELETE CASCADE,
+                relation        TEXT NOT NULL DEFAULT 'contains'
+                                CHECK (relation IN ('contains','references','supersedes','conflicts_with')),
+                weight          REAL NOT NULL DEFAULT 1.0,
+                created_at      TEXT NOT NULL,
+                PRIMARY KEY (parent_id, child_id, relation)
+            );
+
+            CREATE TABLE IF NOT EXISTS memory_embedding_meta (
+                node_id         TEXT PRIMARY KEY REFERENCES memory_nodes(id) ON DELETE CASCADE,
+                vector_kind     TEXT NOT NULL CHECK (vector_kind IN ('node','leaf')),
+                embedding_model TEXT NOT NULL,
+                embedding_dim   INTEGER NOT NULL,
+                content_hash    TEXT NOT NULL DEFAULT '',
+                updated_at      TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS projects (
+                id          TEXT PRIMARY KEY,
+                user_id     TEXT NOT NULL,
+                name        TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                workspace_path TEXT NOT NULL DEFAULT '',
+                color       TEXT NOT NULL DEFAULT '#8b5cf6',
+                created_at  TEXT NOT NULL,
+                updated_at  TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS projects_user_idx
+                ON projects (user_id, updated_at DESC);
+
+            CREATE TABLE IF NOT EXISTS conversation_projects (
+                conversation_id TEXT PRIMARY KEY
+                                REFERENCES conversations(id) ON DELETE CASCADE,
+                project_id      TEXT NOT NULL
+                                REFERENCES projects(id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS memory_jobs (
+                id              TEXT PRIMARY KEY,
+                user_id         TEXT NOT NULL,
+                conversation_id TEXT,
+                job_type        TEXT NOT NULL
+                                CHECK (job_type IN ('ingest', 'summarize_node', 'reembed', 'merge', 'cleanup')),
+                status          TEXT NOT NULL DEFAULT 'pending'
+                                CHECK (status IN ('pending', 'running', 'done', 'failed')),
+                payload         TEXT NOT NULL DEFAULT '{}',
+                attempts        INTEGER NOT NULL DEFAULT 0,
+                last_error      TEXT NOT NULL DEFAULT '',
+                created_at      TEXT NOT NULL,
+                updated_at      TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS memory_jobs_status_idx
+                ON memory_jobs (status, updated_at ASC);
             """
         )
         app_settings_columns = {
@@ -155,6 +257,33 @@ class SQLiteStorage:
         }
         if "assistant_voice" not in chat_message_columns:
             conn.execute("ALTER TABLE chat_messages ADD COLUMN assistant_voice TEXT NOT NULL DEFAULT '{}'")
+
+        # ----- Memory: FTS5 + sqlite-vec -----
+        conn.execute(
+            """
+            CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts
+                USING fts5(
+                    node_id UNINDEXED,
+                    node_type UNINDEXED,
+                    path,
+                    label,
+                    summary,
+                    full_content,
+                    keywords,
+                    tokenize = 'unicode61'
+                )
+            """
+        )
+        try:
+            from .memory.vector_store import ensure_vec_tables, load_vec_extension
+
+            load_vec_extension(conn)
+            ensure_vec_tables(conn)
+        except Exception:
+            import traceback
+
+            traceback.print_exc()
+            # sqlite-vec 不可用时记忆系统降级为纯 FTS
 
     async def get_settings(self, user_id: str) -> dict[str, Any] | None:
         async with self._lock:

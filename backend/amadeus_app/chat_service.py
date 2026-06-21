@@ -4,15 +4,20 @@ import asyncio
 import json
 import os
 import unicodedata
+from collections.abc import AsyncGenerator
 from dataclasses import dataclass
-from typing import Any, AsyncGenerator
+from typing import Any
 from uuid import uuid4
 
 import httpx
 
 from .agent_registry import tool_registry
 from .domain import ChatAttachment, ChatStreamRequest, ModelProviderPreset, ModelSettings, VoiceSettings
+from .logging_config import get_logger
 from .model_adapter import build_chat_payload, should_read_reasoning
+
+_log = get_logger(__name__)
+from .local_voice_service import local_voice_engine_url
 from .personas import PersonaPreset, build_system_prompt, get_persona
 from .providers import get_provider
 from .runtime_config import effective_model_settings, effective_voice_settings
@@ -24,13 +29,13 @@ from .text_cleaning import (
     strip_emotion_tags_for_display,
     to_speech_source_text,
 )
-from .local_voice_service import local_voice_engine_url
+from .vision.image_understand_agent import MAX_IMAGES as VISION_MAX_IMAGES
+from .vision.image_understand_agent import run_image_understand_agent
 from .voice_service import (
     synthesize_for_persona,
     synthesize_local_segment_pcm_for_persona,
     write_local_pcm_audio,
 )
-from .vision.image_understand_agent import MAX_IMAGES as VISION_MAX_IMAGES, run_image_understand_agent
 
 
 def env_int(name: str, default: int) -> int:
@@ -1161,7 +1166,134 @@ async def stream_chat(
         return
 
     endpoint = f"{settings.base_url.rstrip('/')}/chat/completions"
-    payload_messages: list[dict[str, Any]] = [{"role": "system", "content": build_system_prompt(persona, request.mode)}]
+
+    # 记忆检索与注入
+    memory_context = ""
+    session_summary_text: str | None = None
+    if storage is not None and stored_conversation_id is not None:
+        try:
+            from ._common import get_memory_tree
+            tree = get_memory_tree()
+            if tree is not None:
+                from .memory.injector import build_memory_context
+                from .memory.query_rewriter import _detect_recall_triggers, is_profile_query
+                from .memory.tree_search import search_memory_tree, get_user_profile_memories
+
+                # 获取最后一条用户消息作为检索 query
+                last_user_msg = ""
+                for msg in reversed(chat_messages):
+                    if msg.role == "user" and msg.content.strip():
+                        last_user_msg = msg.content[:500]
+                        break
+
+                # 获取会话滚动摘要（用于 query 改写 + 注入，无论是否检索记忆都需要）
+                try:
+                    session_summary_text = await tree.get_session_summary(str(stored_conversation_id))
+                except Exception:
+                    session_summary_text = None
+
+                # 记忆检索门控：
+                # - 触发词出现 → 全量树检索
+                # - 用户画像类问题（我叫什么/我偏好/按我的习惯）→ 轻量 profile 召回
+                # - 普通具体问题 → 不检索
+                gate_enabled = os.getenv("AMADEUS_MEMORY_GATE_ENABLED", "1").lower() not in ("0", "false", "no")
+                need_full_search = bool(last_user_msg) and (
+                    not gate_enabled or _detect_recall_triggers(last_user_msg)
+                )
+                need_profile_only = (
+                    bool(last_user_msg)
+                    and gate_enabled
+                    and not need_full_search
+                    and is_profile_query(last_user_msg)
+                )
+
+                if need_full_search:
+                    # 构造最近消息 dict 列表（用于 query 改写）
+                    recent_msgs_dict: list[dict] = [
+                        {"role": m.role, "content": m.content}
+                        for m in chat_messages[-6:]
+                        if m.content.strip() and m.role in {"user", "assistant"}
+                    ]
+
+                    # 获取项目关联
+                    project_id = await tree.get_conversation_project(str(stored_conversation_id))
+
+                    # 获取项目名（用于 query 改写）
+                    project_name: str | None = None
+                    if project_id:
+                        try:
+                            projects = await tree.list_projects(DEFAULT_USER_ID)
+                            for p in projects:
+                                if p.get("id") == project_id:
+                                    project_name = p.get("name")
+                                    break
+                        except Exception:
+                            pass
+
+                    # 检索记忆树（传递 provider/recent_messages/session_summary 用于 query 改写）
+                    search_result = await search_memory_tree(
+                        query=last_user_msg,
+                        tree_store=tree,
+                        settings=settings,
+                        provider=provider,
+                        conversation_id=str(stored_conversation_id),
+                        project_id=project_id,
+                        recent_messages=recent_msgs_dict,
+                        session_summary=session_summary_text,
+                        project_name=project_name,
+                    )
+
+                    # 无相关命中时不注入 MemoryContext（避免无关历史干扰模型）
+                    result_dict = search_result.model_dump() if hasattr(search_result, "model_dump") else {}
+                    leaf_nodes = result_dict.get("leaf_nodes", [])
+                    if leaf_nodes:
+                        # 获取用户画像
+                        profile_memories = await get_user_profile_memories(tree)
+
+                        # 构造记忆上下文（传递 user_profile）
+                        memory_context = build_memory_context(
+                            selected_paths=result_dict.get("selected_paths", []),
+                            topic_nodes=result_dict.get("topic_nodes", []),
+                            leaf_nodes=leaf_nodes,
+                            session_summary=session_summary_text,
+                            budget_chars=int(os.getenv("AMADEUS_MEMORY_CONTEXT_CHAR_BUDGET", "5000")),
+                            user_profile=profile_memories,
+                        )
+                        if not memory_context.strip():
+                            memory_context = ""
+                    else:
+                        _log.debug("记忆检索无相关命中，跳过注入: query=%r", last_user_msg[:60])
+
+                elif need_profile_only:
+                    # 用户画像类问题：轻量召回 profile memories，不做全量树检索
+                    try:
+                        profile_memories = await get_user_profile_memories(tree)
+                        if profile_memories:
+                            memory_context = build_memory_context(
+                                selected_paths=[],
+                                topic_nodes=[],
+                                leaf_nodes=[],
+                                session_summary=session_summary_text,
+                                budget_chars=int(os.getenv("AMADEUS_MEMORY_CONTEXT_CHAR_BUDGET", "5000")),
+                                user_profile=profile_memories,
+                            )
+                            if not memory_context.strip():
+                                memory_context = ""
+                            _log.debug("用户画像召回: %d 条 profile 记忆", len(profile_memories))
+                    except Exception as profile_err:
+                        _log.debug("Profile 召回失败 (non-fatal): %s", profile_err)
+        except Exception as error:
+            _log.debug("Memory retrieval failed (non-fatal): %s", error)
+
+    payload_messages: list[dict[str, Any]] = [{"role": "system", "content": build_system_prompt(persona, request.mode, memory_context=memory_context)}]
+
+    # 会话滚动摘要注入：当历史消息超过 12 条时，注入摘要替代硬截断
+    if session_summary_text and len(chat_messages) > 12:
+        payload_messages.append({
+            "role": "system",
+            "content": f"<PreviousConversationSummary>\n{session_summary_text}\n</PreviousConversationSummary>"
+        })
+
     payload_messages.extend(
         {"role": message.role, "content": message.content}
         for message in chat_messages[-12:]
@@ -1296,6 +1428,44 @@ async def stream_chat(
         except Exception as error:
             yield sse("error", {"message": f"写入助手消息失败：{error}"})
             return
+
+    # 异步记忆提取入队
+    if storage is not None and stored_conversation_id is not None:
+        try:
+            from ._common import get_memory_tree
+            tree = get_memory_tree()
+            if tree is not None:
+                # 按批次提取记忆：仅在累计到 N 轮后入队 ingest
+                # AMADEUS_MEMORY_EXTRACT_INTERVAL=6 表示每 6 轮用户消息提取一次
+                extract_interval = int(os.getenv("AMADEUS_MEMORY_EXTRACT_INTERVAL", "6"))
+                # 从 SQLite 持久化消息统计用户消息数，不依赖请求携带的 messages 数量
+                # 这样即使移动端/外部 API 只发最近一条消息也能正确触发
+                user_msg_count = 0
+                try:
+                    from uuid import UUID as _UUID
+                    conv = await storage.get_conversation(
+                        user_id=DEFAULT_USER_ID,
+                        conversation_id=_UUID(str(stored_conversation_id)),
+                    )
+                    if conv and conv.get("messages"):
+                        user_msg_count = sum(
+                            1 for m in conv["messages"] if m.get("role") == "user"
+                        )
+                except Exception:
+                    # 降级：用请求中的消息数
+                    user_msg_count = sum(1 for m in chat_messages if m.role == "user")
+                if extract_interval > 0 and user_msg_count > 0 and user_msg_count % extract_interval == 0:
+                    await tree.enqueue_job(
+                        user_id=DEFAULT_USER_ID,
+                        job_type="ingest",
+                        conversation_id=str(stored_conversation_id),
+                        payload={
+                            "conversationId": str(stored_conversation_id),
+                            "extractWindow": extract_interval * 2,  # 处理最近 N*2 条消息
+                        },
+                    )
+        except Exception:
+            pass  # 记忆入队失败不影响聊天
 
     yield sse("done", {"text": state.displayed_buffer, "assistantVoice": assistant_voice})
 

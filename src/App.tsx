@@ -8,14 +8,12 @@ import {
   CircleStop,
   FolderOpen,
   KeyRound,
-  Menu,
   MessageCircle,
   Mic,
   Mic2,
   PanelRightClose,
   PanelRightOpen,
   Plus,
-  Play,
   Send,
   SlidersHorizontal,
   RotateCcw,
@@ -68,7 +66,6 @@ import { TaskPanel } from "./components/TaskPanel";
 import { TopBar } from "./components/TopBar";
 import { UploadAttachmentTray, UploadPopover } from "./components/UploadControls";
 import type {
-  ApiChatMessage,
   ChatMessage,
   ChatMode,
   CodeTaskEvent,
@@ -78,7 +75,6 @@ import type {
   ModelSettings,
   ProviderPreset,
   SpeechInputSettings,
-  StoredSettings,
   StreamEvent,
   ChatAttachment,
   ToolTraceEvent,
@@ -96,11 +92,9 @@ import {
   CODE_TASK_MAX_DETAIL_TEXT,
   CODE_TASK_MAX_HISTORY,
   DEFAULT_CODE_TASK_WORKSPACE,
-  DEFAULT_DESKTOP_ASSISTANT_SETTINGS,
   DEFAULT_MODEL_SETTINGS,
   DEFAULT_SPEECH_INPUT_SETTINGS,
   DEFAULT_VISION_SETTINGS,
-  DEFAULT_VOICE_SETTINGS,
   EDGE_MARGIN,
   LIVE2D_ACTIVE_STORAGE_KEY,
   LIVE2D_IMPORT_INPUT_ID,
@@ -122,7 +116,6 @@ import {
   conversationToMarkdown,
   createId,
   downloadText,
-  formatMessageTime,
   getChatMaxWidth,
   limitCodeTaskText,
   loadStoredCodeTasks,
@@ -133,18 +126,15 @@ import {
   normalizeLive2dEmotion,
   normalizeMessageContent,
   normalizeSpeechInputSettings,
-  normalizeThinkingText,
   sanitizeFilename,
   toApiMessages,
   toChatMessages,
   trimCodeTaskMessages,
   type AudioQueueItem,
   type CodeTaskMessage,
-  type CodeTaskMessageKind,
   type CodeTaskRecord,
   type ConfigSection,
-  type RightPanelTab,
-  type ToolResultLink
+  type RightPanelTab
 } from "./app/appSupport";
 export default function App() {
   const stored = useMemo(loadStoredSettings, []);
@@ -154,7 +144,7 @@ export default function App() {
   }, []);
   const [providers, setProviders] = useState<ProviderPreset[]>([]);
   const [storageOnline, setStorageOnline] = useState(false);
-  const [storageError, setStorageError] = useState("");
+  const [, setStorageError] = useState("");
   const [conversations, setConversations] = useState<ConversationSummary[]>([]);
   const [currentConversationId, setCurrentConversationId] = useState<string | null>(null);
   const [modelSettings, setModelSettings] = useState<ModelSettings>(stored.model);
@@ -213,7 +203,7 @@ export default function App() {
   const [voiceInputLevels, setVoiceInputLevels] = useState<number[]>(Array.from({ length: 18 }, () => 0.24));
   const [desktopAssistantMode, setDesktopAssistantMode] = useState(launchedAsDesktopAssistant);
   const [desktopAssistantExiting, setDesktopAssistantExiting] = useState(false);
-  const [desktopAssistantStatus, setDesktopAssistantStatus] = useState("待机");
+  const [, setDesktopAssistantStatus] = useState("待机");
   const [desktopSubtitleVisibleUntil, setDesktopSubtitleVisibleUntil] = useState(0);
   const [desktopCameraAvailable, setDesktopCameraAvailable] = useState(false);
   const [desktopCameraReason, setDesktopCameraReason] = useState("尚未检测摄像头");
@@ -298,6 +288,15 @@ export default function App() {
   const desktopMousePassthroughRef = useRef<boolean | null>(null);
   const desktopObservationBusyRef = useRef(false);
   const desktopAssistantLaunchInitializedRef = useRef(false);
+  const cleanupDesktopAssistantRuntimeRef = useRef<() => void>(() => undefined);
+  const createDesktopAssistantConversationRef = useRef<() => Promise<string | null>>(async () => null);
+  const ensureIncomingCodeTaskVisibleRef = useRef<(taskId: string, event: CodeTaskEvent) => boolean>(() => false);
+  const handleCodeTaskEventOnceRef = useRef<(event: CodeTaskEvent, taskId?: string | null) => void>(() => undefined);
+  const runDesktopAutoObservationRef = useRef<() => Promise<void>>(async () => undefined);
+  const scheduleMobileTaskViewPublishRef = useRef<(delayMs: number) => void>(() => undefined);
+  const startDesktopAssistantListeningRef = useRef<() => Promise<void>>(async () => undefined);
+  const stopAudioPlaybackRef = useRef<() => void>(() => undefined);
+  const stopDesktopAssistantListeningRef = useRef<() => void>(() => undefined);
 
   const selectedProvider = providers.find((provider) => provider.name === modelSettings.providerName);
   const desktopAssistantAvailable = Boolean(window.amadeusDesktop?.setDesktopAssistantMode);
@@ -328,20 +327,20 @@ export default function App() {
   const live2dLoadResolved = live2dReady || Boolean(live2dError);
   const loadingReady = minimumBootElapsed && live2dLoadResolved;
 
-  function speechInputSettingsForPersistence(): SpeechInputSettings {
+  const speechInputSettingsForPersistence = useMemo<SpeechInputSettings>(() => {
     if (speechInputSettings.providerName === DEFAULT_SPEECH_INPUT_SETTINGS.providerName && modelSettings.apiKey) {
       return { ...speechInputSettings, apiKey: "" };
     }
     return speechInputSettings;
-  }
+  }, [modelSettings.apiKey, speechInputSettings]);
 
-  function speechInputSettingsForRequest(): SpeechInputSettings {
-    const settings = normalizeSpeechInputSettings(speechInputSettingsForPersistence());
+  const speechInputSettingsForRequest = useMemo<SpeechInputSettings>(() => {
+    const settings = normalizeSpeechInputSettings(speechInputSettingsForPersistence);
     if (settings.providerName === DEFAULT_SPEECH_INPUT_SETTINGS.providerName) {
       return { ...settings, apiKey: modelSettings.apiKey || settings.apiKey };
     }
     return settings;
-  }
+  }, [modelSettings.apiKey, speechInputSettingsForPersistence]);
 
   function resizeComposerTextarea(element: HTMLTextAreaElement | null) {
     if (!element) {
@@ -360,6 +359,16 @@ export default function App() {
     setInput(event.target.value);
     resizeComposerTextarea(event.currentTarget);
   }
+
+  cleanupDesktopAssistantRuntimeRef.current = cleanupDesktopAssistantRuntime;
+  createDesktopAssistantConversationRef.current = createDesktopAssistantConversation;
+  ensureIncomingCodeTaskVisibleRef.current = ensureIncomingCodeTaskVisible;
+  handleCodeTaskEventOnceRef.current = handleCodeTaskEventOnce;
+  runDesktopAutoObservationRef.current = runDesktopAutoObservation;
+  scheduleMobileTaskViewPublishRef.current = scheduleMobileTaskViewPublish;
+  startDesktopAssistantListeningRef.current = startDesktopAssistantListening;
+  stopAudioPlaybackRef.current = stopAudioPlayback;
+  stopDesktopAssistantListeningRef.current = stopDesktopAssistantListening;
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -402,14 +411,17 @@ export default function App() {
     fetchProviders()
       .then((items) => {
         setProviders(items);
-        const current = items.find((provider) => provider.name === modelSettings.providerName);
-        if (current && (!modelSettings.baseUrl || !modelSettings.model)) {
-          setModelSettings((prev) => ({
+        setModelSettings((prev) => {
+          const current = items.find((provider) => provider.name === prev.providerName);
+          if (!current || prev.baseUrl || prev.model) {
+            return prev;
+          }
+          return {
             ...prev,
-            baseUrl: prev.baseUrl || current.baseUrl,
-            model: prev.model || current.defaultModel
-          }));
-        }
+            baseUrl: current.baseUrl,
+            model: current.defaultModel
+          };
+        });
       })
       .catch(() => setStatus("api offline"));
   }, []);
@@ -474,7 +486,7 @@ export default function App() {
       JSON.stringify({
         model: modelSettings,
         vision: visionSettings,
-        speechInput: speechInputSettingsForPersistence(),
+        speechInput: speechInputSettingsForPersistence,
         voice: voiceSettings,
         desktopAssistant: desktopAssistantSettings,
         mode
@@ -491,7 +503,7 @@ export default function App() {
       saveSettings({
         model: modelSettings,
         vision: visionSettings,
-        speechInput: speechInputSettingsForPersistence(),
+        speechInput: speechInputSettingsForPersistence,
         voice: voiceSettings,
         desktopAssistant: desktopAssistantSettings,
         mode
@@ -499,7 +511,7 @@ export default function App() {
         setStorageError(error instanceof Error ? error.message : "settings save failed");
       });
     }, 350);
-  }, [modelSettings, visionSettings, speechInputSettings, voiceSettings, desktopAssistantSettings, mode, storageOnline]);
+  }, [modelSettings, visionSettings, speechInputSettingsForPersistence, voiceSettings, desktopAssistantSettings, mode, storageOnline]);
 
   useEffect(() => {
     const payload = codeTasks.slice(0, CODE_TASK_MAX_HISTORY);
@@ -540,7 +552,7 @@ export default function App() {
       }
       setDesktopAssistantExiting(false);
       setDesktopAssistantMode(false);
-      cleanupDesktopAssistantRuntime();
+      cleanupDesktopAssistantRuntimeRef.current();
     });
     return () => {
       unsubscribe?.();
@@ -552,7 +564,7 @@ export default function App() {
       return;
     }
     desktopAssistantLaunchInitializedRef.current = true;
-    stopAudioPlayback();
+    stopAudioPlaybackRef.current();
     abortRef.current?.abort();
     setMenuOpen(false);
     setConfigOpen(false);
@@ -565,21 +577,21 @@ export default function App() {
     }));
     setDesktopAssistantMode(true);
     setDesktopAssistantStatus("监听中");
-    void createDesktopAssistantConversation();
+    void createDesktopAssistantConversationRef.current();
     void refreshDesktopCameraAvailability();
   }, [launchedAsDesktopAssistant, storageOnline, voiceSettings.autoPlay]);
 
   useEffect(() => {
     if (!desktopAssistantMode || !desktopAssistantSettings.autoVoiceInputEnabled) {
-      stopDesktopAssistantListening();
+      stopDesktopAssistantListeningRef.current();
       if (desktopAssistantMode && !desktopAssistantSettings.autoVoiceInputEnabled && !voiceRecording && !voiceInputBusy) {
         setDesktopAssistantStatus("手动语音");
       }
       return;
     }
-    void startDesktopAssistantListening();
+    void startDesktopAssistantListeningRef.current();
     return () => {
-      stopDesktopAssistantListening();
+      stopDesktopAssistantListeningRef.current();
     };
   }, [
     desktopAssistantMode,
@@ -639,7 +651,7 @@ export default function App() {
     }
     const intervalMs = clamp(desktopAssistantSettings.screenshotIntervalSeconds, 5, 120) * 1000;
     desktopAutoScreenshotTimerRef.current = window.setInterval(() => {
-      void runDesktopAutoObservation();
+      void runDesktopAutoObservationRef.current();
     }, intervalMs);
     return () => {
       if (desktopAutoScreenshotTimerRef.current !== null) {
@@ -715,10 +727,10 @@ export default function App() {
         if (!taskId) {
           return;
         }
-        if (!ensureIncomingCodeTaskVisible(taskId, event)) {
+        if (!ensureIncomingCodeTaskVisibleRef.current(taskId, event)) {
           return;
         }
-        handleCodeTaskEventOnce(event, taskId);
+        handleCodeTaskEventOnceRef.current(event, taskId);
       },
       onError: (message) => {
         if (rightPanelTab === "tasks") {
@@ -737,7 +749,7 @@ export default function App() {
     return subscribeCodeTaskEvents({
       taskId,
       replay: false,
-      onEvent: (event) => handleCodeTaskEventOnce(event, taskId),
+      onEvent: (event) => handleCodeTaskEventOnceRef.current(event, taskId),
       onError: (message) => {
         if (rightPanelTab === "tasks") {
           setCodeTaskStatus(message);
@@ -788,7 +800,7 @@ export default function App() {
     }
     pendingMobileTaskViewPublishRef.current = true;
     if (!codeTaskRunning || codeTaskStatus === "waiting_input" || codeTaskStatus === "error") {
-      scheduleMobileTaskViewPublish(120);
+      scheduleMobileTaskViewPublishRef.current(120);
     }
   }, [activeCodeTaskId, codeTaskMessages, codeTaskStatus, codeTaskWorkspace, codeTaskRunning]);
 
@@ -827,9 +839,9 @@ export default function App() {
       if (desktopDragFrameRef.current !== null) {
         window.cancelAnimationFrame(desktopDragFrameRef.current);
       }
-      stopAudioPlayback();
+      stopAudioPlaybackRef.current();
       cleanupVoiceRecordingResources();
-      stopDesktopAssistantListening();
+      stopDesktopAssistantListeningRef.current();
     };
   }, []);
 
@@ -2280,7 +2292,7 @@ export default function App() {
         file,
         durationSeconds,
         model: modelSettings,
-        speechInput: speechInputSettingsForRequest()
+        speechInput: speechInputSettingsForRequest
       });
       const transcript = result.text.trim();
       const voiceInput: VoiceInputInfo = {

@@ -196,11 +196,17 @@ export const Live2DStage = forwardRef<Live2DStageHandle, Live2DStageProps>(
       startY: number;
       transform: Live2DModelTransform;
     } | null>(null);
+    const modelRecordRef = useRef(modelRecord);
     const onReadyRef = useRef(onReady);
     const onErrorRef = useRef(onError);
     const onTransformChangeRef = useRef(onTransformChange);
     const transformCommitTimerRef = useRef<number | null>(null);
     const [status, setStatus] = useState("loading");
+    const modelId = modelRecord.id;
+    const modelUrl = modelRecord.modelUrl;
+    const modelTransform = modelRecord.transform;
+
+    modelRecordRef.current = modelRecord;
 
     useEffect(() => {
       onReadyRef.current = onReady;
@@ -246,9 +252,9 @@ export const Live2DStage = forwardRef<Live2DStageHandle, Live2DStageProps>(
     }
 
     useEffect(() => {
-      transformRef.current = normalizeTransform(modelRecord.transform);
+      transformRef.current = normalizeTransform(modelTransform);
       applyModelTransform();
-    }, [modelRecord.transform.offsetX, modelRecord.transform.offsetY, modelRecord.transform.scale]);
+    }, [modelTransform]);
 
     useImperativeHandle(ref, () => ({
       playEmotion(emotion: string) {
@@ -325,7 +331,7 @@ export const Live2DStage = forwardRef<Live2DStageHandle, Live2DStageProps>(
 
       async function boot() {
         setStatus("loading");
-        if (!modelRecord.modelUrl) {
+        if (!modelUrl) {
           throw new Error("Live2D model URL is empty.");
         }
         await loadLive2DScripts();
@@ -354,7 +360,7 @@ export const Live2DStage = forwardRef<Live2DStageHandle, Live2DStageProps>(
         host.appendChild(app.view);
         appRef.current = app;
 
-        const model = await pixi.live2d.Live2DModel.from(modelRecord.modelUrl, {
+        const model = await pixi.live2d.Live2DModel.from(modelUrl, {
           autoInteract: true,
           motionPreload: pixi.live2d.MotionPreloadStrategy.NONE
         });
@@ -403,7 +409,7 @@ export const Live2DStage = forwardRef<Live2DStageHandle, Live2DStageProps>(
         resizeObserver = new ResizeObserver(fitModel);
         resizeObserver.observe(host);
         idleTimer = window.setInterval(() => {
-          const motion = pickIdleMotion(modelRecord);
+          const motion = pickIdleMotion(modelRecordRef.current);
           if (!motion) {
             return;
           }
@@ -453,7 +459,7 @@ export const Live2DStage = forwardRef<Live2DStageHandle, Live2DStageProps>(
           appRef.current = null;
         }
       };
-    }, [modelRecord.id, modelRecord.modelUrl]);
+    }, [modelId, modelUrl]);
 
     function handlePointerDown(event: React.PointerEvent<HTMLDivElement>) {
       if (transformLocked || event.button !== 0 || !modelRef.current || !baseFitRef.current) {

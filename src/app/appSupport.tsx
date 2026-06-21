@@ -1,4 +1,4 @@
-﻿import type { ReactNode } from "react";
+import type { ReactNode } from "react";
 import type {
   ApiChatMessage,
   AssistantVoiceInfo,
@@ -17,8 +17,9 @@ import type {
   VisionSettings,
   VoiceSettings
 } from "../types";
+import { PERSONA_ID } from "../config";
+
 const STORAGE_KEY = "amadeus-web-settings-v1";
-const PERSONA_ID = "kurisu_amadeus";
 const LEFT_SIDEBAR_WIDTH = 372;
 const SETTINGS_SIDEBAR_WIDTH = 388;
 const PANEL_GAP = 14;

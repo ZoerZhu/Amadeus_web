@@ -25,6 +25,7 @@ import type {
   VisionSettings,
   VoiceSettings
 } from "./types";
+import { PERSONA_ID } from "./config";
 
 const CODE_TASK_EVENT_NAMES = [
   "input",
@@ -70,7 +71,7 @@ export async function streamChat(options: {
       conversationId: options.conversationId || undefined,
       messages: options.messages,
       attachments: options.attachments ?? [],
-      personaId: "kurisu_amadeus",
+      personaId: PERSONA_ID,
       mode: options.mode,
       model: options.model,
       vision: options.vision,
@@ -136,7 +137,7 @@ export async function observeDesktop(options: DesktopObserveRequest): Promise<De
       attachments: options.attachments,
       conversationId: options.conversationId || undefined,
       saveResponse: options.saveResponse ?? false,
-      personaId: "kurisu_amadeus",
+      personaId: PERSONA_ID,
       model: options.model,
       vision: options.vision
     })
@@ -450,7 +451,7 @@ export async function synthesizeVoice(options: {
       text: options.text,
       conversationId: options.conversationId || undefined,
       messageId: options.messageId || undefined,
-      personaId: "kurisu_amadeus",
+      personaId: PERSONA_ID,
       model: options.model,
       voice: options.voice
     })
@@ -478,7 +479,7 @@ export async function synthesizeTaskSummaryVoice(options: {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         summary: options.summary,
-        personaId: "kurisu_amadeus",
+        personaId: PERSONA_ID,
         model: options.model,
         voice: options.voice
       }),
@@ -514,7 +515,7 @@ export async function streamTaskSummaryVoice(options: {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
       summary: options.summary,
-      personaId: "kurisu_amadeus",
+      personaId: PERSONA_ID,
       model: options.model,
       voice: options.voice
     }),

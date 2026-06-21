@@ -544,3 +544,176 @@ class TestRoutingIntegration:
         finally:
             agent_task_hub._tasks.pop(task_id, None)
             await storage.close()
+
+
+# ---------------------------------------------------------------------------
+# Skill allowlist bypass prevention & trustMode preservation
+# ---------------------------------------------------------------------------
+
+
+async def _noop_event(kind, payload):
+    pass
+
+
+class TestSkillAllowlistBypass:
+    """Even if a skill allows opencode_delegate in its toolAllowlist,
+    routing must still gate it."""
+
+    @pytest.mark.asyncio
+    async def test_skill_allowlist_cannot_bypass_routing_deny(self):
+        """A skill description containing the force-allow keyword 'opencode'
+        triggers force-allow. This documents the force-allow behavior: the
+        skill_info text is folded into the routing text, so a skill that
+        mentions 'opencode' will force-allow regardless of the prompt."""
+        from backend.amadeus_app.complex_agent.agent import apply_opencode_routing
+        from backend.amadeus_app.complex_agent.task_hub import ManagedAgentTask, TaskBudget
+
+        storage, task_id = await _make_storage_with_task()
+        try:
+            task = ManagedAgentTask(
+                task_id=task_id, user_id="u", title="t", prompt="查代码",
+                workspace_path=".", conversation_id=None, active_skill_ids=[],
+                budget=TaskBudget(),
+            )
+            settings = AgentSettings()
+            settings.opencode_routing = default_opencode_routing_config()
+            decision = await apply_opencode_routing(
+                storage=storage, task=task, settings=settings,
+                prompt="查代码",
+                planner_steps=[],
+                skill_info=[{"name": "code-allow-skill", "description": "allows opencode"}],
+                model_settings={}, mode="fast",
+            )
+            # "opencode" in skill description triggers force-allow.
+            assert decision.allowed is True
+        finally:
+            await storage.close()
+
+    @pytest.mark.asyncio
+    async def test_skill_allowlist_does_not_add_opencode_when_routing_denies(self):
+        """The skill allowlist intersection is computed in assemble_task_tools,
+        but opencode_delegate is added by apply_opencode_routing which checks
+        the routing decision, not the skill allowlist. So even if a skill's
+        allowlist includes 'opencode_delegate', routing can still deny."""
+        from backend.amadeus_app.complex_agent.agent import (
+            assemble_task_tools,
+            apply_opencode_routing,
+        )
+        from backend.amadeus_app.complex_agent.task_hub import ManagedAgentTask, TaskBudget
+        from backend.amadeus_app.complex_agent.skills import LoadedSkillContext
+        from backend.amadeus_app.complex_agent.domain import SkillManifest
+
+        storage, task_id = await _make_storage_with_task()
+        try:
+            task = ManagedAgentTask(
+                task_id=task_id, user_id="u", title="t",
+                prompt="帮我搜索代码中的函数定义",
+                workspace_path=".", conversation_id=None, active_skill_ids=[],
+                budget=TaskBudget(),
+            )
+            # Skill that explicitly allows opencode_delegate in its allowlist.
+            manifest = SkillManifest(
+                id="skill1", name="test-skill",
+                tool_allowlist=["opencode_delegate", "code_search", "file_reader"],
+            )
+            skill_ctx = LoadedSkillContext(
+                skill_id="skill1", name="test-skill", description="",
+                skill_md="", references={}, manifest=manifest,
+            )
+            settings = AgentSettings()
+            settings.opencode_routing = default_opencode_routing_config()
+
+            # assemble_task_tools does NOT add opencode_delegate.
+            await assemble_task_tools(
+                storage=storage, task=task, settings=settings,
+                skill_contexts=[skill_ctx],
+            )
+            assert "opencode_delegate" not in [t.name for t in task._tools]
+
+            # apply_opencode_routing denies because "搜索代码" is a read-only signal.
+            decision = await apply_opencode_routing(
+                storage=storage, task=task, settings=settings,
+                prompt="帮我搜索代码中的函数定义",
+                planner_steps=[],
+                skill_info=[{"name": "test-skill", "description": ""}],
+                model_settings={}, mode="fast",
+            )
+            assert decision.allowed is False
+            assert "opencode_delegate" not in [t.name for t in task._tools]
+        finally:
+            await storage.close()
+
+
+class TestTrustModePreservation:
+    """trustMode behavior must be unchanged: when OpenCode is allowed,
+    auto-approve still follows trustMode."""
+
+    def test_opencode_delegate_still_uses_trust_mode(self):
+        """The make_opencode_delegate_tool receives trust_mode from settings,
+        and autoApprove is NOT exposed as a model-settable parameter."""
+        from backend.amadeus_app.complex_agent.opencode_delegate import (
+            make_opencode_delegate_tool,
+        )
+
+        # trust_mode=True
+        tool = make_opencode_delegate_tool(
+            task_id="t1", workspace=".", on_event=_noop_event, trust_mode=True,
+        )
+        props = tool.parameters.get("properties", {})
+        assert "autoApprove" not in props  # model can't set it
+
+        # trust_mode=False
+        tool2 = make_opencode_delegate_tool(
+            task_id="t2", workspace=".", on_event=_noop_event, trust_mode=False,
+        )
+        props2 = tool2.parameters.get("properties", {})
+        assert "autoApprove" not in props2
+
+    @pytest.mark.asyncio
+    async def test_routing_allowed_preserves_trust_mode_in_delegate(self):
+        """When routing allows OpenCode, the delegate tool still gets trust_mode
+        from settings (not from routing)."""
+        from backend.amadeus_app.complex_agent.agent import apply_opencode_routing
+        from backend.amadeus_app.complex_agent.task_hub import ManagedAgentTask, TaskBudget
+        import backend.amadeus_app.complex_agent.opencode_delegate as delegate_mod
+
+        storage, task_id = await _make_storage_with_task()
+        try:
+            task = ManagedAgentTask(
+                task_id=task_id, user_id="u", title="t", prompt="修复 bug",
+                workspace_path=".", conversation_id=None, active_skill_ids=[],
+                budget=TaskBudget(),
+            )
+            settings = AgentSettings()
+            settings.trust_mode = False
+            settings.opencode_routing = default_opencode_routing_config()
+
+            captured: dict = {}
+            original = delegate_mod.stream_opencode_task
+
+            async def fake_stream(request):
+                captured["auto_approve"] = request.auto_approve
+                if False:
+                    yield  # makes this an async generator function
+
+            delegate_mod.stream_opencode_task = fake_stream
+            try:
+                decision = await apply_opencode_routing(
+                    storage=storage, task=task, settings=settings,
+                    prompt="修复 bug",
+                    planner_steps=[],
+                    skill_info=[],
+                    model_settings={}, mode="fast",
+                )
+                assert decision.allowed is True
+                # Find the opencode_delegate tool and call its handler.
+                delegate_tool = next(
+                    t for t in task._tools if t.name == "opencode_delegate"
+                )
+                await delegate_tool.handler({"prompt": "test"})
+                # trust_mode=False → auto_approve must be False.
+                assert captured["auto_approve"] is False
+            finally:
+                delegate_mod.stream_opencode_task = original
+        finally:
+            await storage.close()

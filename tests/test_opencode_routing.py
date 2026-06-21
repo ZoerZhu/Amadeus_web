@@ -53,3 +53,197 @@ class TestRoutingDomainModels:
         data = settings.model_dump(by_alias=True)
         restored = AgentSettings.model_validate(data)
         assert restored.opencode_routing.allow_threshold == 70
+
+
+from backend.amadeus_app.complex_agent.opencode_routing import (
+    compute_opencode_routing_decision,
+    default_opencode_routing_config,
+)
+
+
+class TestRoutingScoring:
+    def _config(self):
+        return default_opencode_routing_config()
+
+    def test_opencode_disabled_hard_off(self):
+        decision = compute_opencode_routing_decision(
+            prompt="重构整个项目并跑测试",
+            planner_steps=[],
+            skill_info=[],
+            config=self._config(),
+            opencode_enabled=False,
+        )
+        assert decision.allowed is False
+        assert decision.method == "force_deny"
+
+    def test_force_allow_keyword(self):
+        decision = compute_opencode_routing_decision(
+            prompt="请用 opencode 修改这个文件",
+            planner_steps=[],
+            skill_info=[],
+            config=self._config(),
+            opencode_enabled=True,
+        )
+        assert decision.allowed is True
+        assert decision.method == "force_allow"
+
+    def test_force_deny_keyword_overrides_everything(self):
+        config = self._config()
+        config.force_deny_keywords = ["nocode"]
+        decision = compute_opencode_routing_decision(
+            prompt="用 opencode 重构 nocode 项目",
+            planner_steps=[],
+            skill_info=[],
+            config=config,
+            opencode_enabled=True,
+        )
+        assert decision.allowed is False
+        assert decision.method == "force_deny"
+
+    def test_readonly_search_code_denies(self):
+        decision = compute_opencode_routing_decision(
+            prompt="帮我查代码里哪里调用了 foo 函数",
+            planner_steps=[{"goal": "搜索 foo 的调用位置"}],
+            skill_info=[],
+            config=self._config(),
+            opencode_enabled=True,
+        )
+        assert decision.allowed is False
+        assert decision.score < 40
+
+    def test_explain_implementation_denies(self):
+        decision = compute_opencode_routing_decision(
+            prompt="解释一下这个模块是怎么实现的",
+            planner_steps=[],
+            skill_info=[],
+            config=self._config(),
+            opencode_enabled=True,
+        )
+        assert decision.allowed is False
+
+    def test_fix_bug_allows(self):
+        decision = compute_opencode_routing_decision(
+            prompt="修复登录页面的 bug，用户点击按钮没反应",
+            planner_steps=[{"goal": "修复 bug"}],
+            skill_info=[],
+            config=self._config(),
+            opencode_enabled=True,
+        )
+        assert decision.allowed is True
+        assert decision.score >= 60
+
+    def test_run_tests_allows(self):
+        decision = compute_opencode_routing_decision(
+            prompt="帮我跑一下测试",
+            planner_steps=[],
+            skill_info=[],
+            config=self._config(),
+            opencode_enabled=True,
+        )
+        assert decision.allowed is True
+
+    def test_multi_file_edit_allows(self):
+        decision = compute_opencode_routing_decision(
+            prompt="需要跨文件修改，把所有 API 调用都加上错误处理",
+            planner_steps=[],
+            skill_info=[],
+            config=self._config(),
+            opencode_enabled=True,
+        )
+        assert decision.allowed is True
+
+    def test_ambiguous_zone_no_llm_denies(self):
+        config = self._config()
+        config.allow_llm_rejudge = False
+        # "实现功能" gives +15, base 30 → 45, which is in ambiguous zone (40-59)
+        decision = compute_opencode_routing_decision(
+            prompt="实现一个简单的功能",
+            planner_steps=[],
+            skill_info=[],
+            config=config,
+            opencode_enabled=True,
+        )
+        assert decision.allowed is False
+        assert config.ambiguous_threshold <= decision.score < config.allow_threshold
+
+    def test_ambiguous_zone_llm_rejudge_allows(self):
+        def fake_llm(prompt, steps, config):
+            return True
+
+        config = self._config()
+        decision = compute_opencode_routing_decision(
+            prompt="实现一个简单的功能",
+            planner_steps=[],
+            skill_info=[],
+            config=config,
+            opencode_enabled=True,
+            llm_rejudge_fn=fake_llm,
+        )
+        assert decision.allowed is True
+        assert decision.method == "llm_rejudge"
+
+    def test_ambiguous_zone_llm_rejudge_denies(self):
+        def fake_llm(prompt, steps, config):
+            return False
+
+        config = self._config()
+        decision = compute_opencode_routing_decision(
+            prompt="实现一个简单的功能",
+            planner_steps=[],
+            skill_info=[],
+            config=config,
+            opencode_enabled=True,
+            llm_rejudge_fn=fake_llm,
+        )
+        assert decision.allowed is False
+        assert decision.method == "llm_rejudge"
+
+    def test_llm_rejudge_failure_denies(self):
+        def failing_llm(prompt, steps, config):
+            raise RuntimeError("LLM unavailable")
+
+        config = self._config()
+        decision = compute_opencode_routing_decision(
+            prompt="实现一个简单的功能",
+            planner_steps=[],
+            skill_info=[],
+            config=config,
+            opencode_enabled=True,
+            llm_rejudge_fn=failing_llm,
+        )
+        assert decision.allowed is False
+        assert decision.method == "llm_rejudge"
+
+    def test_routing_disabled_falls_back_to_allow(self):
+        config = self._config()
+        config.enabled = False
+        decision = compute_opencode_routing_decision(
+            prompt="查代码",
+            planner_steps=[],
+            skill_info=[],
+            config=config,
+            opencode_enabled=True,
+        )
+        assert decision.allowed is True
+
+    def test_planner_steps_contribute_to_text(self):
+        decision = compute_opencode_routing_decision(
+            prompt="帮我处理一下",
+            planner_steps=[{"goal": "修复 bug 并跑测试"}],
+            skill_info=[],
+            config=self._config(),
+            opencode_enabled=True,
+        )
+        assert decision.allowed is True
+        assert "修 Bug" in decision.matched_rules or "跑测试" in decision.matched_rules
+
+    def test_skill_info_contributes_to_text(self):
+        decision = compute_opencode_routing_decision(
+            prompt="帮我处理一下",
+            planner_steps=[],
+            skill_info=[{"name": "codebase-navigation", "description": "搜索代码"}],
+            config=self._config(),
+            opencode_enabled=True,
+        )
+        # "搜索代码" matches "查代码" rule → negative score
+        assert decision.score < 40

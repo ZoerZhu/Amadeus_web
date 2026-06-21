@@ -61,7 +61,16 @@ const DEFAULT_AGENT_SETTINGS: AgentSettings = {
   artifactRoot: "generated_docs/agent_artifacts",
   rollbackEnabled: true,
   browserEnabled: false,
-  opencodeEnabled: true
+  opencodeEnabled: true,
+  opencodeRouting: {
+    enabled: true,
+    allowThreshold: 60,
+    ambiguousThreshold: 40,
+    allowLlmRejudge: true,
+    forceAllowKeywords: [],
+    forceDenyKeywords: [],
+    rules: []
+  }
 };
 
 function normalizeAgentSettings(value?: Partial<AgentSettings> | null): AgentSettings {

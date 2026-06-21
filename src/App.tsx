@@ -220,7 +220,16 @@ export default function App() {
     artifactRoot: "generated_docs/agent_artifacts",
     rollbackEnabled: true,
     browserEnabled: false,
-    opencodeEnabled: true
+    opencodeEnabled: true,
+    opencodeRouting: {
+      enabled: true,
+      allowThreshold: 60,
+      ambiguousThreshold: 40,
+      allowLlmRejudge: true,
+      forceAllowKeywords: [],
+      forceDenyKeywords: [],
+      rules: []
+    }
   });
   const [mcpServers, setMcpServers] = useState<McpServerConfig[]>([]);
   const [skills, setSkills] = useState<SkillPackageInfo[]>([]);

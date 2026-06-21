@@ -68,6 +68,7 @@ const EVENT_KIND_LABELS: Record<AgentEventKind, string> = {
   artifact: "产物",
   question: "提问",
   sampling: "采样",
+  opencode_routing: "OpenCode 路由",
   error: "错误",
   done: "完成"
 };

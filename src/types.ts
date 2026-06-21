@@ -399,6 +399,28 @@ export type TaskSummaryVoiceEvent =
 // Complex agent / MCP / skills subsystem
 // ---------------------------------------------------------------------------
 
+export type RoutingMatchType = "keyword" | "regex";
+export type RoutingDecisionMethod = "force_allow" | "force_deny" | "rule" | "llm_rejudge";
+
+export interface OpencodeRoutingRule {
+  id: string;
+  name: string;
+  weight: number;
+  keywords: string[];
+  matchType: RoutingMatchType;
+  description: string;
+}
+
+export interface OpencodeRoutingConfig {
+  enabled: boolean;
+  allowThreshold: number;
+  ambiguousThreshold: number;
+  allowLlmRejudge: boolean;
+  forceAllowKeywords: string[];
+  forceDenyKeywords: string[];
+  rules: OpencodeRoutingRule[];
+}
+
 export interface AgentSettings {
   enabled: boolean;
   trustMode: boolean;
@@ -411,6 +433,7 @@ export interface AgentSettings {
   rollbackEnabled: boolean;
   browserEnabled: boolean;
   opencodeEnabled: boolean;
+  opencodeRouting: OpencodeRoutingConfig;
 }
 
 export type McpTransport = "stdio" | "http";
@@ -477,6 +500,7 @@ export type AgentEventKind =
   | "artifact"
   | "question"
   | "sampling"
+  | "opencode_routing"
   | "error"
   | "done";
 

@@ -389,3 +389,158 @@ class TestFileWriterCodeProtection:
     def test_code_file_extensions_includes_common_types(self):
         for ext in [".py", ".ts", ".tsx", ".js", ".jsx", ".go", ".rs", ".java", ".vue", ".svelte"]:
             assert ext in CODE_FILE_EXTENSIONS
+
+
+# ---------------------------------------------------------------------------
+# Integration: assemble_task_tools + apply_opencode_routing
+# ---------------------------------------------------------------------------
+
+
+class TestRoutingIntegration:
+    """Test that assemble_task_tools does NOT add opencode_delegate by default,
+    and that apply_opencode_routing conditionally adds it."""
+
+    @pytest.mark.asyncio
+    async def test_assemble_task_tools_no_opencode_by_default(self):
+        """opencode_delegate must NOT be in task._tools after assemble_task_tools.
+        It is added later by apply_opencode_routing if the decision allows."""
+        from backend.amadeus_app.complex_agent.agent import assemble_task_tools
+        from backend.amadeus_app.complex_agent.task_hub import ManagedAgentTask, TaskBudget
+
+        storage, task_id = await _make_storage_with_task()
+        try:
+            task = ManagedAgentTask(
+                task_id=task_id, user_id="u", title="t", prompt="查代码",
+                workspace_path=".", conversation_id=None, active_skill_ids=[],
+                budget=TaskBudget(),
+            )
+            settings = AgentSettings()
+            settings.opencode_routing = default_opencode_routing_config()
+            tools = await assemble_task_tools(
+                storage=storage, task=task, settings=settings, skill_contexts=[],
+            )
+            tool_names = [t.name for t in tools]
+            assert "opencode_delegate" not in tool_names
+            assert "file_writer" in tool_names
+            assert "code_search" in tool_names
+        finally:
+            await storage.close()
+
+    @pytest.mark.asyncio
+    async def test_assemble_task_tools_file_writer_has_protection_flag(self):
+        """file_writer must have a code_write_allowed_fn that defaults to False."""
+        from backend.amadeus_app.complex_agent.agent import assemble_task_tools
+        from backend.amadeus_app.complex_agent.task_hub import ManagedAgentTask, TaskBudget
+
+        storage, task_id = await _make_storage_with_task()
+        try:
+            task = ManagedAgentTask(
+                task_id=task_id, user_id="u", title="t", prompt="test",
+                workspace_path=".", conversation_id=None, active_skill_ids=[],
+                budget=TaskBudget(),
+            )
+            settings = AgentSettings()
+            settings.opencode_routing = default_opencode_routing_config()
+            await assemble_task_tools(
+                storage=storage, task=task, settings=settings, skill_contexts=[],
+            )
+            # The flag should be stored on the task, defaulting to False
+            assert task.settings.get("_opencode_allowed") is False
+        finally:
+            await storage.close()
+
+    @pytest.mark.asyncio
+    async def test_apply_opencode_routing_allows_for_bug_fix(self):
+        """After routing, opencode_delegate is added for bug-fix tasks."""
+        from backend.amadeus_app.complex_agent.agent import apply_opencode_routing
+        from backend.amadeus_app.complex_agent.task_hub import ManagedAgentTask, TaskBudget
+
+        storage, task_id = await _make_storage_with_task()
+        try:
+            task = ManagedAgentTask(
+                task_id=task_id, user_id="u", title="t", prompt="修复登录 bug",
+                workspace_path=".", conversation_id=None, active_skill_ids=[],
+                budget=TaskBudget(),
+            )
+            settings = AgentSettings()
+            settings.opencode_routing = default_opencode_routing_config()
+            decision = await apply_opencode_routing(
+                storage=storage, task=task, settings=settings,
+                prompt="修复登录 bug",
+                planner_steps=[{"goal": "修复 bug"}],
+                skill_info=[],
+                model_settings={}, mode="fast",
+            )
+            assert decision.allowed is True
+            assert "opencode_delegate" in [t.name for t in task._tools]
+            assert task.settings.get("_opencode_allowed") is True
+        finally:
+            await storage.close()
+
+    @pytest.mark.asyncio
+    async def test_apply_opencode_routing_denies_for_search(self):
+        """After routing, opencode_delegate is NOT added for search tasks."""
+        from backend.amadeus_app.complex_agent.agent import apply_opencode_routing
+        from backend.amadeus_app.complex_agent.task_hub import ManagedAgentTask, TaskBudget
+
+        storage, task_id = await _make_storage_with_task()
+        try:
+            task = ManagedAgentTask(
+                task_id=task_id, user_id="u", title="t", prompt="查代码",
+                workspace_path=".", conversation_id=None, active_skill_ids=[],
+                budget=TaskBudget(),
+            )
+            settings = AgentSettings()
+            settings.opencode_routing = default_opencode_routing_config()
+            decision = await apply_opencode_routing(
+                storage=storage, task=task, settings=settings,
+                prompt="查代码",
+                planner_steps=[],
+                skill_info=[],
+                model_settings={}, mode="fast",
+            )
+            assert decision.allowed is False
+            assert "opencode_delegate" not in [t.name for t in task._tools]
+            assert task.settings.get("_opencode_allowed") is False
+        finally:
+            await storage.close()
+
+    @pytest.mark.asyncio
+    async def test_apply_opencode_routing_emits_event(self):
+        """Routing decision must emit an opencode_routing event."""
+        from backend.amadeus_app.complex_agent.agent import apply_opencode_routing
+        from backend.amadeus_app.complex_agent.task_hub import (
+            ManagedAgentTask,
+            TaskBudget,
+            agent_task_hub,
+        )
+        from backend.amadeus_app.complex_agent import agent_storage
+
+        storage, task_id = await _make_storage_with_task()
+        try:
+            task = ManagedAgentTask(
+                task_id=task_id, user_id="u", title="t", prompt="查代码",
+                workspace_path=".", conversation_id=None, active_skill_ids=[],
+                budget=TaskBudget(),
+            )
+            # Register task in hub so events are stored
+            agent_task_hub._tasks[task.task_id] = task
+            settings = AgentSettings()
+            settings.opencode_routing = default_opencode_routing_config()
+            await apply_opencode_routing(
+                storage=storage, task=task, settings=settings,
+                prompt="查代码",
+                planner_steps=[],
+                skill_info=[],
+                model_settings={}, mode="fast",
+            )
+            events = await agent_storage.list_agent_task_events(storage, task_id=task_id, after_seq=0)
+            routing_events = [e for e in events if e["kind"] == "opencode_routing"]
+            assert len(routing_events) >= 1
+            payload = routing_events[0]["payload"]
+            assert "allowed" in payload
+            assert "score" in payload
+            assert "method" in payload
+        finally:
+            agent_task_hub._tasks.pop(task_id, None)
+            await storage.close()

@@ -283,7 +283,7 @@ class SQLiteStorage:
                 task_id         TEXT NOT NULL REFERENCES agent_tasks(id) ON DELETE CASCADE,
                 seq             INTEGER NOT NULL,
                 kind            TEXT NOT NULL
-                                CHECK (kind IN ('status','plan','step','tool','mcp','browser','artifact','question','sampling','error','done')),
+                                CHECK (kind IN ('status','plan','step','tool','mcp','browser','artifact','question','sampling','opencode_routing','error','done')),
                 role            TEXT NOT NULL DEFAULT '',
                 name            TEXT NOT NULL DEFAULT '',
                 status          TEXT NOT NULL DEFAULT '',

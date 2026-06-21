@@ -39,9 +39,14 @@ from ..providers import get_provider
 from ..runtime_config import effective_model_settings
 from . import agent_storage
 from .browser import close_browser_session, make_browser_tool
-from .domain import AgentSettings, AgentTaskCreateRequest
+from .domain import AgentSettings, AgentTaskCreateRequest, OpencodeRoutingDecision
 from .file_writer import make_file_writer_tool
 from .opencode_delegate import make_opencode_delegate_tool
+from .opencode_routing import (
+    build_llm_rejudge_fn,
+    compute_opencode_routing_decision,
+    default_opencode_routing_config,
+)
 from .skills import LoadedSkillContext, load_skill_context
 from .task_hub import ManagedAgentTask, TaskBudget, agent_task_hub
 from .tool_registry import UnifiedTool, classify_tool_permission, unified_tool_registry
@@ -189,12 +194,17 @@ async def assemble_task_tools(
             continue
         tools.append(tool)
 
+    # Mutable flag for file_writer code-file protection.
+    # Updated by apply_opencode_routing() after the planner runs.
+    task.settings["_opencode_allowed"] = False
+
     # Add task-scoped tools
     file_writer = make_file_writer_tool(
         storage=storage,
         task_id=task.task_id,
         workspace=task.workspace_path or settings.default_workspace,
         artifact_root=settings.artifact_root,
+        code_write_allowed_fn=lambda: bool(task.settings.get("_opencode_allowed", False)),
     )
     tools.append(file_writer)
 
@@ -207,24 +217,9 @@ async def assemble_task_tools(
         tools.append(browser_tool)
         task.add_cleanup_hook(lambda: close_browser_session(browser_tool))
 
-    if settings.opencode_enabled:
-        async def _on_event(kind: str, payload: dict[str, Any]) -> None:
-            await task.emit(
-                storage=storage,
-                kind=kind,  # type: ignore[arg-type]
-                name=payload.get("name", ""),
-                status=payload.get("status", ""),
-                summary=payload.get("summary", ""),
-                payload=payload,
-            )
-
-        opencode_tool = make_opencode_delegate_tool(
-            task_id=task.task_id,
-            workspace=task.workspace_path or settings.default_workspace,
-            on_event=_on_event,
-            trust_mode=settings.trust_mode,
-        )
-        tools.append(opencode_tool)
+    # NOTE: opencode_delegate is NOT added here. It is conditionally added
+    # by apply_opencode_routing() after the planner generates steps, based on
+    # the routing decision (complexity scoring + optional LLM re-judge).
 
     # Add local safe tools (code_search, local_git, markitdown_convert)
     from .local_tools import (
@@ -253,6 +248,86 @@ async def assemble_task_tools(
 
     task._tools = tools
     return tools
+
+
+async def apply_opencode_routing(
+    *,
+    storage,
+    task: ManagedAgentTask,
+    settings: AgentSettings,
+    prompt: str,
+    planner_steps: list[dict[str, Any]],
+    skill_info: list[dict[str, Any]],
+    model_settings: dict[str, Any],
+    mode: str,
+) -> OpencodeRoutingDecision:
+    """Compute the OpenCode routing decision and conditionally expose opencode_delegate.
+
+    Called after the planner generates steps. If the decision is ``allowed``,
+    appends ``opencode_delegate`` to ``task._tools`` and sets
+    ``task.settings["_opencode_allowed"] = True`` so ``file_writer`` can write
+    code files. Emits an ``opencode_routing`` event with the decision details.
+    """
+    # Resolve routing config: use settings.opencode_routing, or defaults if empty.
+    config = settings.opencode_routing
+    if not config.rules and config.enabled:
+        config = default_opencode_routing_config()
+
+    # Build LLM re-judge function if enabled.
+    llm_rejudge_fn = None
+    if config.allow_llm_rejudge:
+        llm_rejudge_fn = build_llm_rejudge_fn(call_llm, model_settings, mode)
+
+    decision = await compute_opencode_routing_decision(
+        prompt=prompt,
+        planner_steps=planner_steps,
+        skill_info=skill_info,
+        config=config,
+        opencode_enabled=settings.opencode_enabled,
+        llm_rejudge_fn=llm_rejudge_fn,
+    )
+
+    # Apply the decision: conditionally add opencode_delegate.
+    if decision.allowed:
+        async def _on_event(kind: str, payload: dict[str, Any]) -> None:
+            await task.emit(
+                storage=storage,
+                kind=kind,  # type: ignore[arg-type]
+                name=payload.get("name", ""),
+                status=payload.get("status", ""),
+                summary=payload.get("summary", ""),
+                payload=payload,
+            )
+
+        opencode_tool = make_opencode_delegate_tool(
+            task_id=task.task_id,
+            workspace=task.workspace_path or settings.default_workspace,
+            on_event=_on_event,
+            trust_mode=settings.trust_mode,
+        )
+        task._tools.append(opencode_tool)
+        task.settings["_opencode_allowed"] = True
+    else:
+        task.settings["_opencode_allowed"] = False
+
+    # Emit routing event.
+    await task.emit(
+        storage=storage,
+        kind="opencode_routing",
+        name="routing",
+        status="allowed" if decision.allowed else "denied",
+        summary=decision.reason,
+        payload={
+            "allowed": decision.allowed,
+            "score": decision.score,
+            "matchedRules": decision.matched_rules,
+            "method": decision.method,
+            "reason": decision.reason,
+            "opencodeEnabled": settings.opencode_enabled,
+        },
+    )
+
+    return decision
 
 
 # ---------------------------------------------------------------------------
@@ -369,6 +444,22 @@ async def planner_node(state: AgentState, *, task: ManagedAgentTask, storage, co
             "risks": state["risks"],
         }},
     )
+    # Compute OpenCode routing decision based on prompt + planner steps + skills.
+    skill_info = [
+        {"name": ctx.manifest.name, "description": ctx.manifest.description}
+        for ctx in config.skill_contexts
+    ]
+    await apply_opencode_routing(
+        storage=storage,
+        task=task,
+        settings=config.agent_settings,
+        prompt=state.get("prompt", task.prompt),
+        planner_steps=plan,
+        skill_info=skill_info,
+        model_settings=config.model_settings,
+        mode=config.mode,
+    )
+
     return state
 
 

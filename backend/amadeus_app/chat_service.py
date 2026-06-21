@@ -1028,6 +1028,101 @@ async def stream_chat(
     chat_messages = [message.model_copy() for message in request.messages]
     thinking_log: list[str] = []
 
+    # Complex task routing: if the latest user message indicates a complex
+    # multi-step task, create an Agent Task and emit a complex_task event
+    # so the frontend can open the task panel. The task runs in the
+    # background and writes its summary back to the conversation.
+    try:
+        from .complex_agent.chat_router import detect_complex_task_intent
+        from .complex_agent.domain import AgentSettings
+        from .complex_agent.task_hub import TaskBudget, agent_task_hub
+        from .complex_agent.agent import run_agent_task
+        from .complex_agent.skills import load_skill_context
+        from .complex_agent.tool_registry import sync_builtin_tools
+        from .storage import DEFAULT_USER_ID as _DEFAULT_USER_ID
+
+        last_user_msg = next(
+            (m for m in reversed(chat_messages) if m.role == "user" and m.content.strip()),
+            None,
+        )
+        if last_user_msg is not None and storage is not None and storage.connected:
+            agent_settings_dict = (await storage.get_settings(_DEFAULT_USER_ID) or {}).get("agent") or {}
+            agent_settings = AgentSettings.model_validate(agent_settings_dict)
+            if agent_settings.enabled:
+                enabled_skills = await __import__(
+                    "amadeus_app.complex_agent.agent_storage", fromlist=["list_skill_packages"]
+                ).list_skill_packages(storage, _DEFAULT_USER_ID)
+                routing = detect_complex_task_intent(
+                    last_user_msg.content,
+                    enabled_skills=enabled_skills,
+                    agent_settings=agent_settings,
+                )
+                if routing is not None:
+                    sync_builtin_tools()
+                    workspace = agent_settings.default_workspace or "."
+                    skill_contexts = []
+                    for skill_id in routing.get("skillIds", []):
+                        skill = await __import__(
+                            "amadeus_app.complex_agent.agent_storage", fromlist=["get_skill_package"]
+                        ).get_skill_package(storage, skill_id)
+                        if skill is None or not skill.get("enabled", True):
+                            continue
+                        from pathlib import Path
+                        skill_dir = Path(skill["path"])
+                        if skill_dir.exists():
+                            try:
+                                skill_contexts.append(load_skill_context(skill_dir))
+                            except Exception as error:  # noqa: BLE001
+                                _log.warning("failed to load skill %s: %s", skill_id, error)
+                    budget = TaskBudget(
+                        max_rounds=agent_settings.max_rounds,
+                        max_tool_calls=agent_settings.max_tool_calls,
+                        max_runtime_seconds=agent_settings.max_runtime_seconds,
+                        max_sampling_depth=agent_settings.max_sampling_depth,
+                    )
+                    task = await agent_task_hub.create_task(
+                        storage=storage,
+                        user_id=_DEFAULT_USER_ID,
+                        title=last_user_msg.content[:60],
+                        prompt=last_user_msg.content,
+                        workspace_path=workspace,
+                        conversation_id=str(stored_conversation_id) if stored_conversation_id else None,
+                        active_skill_ids=routing.get("skillIds", []),
+                        settings=agent_settings.model_dump(by_alias=True),
+                        budget=budget,
+                    )
+                    # Launch the agent in the background
+                    from .complex_agent.domain import AgentTaskCreateRequest
+                    agent_request = AgentTaskCreateRequest(
+                        title=last_user_msg.content[:60],
+                        prompt=last_user_msg.content,
+                        workspacePath=workspace,
+                        conversationId=stored_conversation_id,
+                        skillIds=routing.get("skillIds", []),
+                        model=request.model.model_dump(by_alias=True),
+                        mode=request.mode,
+                    )
+                    background = asyncio.create_task(
+                        run_agent_task(
+                            storage=storage,
+                            task=task,
+                            request=agent_request,
+                            agent_settings=agent_settings,
+                            skill_contexts=skill_contexts,
+                        ),
+                        name=f"agent-task-{task.task_id}",
+                    )
+                    await agent_task_hub.attach_background_task(task.task_id, background)
+                    yield sse("complex_task", {
+                        "taskId": task.task_id,
+                        "title": task.title,
+                        "reason": routing.get("reason", ""),
+                        "skillIds": routing.get("skillIds", []),
+                    })
+                    return
+    except Exception as error:  # noqa: BLE001
+        _log.debug("Complex task routing failed (non-fatal): %s", error)
+
     image_attachments = chat_image_attachments(request.attachments)
     if image_attachments:
         last_user_message = next(

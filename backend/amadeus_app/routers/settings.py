@@ -31,6 +31,8 @@ async def save_settings(request: SettingsSaveRequest) -> dict:
         voice=request.voice.model_dump(by_alias=True),
         desktop_assistant=request.desktop_assistant.model_dump(by_alias=True),
         mode=request.mode,
+        agent=request.agent,
+        mcp_servers=request.mcp_servers,
     )
     return {"ok": True}
 

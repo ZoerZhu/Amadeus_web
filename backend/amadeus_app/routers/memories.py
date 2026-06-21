@@ -126,7 +126,7 @@ async def create_node(request: MemoryLeafCreateRequest) -> dict:
     tree_store = _require_tree()
     try:
         data: dict[str, Any] = {
-            "nodeType": request.node_type,
+            "nodeType": request.node_type.value,
             "parentId": request.parent_id,
             "domain": request.domain.value if hasattr(request.domain, "value") else str(request.domain),
             "label": request.label,

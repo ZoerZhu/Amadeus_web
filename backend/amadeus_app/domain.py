@@ -159,6 +159,8 @@ class SettingsSaveRequest(BaseModel):
     voice: VoiceSettings = Field(default_factory=VoiceSettings)
     desktop_assistant: DesktopAssistantSettings = Field(default_factory=DesktopAssistantSettings, alias="desktopAssistant")
     mode: ChatMode = "fast"
+    agent: dict[str, Any] | None = None
+    mcp_servers: list[dict[str, Any]] | None = Field(default=None, alias="mcpServers")
 
 
 class DesktopObserveRequest(BaseModel):

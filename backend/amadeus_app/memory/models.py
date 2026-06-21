@@ -119,7 +119,7 @@ class MemoryLeafCreateRequest(BaseModel):
     conversation_id: str | None = Field(default=None, alias="conversationId")
     importance: float = 0.5
     confidence: float = 0.7
-    node_type: str = Field(default="leaf", alias="nodeType")
+    node_type: MemoryNodeType = Field(default=MemoryNodeType.LEAF, alias="nodeType")
 
 
 class MemoryTreeSearchRequest(BaseModel):

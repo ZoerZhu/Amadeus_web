@@ -117,19 +117,18 @@ def _search_vec_table(
 ) -> list[tuple[str, float]]:
     """通用 vec0 KNN 搜索。
 
-    当 candidate_ids 非空时，sqlite-vec 不支持 WHERE IN 过滤，
-    需先 overfetch 再在应用层过滤。为避免全局 top_k 截断掉子树内候选，
-    overfetch 数量取 max(top_k * 10, len(candidate_ids) * 2, 200)。
+    当 candidate_ids 非空时，直接按主键精确取回候选向量，在 Python 中
+    计算 L2 距离后排序取 top_k。这避免了 sqlite-vec 全局 KNN 把子树内
+    候选截掉的问题（overfetch-then-filter 在候选数 > fetch_limit 时会漏召回）。
     """
     if candidate_ids is not None and len(candidate_ids) == 0:
         return []
 
-    # candidate_ids 场景下扩大 LIMIT，避免全局 top_k 截断子树候选
+    # --- candidate-aware path: exact lookup + Python L2 ---
     if candidate_ids is not None:
-        fetch_limit = max(top_k * 10, len(candidate_ids) * 2, 200)
-    else:
-        fetch_limit = top_k
+        return _search_candidates(conn, table, query_embedding, top_k, candidate_ids)
 
+    # --- global KNN path ---
     query_sql = f"""
         SELECT node_id, distance
         FROM {table}
@@ -137,17 +136,64 @@ def _search_vec_table(
         ORDER BY distance
         LIMIT ?
     """
-    params: list[Any] = [_serialize_vec(query_embedding), fetch_limit]
-
-    rows = conn.execute(query_sql, params).fetchall()
-
-    if candidate_ids is not None:
-        id_set = set(candidate_ids)
-        filtered = [(row[0], row[1]) for row in rows if row[0] in id_set]
-        # 过滤后取 top_k
-        return filtered[:top_k]
-
+    rows = conn.execute(query_sql, [_serialize_vec(query_embedding), top_k]).fetchall()
     return [(row[0], row[1]) for row in rows]
+
+
+def _search_candidates(
+    conn: sqlite3.Connection,
+    table: str,
+    query_embedding: list[float],
+    top_k: int,
+    candidate_ids: list[str],
+) -> list[tuple[str, float]]:
+    """对 candidate_ids 精确取向量，Python 计算 L2 距离后排序。
+
+    使用 ``WHERE node_id IN (?, ?, ...)`` 分批查询以减少 SQLite 往返。
+    每批最多 500 个 ID，对典型 domain 子树（几十到几百个节点）只需 1 次查询。
+    """
+    results: list[tuple[str, float]] = []
+    batch_size = 500
+    for start in range(0, len(candidate_ids), batch_size):
+        batch = candidate_ids[start : start + batch_size]
+        placeholders = ",".join("?" * len(batch))
+        rows = conn.execute(
+            f"SELECT node_id, embedding FROM {table} WHERE node_id IN ({placeholders})",
+            batch,
+        ).fetchall()
+        for row in rows:
+            emb = _deserialize_vec(row[1])
+            if emb is None:
+                continue
+            dist = _l2_distance(query_embedding, emb)
+            results.append((row[0], dist))
+    results.sort(key=lambda x: x[1])
+    return results[:top_k]
+
+
+def _l2_distance(a: list[float], b: list[float]) -> float:
+    """计算两个向量的欧氏距离。"""
+    import math
+
+    return math.sqrt(sum((x - y) ** 2 for x, y in zip(a, b)))
+
+
+def _deserialize_vec(raw: bytes) -> list[float] | None:
+    """将 sqlite-vec 存储的 bytes 反序列化为 float 列表。
+
+    返回 None 表示数据损坏或维度不匹配，调用方应跳过。
+    """
+    import struct
+
+    if not raw or len(raw) % 4 != 0:
+        _log.warning("skip corrupted embedding bytes: len=%d", len(raw))
+        return None
+    count = len(raw) // 4
+    try:
+        return list(struct.unpack(f"<{count}f", raw))
+    except struct.error:
+        _log.warning("skip embedding bytes: struct.unpack failed, len=%d", len(raw))
+        return None
 
 
 def _serialize_vec(embedding: list[float]) -> bytes:

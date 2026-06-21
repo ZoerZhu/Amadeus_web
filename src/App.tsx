@@ -2,6 +2,7 @@ import { PointerEvent as ReactPointerEvent, useEffect, useMemo, useRef, useState
 import type { ChangeEvent, CSSProperties, DragEvent as ReactDragEvent, FormEvent } from "react";
 import {
   Bell,
+  Boxes,
   Camera,
   ChevronLeft,
   ChevronRight,
@@ -27,8 +28,10 @@ import {
   createConversation,
   deleteConversation,
   fetchConversation,
+  fetchMcpServers,
   fetchProviders,
   fetchSettings,
+  fetchSkills,
   listConversations,
   observeDesktop,
   publishCodeTaskMobileView,
@@ -59,6 +62,8 @@ import {
 import { BootLoader } from "./components/BootLoader";
 import { ChatMessageBubble } from "./components/ChatMessageBubble";
 import { ConfigGroup } from "./components/ConfigGroup";
+import { AgentSettingsPanel } from "./components/AgentSettingsPanel";
+import { AgentTaskPanel } from "./components/AgentTaskPanel";
 import { LeftDock } from "./components/LeftDock";
 import { Live2DStage, type Live2DStageHandle } from "./components/Live2DStage";
 import { Live2DModelHistory, Live2DQuickControls } from "./components/Live2DControls";
@@ -66,14 +71,17 @@ import { TaskPanel } from "./components/TaskPanel";
 import { TopBar } from "./components/TopBar";
 import { UploadAttachmentTray, UploadPopover } from "./components/UploadControls";
 import type {
+  AgentSettings,
   ChatMessage,
   ChatMode,
   CodeTaskEvent,
   ConversationDetail,
   ConversationSummary,
   DesktopAssistantSettings,
+  McpServerConfig,
   ModelSettings,
   ProviderPreset,
+  SkillPackageInfo,
   SpeechInputSettings,
   StreamEvent,
   ChatAttachment,
@@ -201,6 +209,25 @@ export default function App() {
   const [voiceRecording, setVoiceRecording] = useState(false);
   const [voiceRecordingSeconds, setVoiceRecordingSeconds] = useState(0);
   const [voiceInputLevels, setVoiceInputLevels] = useState<number[]>(Array.from({ length: 18 }, () => 0.24));
+  const [agentSettings, setAgentSettings] = useState<AgentSettings>({
+    enabled: true,
+    trustMode: true,
+    defaultWorkspace: "",
+    maxRounds: 20,
+    maxToolCalls: 80,
+    maxRuntimeSeconds: 1800,
+    maxSamplingDepth: 3,
+    artifactRoot: "generated_docs/agent_artifacts",
+    rollbackEnabled: true,
+    browserEnabled: false,
+    opencodeEnabled: true
+  });
+  const [mcpServers, setMcpServers] = useState<McpServerConfig[]>([]);
+  const [skills, setSkills] = useState<SkillPackageInfo[]>([]);
+  const [agentTaskId, setAgentTaskId] = useState<string | null>(null);
+  const [complexTaskByMessage, setComplexTaskByMessage] = useState<
+    Record<string, { taskId: string; title: string; reason: string; skillIds: string[] }>
+  >({});
   const [desktopAssistantMode, setDesktopAssistantMode] = useState(launchedAsDesktopAssistant);
   const [desktopAssistantExiting, setDesktopAssistantExiting] = useState(false);
   const [, setDesktopAssistantStatus] = useState("待机");
@@ -457,6 +484,22 @@ export default function App() {
             normalizeDesktopAssistantSettings({ ...prev, ...(remoteSettings.desktopAssistant ?? {}) })
           );
           setMode(remoteSettings.mode);
+          if (remoteSettings.agent) {
+            setAgentSettings((prev) => ({ ...prev, ...remoteSettings.agent }));
+          }
+          if (remoteSettings.mcpServers) {
+            setMcpServers(remoteSettings.mcpServers);
+          }
+        }
+        // Load MCP servers and skills (live state includes connection status)
+        try {
+          const [servers, skillList] = await Promise.all([fetchMcpServers(), fetchSkills()]);
+          if (!cancelled) {
+            setMcpServers(servers);
+            setSkills(skillList);
+          }
+        } catch {
+          // non-fatal: agent subsystem may be offline
         }
         setConversations(conversationItems);
         if (conversationItems.length > 0) {
@@ -489,7 +532,9 @@ export default function App() {
         speechInput: speechInputSettingsForPersistence,
         voice: voiceSettings,
         desktopAssistant: desktopAssistantSettings,
-        mode
+        mode,
+        agent: agentSettings,
+        mcpServers
       })
     );
 
@@ -506,12 +551,14 @@ export default function App() {
         speechInput: speechInputSettingsForPersistence,
         voice: voiceSettings,
         desktopAssistant: desktopAssistantSettings,
-        mode
+        mode,
+        agent: agentSettings,
+        mcpServers
       }).catch((error) => {
         setStorageError(error instanceof Error ? error.message : "settings save failed");
       });
     }, 350);
-  }, [modelSettings, visionSettings, speechInputSettingsForPersistence, voiceSettings, desktopAssistantSettings, mode, storageOnline]);
+  }, [modelSettings, visionSettings, speechInputSettingsForPersistence, voiceSettings, desktopAssistantSettings, mode, agentSettings, mcpServers, storageOnline]);
 
   useEffect(() => {
     const payload = codeTasks.slice(0, CODE_TASK_MAX_HISTORY);
@@ -2632,6 +2679,17 @@ export default function App() {
       setStatus(`voice: ${event.payload.message}`);
       return;
     }
+    if (event.event === "complex_task") {
+      const { taskId, title, reason, skillIds } = event.payload;
+      setComplexTaskByMessage((prev) => ({
+        ...prev,
+        [assistantId]: { taskId, title, reason, skillIds }
+      }));
+      setAgentTaskId(taskId);
+      setRightPanelTab("agent");
+      setStatus(`agent: ${title}`);
+      return;
+    }
     if (event.event === "error") {
       appendAssistantDelta(assistantId, { content: `请求失败：${event.payload.message}` });
       finalizeAssistant(assistantId);
@@ -3638,15 +3696,41 @@ export default function App() {
   const currentConversation = conversations.find((conversation) => conversation.id === currentConversationId);
 
   function renderMessageBubble(message: ChatMessage, surface: "floating" | "panel") {
+    const complexTask = complexTaskByMessage[message.id];
     return (
-      <ChatMessageBubble
-        key={message.id}
-        message={message}
-        surface={surface}
-        voiceBusy={voiceBusy}
-        onCopy={copyMessageText}
-        onPlay={playAssistantMessage}
-      />
+      <div key={message.id} className={`message-wrapper ${surface === "floating" ? "is-floating" : "is-panel"}`}>
+        <ChatMessageBubble
+          message={message}
+          surface={surface}
+          voiceBusy={voiceBusy}
+          onCopy={copyMessageText}
+          onPlay={playAssistantMessage}
+        />
+        {complexTask && (
+          <div className="complex-task-card">
+            <div className="complex-task-card-head">
+              <Boxes size={15} />
+              <span>{complexTask.title}</span>
+            </div>
+            {complexTask.reason && <p className="complex-task-card-reason">{complexTask.reason}</p>}
+            <div className="complex-task-card-actions">
+              <button
+                className="text-icon-button"
+                onClick={() => {
+                  setAgentTaskId(complexTask.taskId);
+                  setRightPanelTab("agent");
+                  if (!chatOpen) {
+                    setChatOpen(true);
+                  }
+                }}
+                type="button"
+              >
+                查看任务
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
     );
   }
 
@@ -4308,6 +4392,15 @@ export default function App() {
               />
             </label>
           </ConfigGroup>
+
+          <AgentSettingsPanel
+            agent={agentSettings}
+            onAgentChange={setAgentSettings}
+            mcpServers={mcpServers}
+            onMcpServersChange={setMcpServers}
+            skills={skills}
+            onSkillsChange={setSkills}
+          />
         </div>
       </aside>
 
@@ -4413,8 +4506,16 @@ export default function App() {
         />
         <div className="chat-head">
           <div>
-            <span className="eyebrow">{rightPanelTab === "chat" ? "Session" : "Task"}</span>
-            <h2>{rightPanelTab === "chat" ? currentConversation?.title ?? "Kurisu" : "OpenCode 任务"}</h2>
+            <span className="eyebrow">
+              {rightPanelTab === "chat" ? "Session" : rightPanelTab === "agent" ? "Agent" : "Task"}
+            </span>
+            <h2>
+              {rightPanelTab === "chat"
+                ? currentConversation?.title ?? "Kurisu"
+                : rightPanelTab === "agent"
+                  ? "Agent 任务"
+                  : "OpenCode 任务"}
+            </h2>
           </div>
           <div className="right-panel-tabs" aria-label="右侧面板">
             <button
@@ -4433,9 +4534,17 @@ export default function App() {
               <Bell size={14} />
               任务
             </button>
+            <button
+              className={rightPanelTab === "agent" ? "is-active" : ""}
+              onClick={() => setRightPanelTab("agent")}
+              type="button"
+            >
+              <Boxes size={14} />
+              Agent
+            </button>
           </div>
-          <div className={`status-pill ${rightPanelTab === "chat" ? (isStreaming ? "is-live" : "") : codeTaskRunning ? "is-live" : ""}`}>
-            {rightPanelTab === "chat" ? status : codeTaskStatus}
+          <div className={`status-pill ${rightPanelTab === "chat" ? (isStreaming ? "is-live" : "") : rightPanelTab === "agent" ? (agentTaskId ? "is-live" : "") : codeTaskRunning ? "is-live" : ""}`}>
+            {rightPanelTab === "chat" ? status : rightPanelTab === "agent" ? (agentTaskId ? "agent" : "idle") : codeTaskStatus}
           </div>
           <button className="icon-button" onClick={() => setChatOpen(false)} type="button" aria-label="收起对话栏">
             <ChevronRight size={18} />
@@ -4529,6 +4638,12 @@ export default function App() {
               </div>
             </form>
           </>
+        ) : rightPanelTab === "agent" ? (
+          <AgentTaskPanel
+            conversationId={currentConversationId}
+            selectedTaskId={agentTaskId}
+            onSelectTask={setAgentTaskId}
+          />
         ) : (
           renderTaskPanel()
         )}

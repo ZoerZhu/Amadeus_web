@@ -1,6 +1,12 @@
 import type {
+  AgentArtifact,
   AgentInvokeRequest,
   AgentInvokeResponse,
+  AgentTaskControlAction,
+  AgentTaskCreateRequest,
+  AgentTaskDetail,
+  AgentTaskEvent,
+  AgentTaskSummary,
   ApiChatMessage,
   AssistantVoiceInfo,
   ChatAttachment,
@@ -14,8 +20,11 @@ import type {
   ConversationDetail,
   ConversationSummary,
   FileUploadResponse,
+  McpServerConfig,
   ModelSettings,
+  PermissionRequest,
   ProviderPreset,
+  SkillPackageInfo,
   SpeechInputSettings,
   StoredSettings,
   StreamEvent,
@@ -110,17 +119,24 @@ export async function fetchSettings(): Promise<StoredSettings | null> {
 }
 
 export async function saveSettings(settings: StoredSettings): Promise<void> {
+  const payload: Record<string, unknown> = {
+    model: settings.model,
+    vision: settings.vision,
+    speechInput: settings.speechInput,
+    voice: settings.voice,
+    desktopAssistant: settings.desktopAssistant,
+    mode: settings.mode
+  };
+  if (settings.agent) {
+    payload.agent = settings.agent;
+  }
+  if (settings.mcpServers) {
+    payload.mcpServers = settings.mcpServers;
+  }
   const response = await fetch("/api/settings", {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      model: settings.model,
-      vision: settings.vision,
-      speechInput: settings.speechInput,
-      voice: settings.voice,
-      desktopAssistant: settings.desktopAssistant,
-      mode: settings.mode
-    })
+    body: JSON.stringify(payload)
   });
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
@@ -557,6 +573,335 @@ export async function cloneVoice(options: {
     throw new Error(data.detail || `clone ${response.status}`);
   }
   return data.voiceUri;
+}
+
+// ---------------------------------------------------------------------------
+// Complex agent / MCP / skills API
+// ---------------------------------------------------------------------------
+
+export async function fetchAgentTasks(conversationId?: string | null): Promise<AgentTaskSummary[]> {
+  const query = conversationId ? `?conversationId=${encodeURIComponent(conversationId)}` : "";
+  const response = await fetch(`/api/agent/tasks${query}`);
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(data.detail || `agent tasks ${response.status}`);
+  }
+  return data.tasks ?? [];
+}
+
+export async function fetchAgentTaskDetail(id: string): Promise<AgentTaskDetail> {
+  const response = await fetch(`/api/agent/tasks/${encodeURIComponent(id)}`);
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(data.detail || `agent task ${response.status}`);
+  }
+  return data.task as AgentTaskDetail;
+}
+
+export async function controlAgentTask(
+  id: string,
+  action: AgentTaskControlAction,
+  reason?: string
+): Promise<{ ok: boolean }> {
+  const response = await fetch(`/api/agent/tasks/${encodeURIComponent(id)}/control`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ action, reason: reason ?? "" })
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(data.detail || `agent control ${response.status}`);
+  }
+  return data;
+}
+
+export function streamAgentTaskEvents(options: {
+  taskId: string;
+  afterSeq?: number;
+  onEvent: (event: AgentTaskEvent) => void;
+  onError?: (message: string) => void;
+}): () => void {
+  const afterSeq = options.afterSeq ?? 0;
+  const url = `/api/agent/tasks/${encodeURIComponent(options.taskId)}/events?afterSeq=${afterSeq}`;
+  const controller = new AbortController();
+
+  const readerPromise = (async () => {
+    const response = await fetch(url, { signal: controller.signal });
+    if (!response.ok || !response.body) {
+      options.onError?.(`agent events ${response.status}`);
+      return;
+    }
+    const reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) {
+        break;
+      }
+      buffer += decoder.decode(value, { stream: true });
+      buffer = drainSseBuffer<AgentTaskEvent>(buffer, options.onEvent);
+    }
+    buffer += decoder.decode();
+    drainSseBuffer<AgentTaskEvent>(buffer, options.onEvent, true);
+  })();
+
+  readerPromise.catch((error) => {
+    if (controller.signal.aborted) {
+      return;
+    }
+    options.onError?.(error instanceof Error ? error.message : "agent events stream failed");
+  });
+
+  return () => controller.abort();
+}
+
+export async function createAgentTask(
+  request: AgentTaskCreateRequest
+): Promise<{ taskId: string }> {
+  const response = await fetch("/api/agent/tasks", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(request)
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(data.detail || `agent task create ${response.status}`);
+  }
+  return { taskId: String(data.taskId ?? data.id ?? "") };
+}
+
+export async function streamAgentTask(options: {
+  request: AgentTaskCreateRequest;
+  signal?: AbortSignal;
+  onEvent: (event: AgentTaskEvent) => void;
+  onError?: (message: string) => void;
+}): Promise<string | null> {
+  const response = await fetch("/api/agent/tasks/stream", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(options.request),
+    signal: options.signal
+  });
+
+  if (!response.ok || !response.body) {
+    throw new Error(`agent task stream ${response.status}`);
+  }
+
+  const taskId = response.headers.get("X-Task-Id");
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) {
+      break;
+    }
+    buffer += decoder.decode(value, { stream: true });
+    buffer = drainSseBuffer<AgentTaskEvent>(buffer, options.onEvent);
+  }
+  buffer += decoder.decode();
+  drainSseBuffer<AgentTaskEvent>(buffer, options.onEvent, true);
+  return taskId;
+}
+
+// --- MCP servers ---
+
+export async function fetchMcpServers(): Promise<McpServerConfig[]> {
+  const response = await fetch("/api/mcp/servers");
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(data.detail || `mcp servers ${response.status}`);
+  }
+  return data.servers ?? [];
+}
+
+export async function upsertMcpServer(server: McpServerConfig): Promise<McpServerConfig> {
+  const response = await fetch("/api/mcp/servers", {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ server })
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(data.detail || `mcp upsert ${response.status}`);
+  }
+  return data.server as McpServerConfig;
+}
+
+export async function deleteMcpServer(id: string): Promise<void> {
+  const response = await fetch(`/api/mcp/servers/${encodeURIComponent(id)}`, {
+    method: "DELETE"
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(data.detail || `mcp delete ${response.status}`);
+  }
+}
+
+export async function testMcpServer(
+  server: McpServerConfig
+): Promise<{ ok: boolean; error?: string; toolCount?: number; resourceCount?: number }> {
+  const response = await fetch("/api/mcp/servers/test", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ server })
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(data.detail || `mcp test ${response.status}`);
+  }
+  return data;
+}
+
+export async function connectMcpServer(id: string): Promise<{ ok: boolean; toolCount: number; resourceCount: number }> {
+  const response = await fetch(`/api/mcp/servers/${encodeURIComponent(id)}/connect`, {
+    method: "POST"
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(data.detail || `mcp connect ${response.status}`);
+  }
+  return data;
+}
+
+export async function disconnectMcpServer(id: string): Promise<{ ok: boolean }> {
+  const response = await fetch(`/api/mcp/servers/${encodeURIComponent(id)}/disconnect`, {
+    method: "POST"
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(data.detail || `mcp disconnect ${response.status}`);
+  }
+  return data;
+}
+
+// --- Skills ---
+
+export async function fetchSkills(): Promise<SkillPackageInfo[]> {
+  const response = await fetch("/api/skills");
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(data.detail || `skills ${response.status}`);
+  }
+  return data.skills ?? [];
+}
+
+export async function importSkillGit(
+  gitUrl: string,
+  branch?: string,
+  subdirectory?: string
+): Promise<SkillPackageInfo> {
+  const response = await fetch("/api/skills/import", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      gitUrl,
+      branch: branch ?? "main",
+      subdirectory: subdirectory ?? ""
+    })
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(data.detail || `skill import ${response.status}`);
+  }
+  return data.skill as SkillPackageInfo;
+}
+
+export async function importSkillZip(file: File): Promise<SkillPackageInfo> {
+  const form = new FormData();
+  form.append("file", file, file.name);
+  const response = await fetch("/api/skills/import-zip", {
+    method: "POST",
+    body: form
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(data.detail || `skill import-zip ${response.status}`);
+  }
+  return data.skill as SkillPackageInfo;
+}
+
+export async function upsertSkill(id: string, skill: SkillPackageInfo): Promise<SkillPackageInfo> {
+  const response = await fetch(`/api/skills/${encodeURIComponent(id)}`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ skill })
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(data.detail || `skill upsert ${response.status}`);
+  }
+  return data.skill as SkillPackageInfo;
+}
+
+export async function deleteSkill(id: string): Promise<void> {
+  const response = await fetch(`/api/skills/${encodeURIComponent(id)}`, {
+    method: "DELETE"
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(data.detail || `skill delete ${response.status}`);
+  }
+}
+
+// --- Artifacts ---
+
+export async function fetchArtifact(id: string): Promise<AgentArtifact> {
+  const response = await fetch(`/api/artifacts/${encodeURIComponent(id)}`);
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(data.detail || `artifact ${response.status}`);
+  }
+  return data.artifact as AgentArtifact;
+}
+
+export function downloadArtifactUrl(id: string): string {
+  return `/api/artifacts/${encodeURIComponent(id)}/download`;
+}
+
+// --- Permission queue ---
+
+export async function fetchPendingPermissions(taskId: string): Promise<PermissionRequest[]> {
+  const response = await fetch(`/api/agent/tasks/${encodeURIComponent(taskId)}/permissions`);
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(data.detail || `permissions ${response.status}`);
+  }
+  return (data.permissions ?? []) as PermissionRequest[];
+}
+
+export async function approvePermission(
+  permissionId: string,
+  reason?: string
+): Promise<PermissionRequest> {
+  const response = await fetch(`/api/agent/permissions/${encodeURIComponent(permissionId)}/approve`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ reason: reason ?? "" })
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(data.detail || `approve ${response.status}`);
+  }
+  return data as PermissionRequest;
+}
+
+export async function rejectPermission(
+  permissionId: string,
+  reason?: string
+): Promise<PermissionRequest> {
+  const response = await fetch(`/api/agent/permissions/${encodeURIComponent(permissionId)}/reject`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ reason: reason ?? "" })
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(data.detail || `reject ${response.status}`);
+  }
+  return data as PermissionRequest;
 }
 
 function drainSseBuffer<TEvent>(

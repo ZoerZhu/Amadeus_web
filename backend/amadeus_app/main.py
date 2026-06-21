@@ -17,10 +17,12 @@ from fastapi.staticfiles import StaticFiles
 from ._common import require_storage
 from .code_tasks.opencode_runner import stop_all_opencode_processes
 from .code_tasks.task_hub import code_task_hub
+from .complex_agent.mcp_client import mcp_manager
+from .complex_agent.tool_registry import sync_builtin_tools
 from .logging_config import configure_logging, get_logger
 from .memory.jobs import start_memory_worker
 from .memory.tree_store import MemoryTreeStore
-from .routers import chat, code_tasks, conversations, files, memories, mobile, settings, voice
+from .routers import chat, code_tasks, complex_agent, conversations, files, memories, mobile, settings, voice
 from .security import RateLimiterMiddleware, SecurityHeadersMiddleware
 from .storage import SQLiteStorage
 
@@ -83,6 +85,32 @@ async def startup() -> None:
     await _global_storage.connect()
     _log.info("SQLite storage connected at %s.", SQLITE_PATH)
 
+    # Sync builtin tools into the unified tool registry (complex agent)
+    try:
+        sync_builtin_tools()
+        _log.info("Unified tool registry synced with builtin tools.")
+    except Exception as error:
+        _log.warning("Failed to sync unified tool registry: %s", error)
+
+    # Auto-connect enabled MCP servers
+    try:
+        from .complex_agent import agent_storage
+        from .complex_agent.domain import McpServerConfig
+        from .storage import DEFAULT_USER_ID
+
+        servers = await agent_storage.list_mcp_servers(_global_storage, DEFAULT_USER_ID)
+        for server in servers:
+            if not server.get("enabled", True):
+                continue
+            try:
+                config = McpServerConfig.model_validate(server)
+                await mcp_manager.connect_server(config)
+                _log.info("MCP server %s connected.", server["id"])
+            except Exception as error:
+                _log.warning("MCP server %s failed to connect: %s", server["id"], error)
+    except Exception as error:
+        _log.warning("MCP auto-connect failed: %s", error)
+
     # 初始化记忆树 + 启动异步 worker
     if os.getenv("AMADEUS_MEMORY_ENABLED", "1").lower() not in ("0", "false", "no"):
         _global_memory_tree = MemoryTreeStore(_global_storage)
@@ -98,6 +126,14 @@ async def startup() -> None:
         except Exception as error:
             _log.warning("Failed to register memory tools: %s", error)
 
+        # Re-sync builtin tools into the unified registry so memory tools
+        # (registered above) are available to the complex agent.
+        try:
+            sync_builtin_tools()
+            _log.info("Unified tool registry re-synced after memory tools registration.")
+        except Exception as error:
+            _log.warning("Failed to re-sync unified tool registry: %s", error)
+
 
 @app.on_event("shutdown")
 async def shutdown() -> None:
@@ -106,6 +142,9 @@ async def shutdown() -> None:
     if _memory_worker:
         await _memory_worker.stop()
     await code_task_hub.cancel_background_tasks()
+    from .complex_agent.task_hub import agent_task_hub
+    await agent_task_hub.cancel_all()
+    await mcp_manager.disconnect_all()
     await stop_all_opencode_processes()
     await _global_storage.close()
     _log.info("Shutdown complete.")
@@ -144,6 +183,7 @@ async def storage_status() -> dict:
 
 app.include_router(chat.router)
 app.include_router(code_tasks.router)
+app.include_router(complex_agent.router)
 app.include_router(conversations.router)
 app.include_router(files.router)
 app.include_router(memories.router)

@@ -41,6 +41,11 @@ from .tool_registry import register_mcp_tool, unregister_mcp_server_tools
 _log = get_logger(__name__)
 
 
+def _now_iso() -> str:
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).isoformat()
+
+
 PROTOCOL_VERSION = "2025-06-18"
 CLIENT_NAME = "amadeus-web"
 CLIENT_VERSION = "0.1.0"
@@ -663,6 +668,7 @@ class McpConnectionManager:
 
     def __init__(self) -> None:
         self._clients: dict[str, McpClient] = {}
+        self._capability_cache: dict[str, dict[str, Any]] = {}
 
     def get(self, server_id: str) -> McpClient | None:
         return self._clients.get(server_id)
@@ -676,8 +682,19 @@ class McpConnectionManager:
         if existing is not None:
             await existing.disconnect()
         client = McpClient(config)
-        await client.connect()
+        try:
+            await client.connect()
+        except Exception as error:
+            self.update_capability_cache_error(config.id, str(error) or error.__class__.__name__)
+            raise
         self._clients[config.id] = client
+        self._capability_cache[config.id] = {
+            "tools": [{"name": t.name, "description": t.description} for t in client.tools],
+            "resources": [{"uri": r.uri, "name": r.name, "description": r.description} for r in client.resources],
+            "prompts": [{"name": p.name, "description": p.description} for p in client.prompts],
+            "lastConnectedAt": _now_iso(),
+            "lastError": None,
+        }
         return client
 
     async def disconnect_server(self, server_id: str) -> bool:
@@ -685,11 +702,29 @@ class McpConnectionManager:
         if client is None:
             return False
         await client.disconnect()
+        # Preserve capability cache but mark as disconnected
+        if server_id in self._capability_cache:
+            self._capability_cache[server_id]["lastError"] = "disconnected"
         return True
 
     async def disconnect_all(self) -> None:
         for server_id in list(self._clients.keys()):
             await self.disconnect_server(server_id)
+
+    def get_capability_cache(self, server_id: str) -> dict[str, Any] | None:
+        return self._capability_cache.get(server_id)
+
+    def list_capability_cache(self) -> dict[str, dict[str, Any]]:
+        return dict(self._capability_cache)
+
+    def update_capability_cache_error(self, server_id: str, error: str) -> None:
+        if server_id not in self._capability_cache:
+            self._capability_cache[server_id] = {
+                "tools": [], "resources": [], "prompts": [],
+                "lastConnectedAt": None, "lastError": error,
+            }
+        else:
+            self._capability_cache[server_id]["lastError"] = error
 
     async def test_connection(self, config: McpServerConfig) -> dict[str, Any]:
         """Connect, list capabilities, then disconnect. Returns a report."""

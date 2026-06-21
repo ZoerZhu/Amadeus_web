@@ -1202,3 +1202,265 @@ class TestPermissionRoutes:
             json={"reason": ""},
         )
         assert response.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# MCP presets
+# ---------------------------------------------------------------------------
+
+
+class TestMcpPresets:
+    """Test MCP preset templates."""
+
+    def test_list_presets(self, client):
+        response = client.get("/api/mcp/presets")
+        assert response.status_code == 200
+        presets = response.json()["presets"]
+        assert len(presets) >= 6
+        ids = {p["id"] for p in presets}
+        assert "github" in ids
+        assert "context7" in ids
+        assert "playwright" in ids
+        assert "markitdown" in ids
+        assert "sequential-thinking" in ids
+        assert "fetch" in ids
+
+    def test_get_preset(self, client):
+        response = client.get("/api/mcp/presets/github")
+        assert response.status_code == 200
+        preset = response.json()
+        assert preset["id"] == "github"
+        assert preset["transport"] == "http"
+
+    def test_get_preset_not_found(self, client):
+        response = client.get("/api/mcp/presets/nonexistent")
+        assert response.status_code == 404
+
+    def test_preset_has_required_fields(self, client):
+        response = client.get("/api/mcp/presets")
+        presets = response.json()["presets"]
+        for p in presets:
+            assert "id" in p
+            assert "name" in p
+            assert "description" in p
+            assert "transport" in p
+            assert "trusted" in p
+            assert "allowedTools" in p
+
+    def test_capabilities_endpoint(self, client):
+        response = client.get("/api/mcp/capabilities")
+        assert response.status_code == 200
+        assert "capabilities" in response.json()
+
+
+# ---------------------------------------------------------------------------
+# Local tools
+# ---------------------------------------------------------------------------
+
+
+class TestLocalTools:
+    """Test code_search, local_git, markitdown_convert tools."""
+
+    def test_code_search_tool_creation(self):
+        from backend.amadeus_app.complex_agent.local_tools import make_code_search_tool
+
+        tool = make_code_search_tool(workspace=".")
+        assert tool.name == "code_search"
+        assert tool.source == "builtin"
+        schema = tool.to_openai_schema()
+        assert "function" in schema
+        assert "parameters" in schema["function"]
+
+    def test_local_git_tool_creation(self):
+        from backend.amadeus_app.complex_agent.local_tools import make_local_git_tool
+
+        tool = make_local_git_tool(workspace=".")
+        assert tool.name == "local_git"
+        assert tool.source == "builtin"
+
+    def test_markitdown_convert_tool_creation(self):
+        from backend.amadeus_app.complex_agent.local_tools import make_markitdown_convert_tool
+
+        tool = make_markitdown_convert_tool(workspace=".")
+        assert tool.name == "markitdown_convert"
+        assert tool.source == "builtin"
+
+    @pytest.mark.asyncio
+    async def test_code_search_returns_results(self, tmp_path):
+        from backend.amadeus_app.complex_agent.local_tools import make_code_search_tool
+
+        # Create a test file
+        (tmp_path / "test.py").write_text("def hello():\n    print('world')\n", encoding="utf-8")
+        tool = make_code_search_tool(workspace=str(tmp_path))
+        result = await tool.handler({"pattern": "hello", "maxResults": 10})
+        assert result["ok"] is True
+        assert result["result"]["total"] >= 1
+
+    @pytest.mark.asyncio
+    async def test_local_git_rejects_write_actions(self, tmp_path):
+        from backend.amadeus_app.complex_agent.local_tools import make_local_git_tool
+
+        tool = make_local_git_tool(workspace=str(tmp_path))
+        result = await tool.handler({"action": "commit"})
+        assert result["ok"] is False
+        assert "not allowed" in result["error"].lower() or "invalid" in result["error"].lower()
+
+    @pytest.mark.asyncio
+    async def test_markitdown_convert_rejects_outside_workspace(self, tmp_path):
+        from backend.amadeus_app.complex_agent.local_tools import make_markitdown_convert_tool
+
+        tool = make_markitdown_convert_tool(workspace=str(tmp_path))
+        result = await tool.handler({"path": "../../../etc/passwd"})
+        assert result["ok"] is False
+        assert "outside" in result["error"].lower() or "workspace" in result["error"].lower()
+
+    @pytest.mark.asyncio
+    async def test_markitdown_convert_nonexistent_file(self, tmp_path):
+        from backend.amadeus_app.complex_agent.local_tools import make_markitdown_convert_tool
+
+        tool = make_markitdown_convert_tool(workspace=str(tmp_path))
+        result = await tool.handler({"path": "nonexistent.pdf"})
+        assert result["ok"] is False
+
+
+# ---------------------------------------------------------------------------
+# MCP resource/prompt tools
+# ---------------------------------------------------------------------------
+
+
+class TestMcpResourcePromptTools:
+    """Test mcp_resource_read, mcp_prompt_get, mcp_list_* tools."""
+
+    def test_mcp_resource_read_tool_creation(self):
+        from backend.amadeus_app.complex_agent.mcp_resource_tools import make_mcp_resource_read_tool
+
+        tool = make_mcp_resource_read_tool()
+        assert tool.name == "mcp_resource_read"
+        assert tool.source == "builtin"
+
+    def test_mcp_prompt_get_tool_creation(self):
+        from backend.amadeus_app.complex_agent.mcp_resource_tools import make_mcp_prompt_get_tool
+
+        tool = make_mcp_prompt_get_tool()
+        assert tool.name == "mcp_prompt_get"
+        assert tool.source == "builtin"
+
+    def test_mcp_list_resources_tool_creation(self):
+        from backend.amadeus_app.complex_agent.mcp_resource_tools import make_mcp_list_resources_tool
+
+        tool = make_mcp_list_resources_tool()
+        assert tool.name == "mcp_list_resources"
+
+    def test_mcp_list_prompts_tool_creation(self):
+        from backend.amadeus_app.complex_agent.mcp_resource_tools import make_mcp_list_prompts_tool
+
+        tool = make_mcp_list_prompts_tool()
+        assert tool.name == "mcp_list_prompts"
+
+    @pytest.mark.asyncio
+    async def test_mcp_resource_read_not_connected(self):
+        from backend.amadeus_app.complex_agent.mcp_resource_tools import make_mcp_resource_read_tool
+
+        tool = make_mcp_resource_read_tool()
+        result = await tool.handler({"serverId": "nonexistent", "uri": "test://resource"})
+        assert result["ok"] is False
+        assert "not connected" in result["error"].lower()
+
+    @pytest.mark.asyncio
+    async def test_mcp_prompt_get_not_connected(self):
+        from backend.amadeus_app.complex_agent.mcp_resource_tools import make_mcp_prompt_get_tool
+
+        tool = make_mcp_prompt_get_tool()
+        result = await tool.handler({"serverId": "nonexistent", "name": "test_prompt"})
+        assert result["ok"] is False
+        assert "not connected" in result["error"].lower()
+
+    @pytest.mark.asyncio
+    async def test_mcp_list_resources_empty(self):
+        from backend.amadeus_app.complex_agent.mcp_resource_tools import make_mcp_list_resources_tool
+
+        tool = make_mcp_list_resources_tool()
+        result = await tool.handler({})
+        assert result["ok"] is True
+        assert isinstance(result["result"]["resources"], list)
+
+    @pytest.mark.asyncio
+    async def test_mcp_list_prompts_empty(self):
+        from backend.amadeus_app.complex_agent.mcp_resource_tools import make_mcp_list_prompts_tool
+
+        tool = make_mcp_list_prompts_tool()
+        result = await tool.handler({})
+        assert result["ok"] is True
+        assert isinstance(result["result"]["prompts"], list)
+
+
+# ---------------------------------------------------------------------------
+# Builtin skills
+# ---------------------------------------------------------------------------
+
+
+class TestBuiltinSkills:
+    """Test built-in skill packages."""
+
+    def test_list_builtin_skill_ids(self):
+        from backend.amadeus_app.complex_agent.builtin_skills import list_builtin_skill_ids
+
+        ids = list_builtin_skill_ids()
+        assert len(ids) == 7
+        assert "codebase-navigation" in ids
+        assert "github-workflow" in ids
+        assert "library-docs" in ids
+        assert "document-ingest" in ids
+        assert "research-report" in ids
+        assert "browser-qa" in ids
+        assert "project-memory" in ids
+
+    def test_get_builtin_skill_info(self):
+        from backend.amadeus_app.complex_agent.builtin_skills import get_builtin_skill_info
+
+        info = get_builtin_skill_info("codebase-navigation")
+        assert info is not None
+        assert info["id"] == "codebase-navigation"
+        assert info["builtin"] is True
+        assert "code_search" in info["toolAllowlist"]
+        assert "file_reader" in info["toolAllowlist"]
+
+    def test_get_builtin_skill_info_not_found(self):
+        from backend.amadeus_app.complex_agent.builtin_skills import get_builtin_skill_info
+
+        assert get_builtin_skill_info("nonexistent") is None
+
+    def test_install_builtin_skills(self, tmp_path):
+        from backend.amadeus_app.complex_agent.builtin_skills import install_builtin_skills
+
+        installed = install_builtin_skills(tmp_path)
+        assert len(installed) == 7
+        for skill_id in installed:
+            skill_dir = tmp_path / skill_id
+            assert (skill_dir / "SKILL.md").exists()
+            assert (skill_dir / "manifest.json").exists()
+
+    def test_builtin_skill_manifest_valid(self, tmp_path):
+        import json
+
+        from backend.amadeus_app.complex_agent.builtin_skills import install_builtin_skills
+
+        install_builtin_skills(tmp_path)
+        manifest_path = tmp_path / "codebase-navigation" / "manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        assert manifest["id"] == "codebase-navigation"
+        assert manifest["version"] == "1.0.0"
+        assert isinstance(manifest["triggers"], list)
+        assert isinstance(manifest["toolAllowlist"], list)
+
+    def test_list_builtin_skills_endpoint(self, client):
+        response = client.get("/api/skills/builtin")
+        assert response.status_code == 200
+        skills = response.json()["skills"]
+        assert len(skills) == 7
+
+    def test_install_builtin_skills_endpoint(self, client):
+        response = client.post("/api/skills/install-builtin")
+        assert response.status_code == 200
+        installed = response.json()["installed"]
+        assert len(installed) == 7

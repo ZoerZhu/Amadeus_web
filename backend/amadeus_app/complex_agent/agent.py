@@ -67,6 +67,12 @@ if _HAS_LANGGRAPH:
         done: bool
         summary: str
         error: str
+        # Task ledger for structured flow
+        current_step_index: int
+        completed_steps: list[int]
+        open_questions: list[str]
+        risks: list[str]
+        rejected_tools: list[dict[str, Any]]
 
 else:  # pragma: no cover
 
@@ -82,24 +88,27 @@ else:  # pragma: no cover
 ROLE_PROMPTS: dict[str, str] = {
     "planner": (
         "你是复杂任务的规划者。根据用户目标，拆解为 3-8 个可执行的步骤。"
-        "每个步骤需说明：目标、所需工具、预期产物。"
+        "每个步骤需说明：id、goal（目标）、tools（所需工具列表）、expected（预期产物）。"
         "避免危险操作（删除系统文件、修改 .env/.git 等）。"
-        "只输出 JSON：{\"steps\": [{\"id\": 1, \"goal\": \"...\", \"tools\": [...], \"expected\": \"...\"}]}。"
+        "考虑步骤间的依赖关系和风险。"
+        '只输出 JSON：{"steps": [{"id": 1, "goal": "...", "tools": [...], "expected": "...", "risk": "low|medium|high"}]}。'
     ),
     "executor": (
         "你是任务执行者。根据当前步骤和可用工具，选择最合适的工具调用。"
         "信任模式下可直接调用 safe 权限工具，无需用户确认。"
         "每次只调用一个工具，并基于结果决定下一步。"
-        "如果步骤已完成，输出 {\"step_done\": true, \"summary\": \"...\"}。"
+        "专注于当前步骤的目标，不要偏航到其他步骤。"
+        "如果当前步骤已完成，输出 {\"step_done\": true, \"summary\": \"...\"}。"
         "如果整个任务已完成，输出 {\"task_done\": true, \"summary\": \"...\"}。"
+        "如果遇到阻塞或需要用户输入，输出 {\"blocked\": true, \"question\": \"...\"}。"
     ),
     "researcher": (
-        "你是研究员。使用 web_search 和 file_reader 工具收集信息，"
+        "你是研究员。使用 web_search、code_search、file_reader 和 local_git 工具收集信息，"
         "输出结构化摘要和来源引用。"
     ),
     "browser_operator": (
         "你是浏览器操作员。使用 browser 工具打开页面、点击、输入、截图、提取文本。"
-        "每次操作后简述结果。"
+        "每次操作后简述结果。click 和 type 操作需要用户确认。"
     ),
     "document_writer": (
         "你是文档撰写者。使用 doc_writer 或 file_writer 工具生成文档，"
@@ -111,12 +120,17 @@ ROLE_PROMPTS: dict[str, str] = {
     ),
     "critic": (
         "你是评审者。检查执行结果是否满足原始目标，指出遗漏或错误。"
-        "输出 JSON：{\"satisfied\": bool, \"issues\": [...], \"suggestions\": [...]}。"
+        "评估当前步骤是否完成，是否需要继续工具调用，是否有遗漏的步骤。"
+        '输出 JSON：{"satisfied": bool, "current_step_done": bool, "missing_steps": [...], "issues": [...], "suggestions": [...], "needs_more_tools": bool}。'
+        "satisfied=true 表示整个任务目标已达成；current_step_done=true 表示当前步骤可以进入下一个。"
     ),
     "summarizer": (
-        "你是总结者。基于全部步骤和工具结果，生成中文任务总结。"
-        "包含：完成情况、关键产物、使用的工具、注意事项。"
-        "输出纯文本，不超过 500 字。"
+        "你是总结者。基于全部步骤和工具结果，生成结构化中文任务总结。"
+        "输出 JSON，包含以下字段："
+        '{"completed": "完成的内容摘要", "artifacts": ["产物路径列表"], '
+        '"incomplete": ["未完成项"], "rejected_tools": ["被拒绝/失败的工具调用"], '
+        '"next_steps": "下一步建议"}。'
+        "如果无法输出 JSON，则输出纯文本总结，不超过 500 字。"
     ),
 }
 
@@ -211,6 +225,31 @@ async def assemble_task_tools(
             trust_mode=settings.trust_mode,
         )
         tools.append(opencode_tool)
+
+    # Add local safe tools (code_search, local_git, markitdown_convert)
+    from .local_tools import (
+        make_code_search_tool,
+        make_local_git_tool,
+        make_markitdown_convert_tool,
+    )
+
+    workspace = task.workspace_path or settings.default_workspace
+    tools.append(make_code_search_tool(workspace))
+    tools.append(make_local_git_tool(workspace))
+    tools.append(make_markitdown_convert_tool(workspace))
+
+    # Add MCP resource/prompt tools (expose MCP resources/prompts to agent)
+    from .mcp_resource_tools import (
+        make_mcp_list_prompts_tool,
+        make_mcp_list_resources_tool,
+        make_mcp_prompt_get_tool,
+        make_mcp_resource_read_tool,
+    )
+
+    tools.append(make_mcp_resource_read_tool())
+    tools.append(make_mcp_prompt_get_tool())
+    tools.append(make_mcp_list_resources_tool())
+    tools.append(make_mcp_list_prompts_tool())
 
     task._tools = tools
     return tools
@@ -311,6 +350,12 @@ async def planner_node(state: AgentState, *, task: ManagedAgentTask, storage, co
     plan = _parse_plan(message["content"])
     state["plan"] = plan
     state["round"] = task.budget.rounds
+    # Initialize task ledger
+    state["current_step_index"] = 0
+    state["completed_steps"] = []
+    state["open_questions"] = []
+    state["risks"] = [s.get("risk", "low") for s in plan if s.get("risk") in ("high", "medium")]
+    state["rejected_tools"] = []
     await task.emit(
         storage=storage,
         kind="plan",
@@ -318,7 +363,11 @@ async def planner_node(state: AgentState, *, task: ManagedAgentTask, storage, co
         name="plan",
         status="completed",
         summary=f"plan with {len(plan)} steps",
-        payload={"plan": plan},
+        payload={"plan": plan, "ledger": {
+            "currentStepIndex": 0,
+            "completedSteps": [],
+            "risks": state["risks"],
+        }},
     )
     return state
 
@@ -333,10 +382,22 @@ async def executor_node(state: AgentState, *, task: ManagedAgentTask, storage, c
     schema = [t.to_openai_schema() for t in tools]
     skill_context = _build_skill_context_block(config.skill_contexts)
     recent_results = state.get("tool_results", [])[-5:]
+    # Build current step context from ledger
+    plan = state.get("plan", [])
+    step_idx = state.get("current_step_index", 0)
+    completed = state.get("completed_steps", [])
+    current_step = plan[step_idx] if step_idx < len(plan) else None
+    step_context = (
+        f"当前步骤 (index={step_idx}): {json.dumps(current_step, ensure_ascii=False)}\n"
+        f"已完成步骤: {completed}\n"
+        f"待完成步骤: {[s.get('id') for s in plan[step_idx:]]}"
+        if current_step else "所有步骤已完成"
+    )
     messages = [
         {"role": "system", "content": ROLE_PROMPTS["executor"]},
         {"role": "system", "content": skill_context},
-        {"role": "system", "content": f"当前计划：{json.dumps(state.get('plan', []), ensure_ascii=False)}"},
+        {"role": "system", "content": f"当前计划：{json.dumps(plan, ensure_ascii=False)}"},
+        {"role": "system", "content": step_context},
         {"role": "system", "content": f"最近工具结果：{json.dumps(recent_results, ensure_ascii=False)[:4000]}"},
         {"role": "user", "content": state.get("prompt", task.prompt)},
     ]
@@ -501,11 +562,16 @@ async def critic_node(state: AgentState, *, task: ManagedAgentTask, storage, con
     if state.get("done"):
         return state
     skill_context = _build_skill_context_block(config.skill_contexts)
+    plan = state.get("plan", [])
+    step_idx = state.get("current_step_index", 0)
+    current_step = plan[step_idx] if step_idx < len(plan) else None
     messages = [
         {"role": "system", "content": ROLE_PROMPTS["critic"]},
         {"role": "system", "content": skill_context},
         {"role": "user", "content": f"目标：{state.get('prompt', task.prompt)}"},
-        {"role": "user", "content": f"计划：{json.dumps(state.get('plan', []), ensure_ascii=False)}"},
+        {"role": "user", "content": f"计划：{json.dumps(plan, ensure_ascii=False)}"},
+        {"role": "user", "content": f"当前步骤：{json.dumps(current_step, ensure_ascii=False) if current_step else '无'}"},
+        {"role": "user", "content": f"已完成步骤：{state.get('completed_steps', [])}"},
         {"role": "user", "content": f"工具结果：{json.dumps(state.get('tool_results', [])[-8:], ensure_ascii=False)[:6000]}"},
     ]
     try:
@@ -515,16 +581,36 @@ async def critic_node(state: AgentState, *, task: ManagedAgentTask, storage, con
         return state
     message = extract_message(data)
     critique = _parse_critique(message["content"])
+    # Advance step if critic says current step is done
+    if critique.get("current_step_done") and current_step:
+        completed = state.get("completed_steps", [])
+        step_id = current_step.get("id", step_idx)
+        if step_id not in completed:
+            completed.append(step_id)
+        state["completed_steps"] = completed
+        state["current_step_index"] = step_idx + 1
+    # Track missing steps
+    if critique.get("missing_steps"):
+        state["open_questions"] = critique["missing_steps"]
     await task.emit(
         storage=storage,
         kind="step",
         role="critic",
         name="critic",
         status="completed",
-        summary=f"satisfied={critique.get('satisfied')}",
-        payload=critique,
+        summary=f"satisfied={critique.get('satisfied')}, step_done={critique.get('current_step_done')}",
+        payload={
+            **critique,
+            "ledger": {
+                "currentStepIndex": state.get("current_step_index", 0),
+                "completedSteps": state.get("completed_steps", []),
+                "openQuestions": state.get("open_questions", []),
+            },
+        },
     )
     if critique.get("satisfied"):
+        state["done"] = True
+    elif state.get("current_step_index", 0) >= len(plan) and not critique.get("needs_more_tools"):
         state["done"] = True
     elif task.budget.rounds >= task.budget.max_rounds:
         state["done"] = True
@@ -536,10 +622,19 @@ async def summarizer_node(state: AgentState, *, task: ManagedAgentTask, storage,
     await task.wait_if_paused()
     task.check_cancelled()
     skill_context = _build_skill_context_block(config.skill_contexts)
+    # Include ledger info in summarizer context
+    ledger_info = (
+        f"已完成步骤：{state.get('completed_steps', [])}\n"
+        f"当前步骤索引：{state.get('current_step_index', 0)}\n"
+        f"未解决问题：{state.get('open_questions', [])}\n"
+        f"被拒绝工具：{state.get('rejected_tools', [])}"
+    )
     messages = [
         {"role": "system", "content": ROLE_PROMPTS["summarizer"]},
         {"role": "system", "content": skill_context},
         {"role": "user", "content": f"目标：{state.get('prompt', task.prompt)}"},
+        {"role": "user", "content": f"计划：{json.dumps(state.get('plan', []), ensure_ascii=False)}"},
+        {"role": "user", "content": f"任务账本：{ledger_info}"},
         {"role": "user", "content": f"工具结果：{json.dumps(state.get('tool_results', []), ensure_ascii=False)[:8000]}"},
         {"role": "user", "content": f"错误：{state.get('error', '')}"},
     ]
@@ -550,16 +645,31 @@ async def summarizer_node(state: AgentState, *, task: ManagedAgentTask, storage,
         await task.emit(storage=storage, kind="error", name="summarizer", summary=str(error))
         return state
     message = extract_message(data)
-    state["summary"] = message["content"]
-    await task.emit(
-        storage=storage,
-        kind="done",
-        role="summarizer",
-        name="summary",
-        status="completed",
-        summary=state["summary"],
-        payload={"summary": state["summary"]},
-    )
+    raw_summary = message["content"]
+    # Try to parse structured JSON summary
+    structured = _parse_structured_summary(raw_summary)
+    if structured:
+        state["summary"] = structured.get("completed", raw_summary)
+        await task.emit(
+            storage=storage,
+            kind="done",
+            role="summarizer",
+            name="summary",
+            status="completed",
+            summary=state["summary"],
+            payload=structured,
+        )
+    else:
+        state["summary"] = raw_summary
+        await task.emit(
+            storage=storage,
+            kind="done",
+            role="summarizer",
+            name="summary",
+            status="completed",
+            summary=state["summary"],
+            payload={"summary": state["summary"]},
+        )
     return state
 
 
@@ -791,6 +901,28 @@ def _parse_critique(content: str) -> dict[str, Any]:
         except json.JSONDecodeError:
             pass
     return {"satisfied": False, "issues": [content[:500]], "suggestions": []}
+
+
+def _parse_structured_summary(content: str) -> dict[str, Any] | None:
+    """Try to parse a structured JSON summary from the summarizer output.
+
+    Returns None if the content is not valid JSON with expected fields.
+    """
+    text = content.strip()
+    if text.startswith("```"):
+        text = text.strip("`")
+        if "\n" in text:
+            text = text.split("\n", 1)[1]
+    start = text.find("{")
+    end = text.rfind("}")
+    if start >= 0 and end >= start:
+        try:
+            data = json.loads(text[start : end + 1])
+            if isinstance(data, dict) and ("completed" in data or "summary" in data):
+                return data
+        except json.JSONDecodeError:
+            pass
+    return None
 
 
 def _extract_summary(content: str) -> str:

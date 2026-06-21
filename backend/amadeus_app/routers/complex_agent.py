@@ -49,6 +49,13 @@ from ..complex_agent.domain import (
     SkillUpsertRequest,
 )
 from ..complex_agent.mcp_client import McpClient, mcp_manager
+from ..complex_agent.mcp_presets import list_presets, get_preset
+from ..complex_agent.builtin_skills import (
+    BUILTIN_SKILLS,
+    get_builtin_skill_info,
+    install_builtin_skills,
+    list_builtin_skill_ids,
+)
 from ..complex_agent.skills import DEFAULT_SKILLS_DIR, load_skill_context
 from ..complex_agent.task_hub import TERMINAL_STATUSES, TaskBudget, agent_task_hub, sse
 
@@ -344,6 +351,26 @@ async def disconnect_mcp_server(server_id: str) -> dict:
     return {"ok": ok}
 
 
+@router.get("/mcp/presets")
+async def list_mcp_presets() -> dict[str, Any]:
+    """List available MCP server preset templates."""
+    return {"presets": list_presets()}
+
+
+@router.get("/mcp/presets/{preset_id}")
+async def get_mcp_preset(preset_id: str) -> dict[str, Any]:
+    preset = get_preset(preset_id)
+    if preset is None:
+        raise HTTPException(status_code=404, detail="preset not found")
+    return preset
+
+
+@router.get("/mcp/capabilities")
+async def list_mcp_capabilities() -> dict[str, Any]:
+    """List cached capabilities (tools/resources/prompts) for all connected MCP servers."""
+    return {"capabilities": mcp_manager.list_capability_cache()}
+
+
 # ---------------------------------------------------------------------------
 # Skills
 # ---------------------------------------------------------------------------
@@ -354,6 +381,34 @@ async def list_skills() -> dict:
     storage = require_storage()
     skills = await agent_storage.list_skill_packages(storage, DEFAULT_USER_ID)
     return {"skills": skills}
+
+
+@router.get("/skills/builtin")
+async def list_builtin_skills() -> dict[str, Any]:
+    """List available built-in skill packages."""
+    return {"skills": [get_builtin_skill_info(sid) for sid in list_builtin_skill_ids()]}
+
+
+@router.post("/skills/install-builtin")
+async def install_builtin_skills_endpoint() -> dict[str, Any]:
+    """Install all built-in skills to the user's skills directory."""
+    skills_dir = Path(DEFAULT_SKILLS_DIR)
+    installed = install_builtin_skills(skills_dir)
+    # Re-scan installed skill directories and upsert into DB
+    storage = require_storage()
+    for skill_id in installed:
+        skill_dir = skills_dir / skill_id
+        try:
+            info = skills_module.build_package_info(skill_dir, source="local")
+        except Exception as error:  # noqa: BLE001
+            _log.warning("failed to build info for built-in skill %s: %s", skill_id, error)
+            continue
+        await agent_storage.upsert_skill_package(
+            storage,
+            user_id=DEFAULT_USER_ID,
+            skill=info.model_dump(by_alias=True),
+        )
+    return {"installed": installed}
 
 
 @router.post("/skills/import")

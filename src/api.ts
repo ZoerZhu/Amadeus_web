@@ -9,6 +9,7 @@ import type {
   AgentTaskSummary,
   ApiChatMessage,
   AssistantVoiceInfo,
+  BuiltinSkillInfo,
   ChatAttachment,
   CodeTaskEvent,
   CodeTaskMobileViewSnapshot,
@@ -20,6 +21,8 @@ import type {
   ConversationDetail,
   ConversationSummary,
   FileUploadResponse,
+  McpCapability,
+  McpPreset,
   McpServerConfig,
   ModelSettings,
   PermissionRequest,
@@ -950,4 +953,44 @@ function emitSseBlock<TEvent>(block: string, onEvent: (event: TEvent) => void): 
   } catch {
     return;
   }
+}
+
+// --- MCP presets and capabilities ---
+
+export async function fetchMcpPresets(): Promise<McpPreset[]> {
+  const response = await fetch("/api/mcp/presets");
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(data.detail || `presets ${response.status}`);
+  }
+  return (data.presets ?? []) as McpPreset[];
+}
+
+export async function fetchMcpCapabilities(): Promise<Record<string, McpCapability>> {
+  const response = await fetch("/api/mcp/capabilities");
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(data.detail || `capabilities ${response.status}`);
+  }
+  return (data.capabilities ?? {}) as Record<string, McpCapability>;
+}
+
+// --- Builtin skills ---
+
+export async function fetchBuiltinSkills(): Promise<BuiltinSkillInfo[]> {
+  const response = await fetch("/api/skills/builtin");
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(data.detail || `builtin skills ${response.status}`);
+  }
+  return (data.skills ?? []) as BuiltinSkillInfo[];
+}
+
+export async function installBuiltinSkills(): Promise<{ installed: string[] }> {
+  const response = await fetch("/api/skills/install-builtin", { method: "POST" });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(data.detail || `install ${response.status}`);
+  }
+  return data as { installed: string[] };
 }

@@ -3,15 +3,20 @@ import {
   AlertTriangle,
   Boxes,
   Check,
+  CheckCircle2,
+  Circle,
   Download,
   FileText,
   Globe,
+  HelpCircle,
+  ListChecks,
   Loader2,
   Pause,
   Play,
   RotateCcw,
   Shield,
   Square,
+  TriangleAlert,
   Wrench,
   X
 } from "lucide-react";
@@ -33,7 +38,8 @@ import type {
   AgentTaskEvent,
   AgentTaskStatus,
   AgentTaskSummary,
-  PermissionRequest
+  PermissionRequest,
+  TaskLedger
 } from "../types";
 
 type AgentTaskPanelProps = {
@@ -77,6 +83,53 @@ function normalizeBudget(value: unknown): AgentTaskBudget | null {
     return null;
   }
   return value as AgentTaskBudget;
+}
+
+function isTaskLedger(value: unknown): value is TaskLedger {
+  if (typeof value !== "object" || value === null) {
+    return false;
+  }
+  const record = value as Record<string, unknown>;
+  return (
+    "currentStepIndex" in record ||
+    "completedSteps" in record ||
+    "openQuestions" in record ||
+    "risks" in record
+  );
+}
+
+function extractLedger(event: AgentTaskEvent): TaskLedger | null {
+  const payload = event.payload;
+  if (!payload || typeof payload !== "object") {
+    return null;
+  }
+  const ledgerValue =
+    (payload as Record<string, unknown>).ledger ??
+    (payload as Record<string, unknown>).taskLedger;
+  if (isTaskLedger(ledgerValue)) {
+    return ledgerValue as TaskLedger;
+  }
+  // Some step events may carry ledger-like fields directly in the payload
+  if (isTaskLedger(payload)) {
+    return payload as TaskLedger;
+  }
+  return null;
+}
+
+function asStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value.filter((item): item is string => typeof item === "string");
+}
+
+function asNumberArray(value: unknown): number[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  return value
+    .map((item) => (typeof item === "number" ? item : Number(item)))
+    .filter((item) => Number.isFinite(item));
 }
 
 function budgetPercent(used: number, max: number): number {
@@ -287,6 +340,25 @@ export function AgentTaskPanel({
   const budget = taskDetail ? normalizeBudget(taskDetail.budget) : null;
   const status = taskDetail?.status;
 
+  // Derive the latest ledger snapshot from events (most recent wins)
+  const ledger = useMemo<TaskLedger | null>(() => {
+    let latest: TaskLedger | null = null;
+    let latestSeq = -1;
+    for (const event of events) {
+      const extracted = extractLedger(event);
+      if (extracted && event.seq > latestSeq) {
+        latest = extracted;
+        latestSeq = event.seq;
+      }
+    }
+    return latest;
+  }, [events]);
+
+  const stepEvents = useMemo(() => events.filter((event) => event.kind === "step"), [events]);
+  const totalStepCount = stepEvents.length;
+  const completedStepCount = ledger?.completedSteps?.length ?? 0;
+  const currentStepIndex = ledger?.currentStepIndex;
+
   function handleControl(action: AgentTaskControlAction) {
     if (!effectiveActiveId) {
       return;
@@ -460,6 +532,109 @@ export function AgentTaskPanel({
             </div>
           )}
 
+          {ledger && (
+            <div className="task-ledger">
+              <div className="task-ledger-head">
+                <ListChecks size={14} />
+                <span>任务进度</span>
+              </div>
+              {(typeof currentStepIndex === "number" || totalStepCount > 0) && (
+                <div className="task-step-progress">
+                  <div className="task-step-progress-head">
+                    <span>
+                      当前步骤：
+                      <strong>
+                        {typeof currentStepIndex === "number"
+                          ? currentStepIndex + 1
+                          : "-"}
+                      </strong>
+                      {totalStepCount > 0 && (
+                        <>
+                          {" "}/ {totalStepCount}
+                        </>
+                      )}
+                    </span>
+                    <small>
+                      已完成 {completedStepCount}
+                      {totalStepCount > 0 ? ` / ${totalStepCount}` : ""}
+                    </small>
+                  </div>
+                  <div className="agent-budget-bar">
+                    <div
+                      className="agent-budget-fill"
+                      style={{
+                        width: `${budgetPercent(
+                          completedStepCount,
+                          totalStepCount > 0 ? totalStepCount : 1
+                        )}%`
+                      }}
+                    />
+                  </div>
+                  {totalStepCount > 0 && (
+                    <div className="task-step-list">
+                      {stepEvents.map((event, index) => {
+                        const completedSet = new Set(
+                          asNumberArray(ledger.completedSteps)
+                        );
+                        const isCompleted =
+                          completedSet.has(index) ||
+                          completedSet.has(event.seq) ||
+                          event.status === "completed" ||
+                          event.status === "done";
+                        const isCurrent =
+                          typeof currentStepIndex === "number" &&
+                          currentStepIndex === index;
+                        return (
+                          <div
+                            className={`task-step-item ${
+                              isCompleted ? "is-completed" : ""
+                            } ${isCurrent ? "is-current" : ""}`}
+                            key={`${event.taskId}-${event.seq}`}
+                          >
+                            {isCompleted ? (
+                              <CheckCircle2 size={13} />
+                            ) : isCurrent ? (
+                              <Circle size={13} />
+                            ) : (
+                              <Circle size={13} />
+                            )}
+                            <span>{event.name || event.summary || `步骤 ${index + 1}`}</span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              )}
+              {asStringArray(ledger.openQuestions).length > 0 && (
+                <div className="task-ledger-block">
+                  <div className="task-ledger-block-head">
+                    <HelpCircle size={13} />
+                    <span>未解决问题</span>
+                  </div>
+                  <ul className="task-ledger-list">
+                    {asStringArray(ledger.openQuestions).map((question, index) => (
+                      <li key={`q-${index}`}>{question}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+              {asStringArray(ledger.risks).length > 0 && (
+                <div className="task-ledger-block">
+                  <div className="task-ledger-block-head is-risk">
+                    <TriangleAlert size={13} />
+                    <span>风险</span>
+                  </div>
+                  <ul className="task-ledger-list">
+                    {asStringArray(ledger.risks).map((risk, index) => (
+                      <li key={`r-${index}`}>{risk}</li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+            </div>
+          )}
+
           <div className="agent-task-controls">
             {status === "running" && (
               <button
@@ -524,6 +699,12 @@ export function AgentTaskPanel({
                   </div>
                   {perm.argumentsPreview && (
                     <pre className="agent-permission-args">{perm.argumentsPreview}</pre>
+                  )}
+                  {perm.reason && (
+                    <div className="agent-permission-reason">
+                      <AlertTriangle size={12} />
+                      <span>{perm.reason}</span>
+                    </div>
                   )}
                   <div className="agent-permission-actions">
                     <button

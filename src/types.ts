@@ -585,3 +585,51 @@ export interface PermissionRequest {
   createdAt: string;
   resolvedAt: string | null;
 }
+
+export interface McpPreset {
+  id: string;
+  name: string;
+  description: string;
+  transport: "stdio" | "http";
+  url?: string;
+  command?: string;
+  args?: string[];
+  cwd?: string;
+  env?: Record<string, string>;
+  authType?: string;
+  headers?: Record<string, string>;
+  trusted: boolean;
+  allowedTools: string[];
+  allowedResources: string[];
+  enabled: boolean;
+  timeoutSeconds: number;
+  _preset?: boolean;
+  _category?: string;
+}
+
+export interface McpCapability {
+  tools: Array<{ name: string; description?: string }>;
+  resources: Array<{ uri: string; name?: string; description?: string }>;
+  prompts: Array<{ name: string; description?: string }>;
+  lastConnectedAt: string | null;
+  lastError: string | null;
+}
+
+export interface BuiltinSkillInfo {
+  id: string;
+  name: string;
+  version: string;
+  description: string;
+  triggers: string[];
+  roles: string[];
+  toolAllowlist: string[];
+  mcpServers: string[];
+  builtin: boolean;
+}
+
+export interface TaskLedger {
+  currentStepIndex?: number;
+  completedSteps?: number[];
+  openQuestions?: string[];
+  risks?: string[];
+}

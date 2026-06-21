@@ -1401,3 +1401,313 @@
   font-size: 0.78rem;
 }
 
+/* ---------------------------------------------------------------------------
+ * MCP preset cards / builtin skills / task ledger
+ * ------------------------------------------------------------------------- */
+
+.mcp-preset-panel {
+  display: grid;
+  gap: 8px;
+  margin-top: 8px;
+  padding: 10px;
+  border: 1px solid rgba(0, 0, 0, 0.06);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.32);
+}
+
+.mcp-preset-panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.mcp-preset-panel-title {
+  color: rgba(13, 13, 14, 0.68);
+  font-size: 0.8rem;
+  font-weight: 680;
+}
+
+.mcp-preset-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
+  gap: 8px;
+}
+
+.mcp-preset-card {
+  display: grid;
+  gap: 6px;
+  align-content: start;
+  padding: 10px;
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.62);
+  color: rgba(13, 13, 14, 0.72);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background 140ms ease, border-color 140ms ease, box-shadow 140ms ease;
+}
+
+.mcp-preset-card:hover:not(:disabled) {
+  border-color: rgba(16, 16, 17, 0.26);
+  background: rgba(255, 255, 255, 0.86);
+  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.06);
+}
+
+.mcp-preset-card:disabled {
+  cursor: default;
+  opacity: 0.7;
+}
+
+.mcp-preset-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.mcp-preset-card-head strong {
+  overflow: hidden;
+  color: rgba(13, 13, 14, 0.78);
+  font-size: 0.82rem;
+  font-weight: 680;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mcp-preset-category {
+  flex: 0 0 auto;
+  padding: 1px 7px;
+  border-radius: var(--radius-pill);
+  background: rgba(13, 13, 14, 0.08);
+  color: rgba(13, 13, 14, 0.6);
+  font-size: 0.68rem;
+  font-weight: 600;
+}
+
+.mcp-preset-category.is-http {
+  background: rgba(27, 127, 76, 0.16);
+  color: #1b7f4c;
+}
+
+.mcp-preset-category.is-stdio {
+  background: rgba(138, 91, 17, 0.16);
+  color: #8a5b11;
+}
+
+.mcp-preset-desc {
+  margin: 0;
+  color: rgba(13, 13, 14, 0.6);
+  font-size: 0.76rem;
+  line-height: 1.45;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.mcp-preset-card-foot {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+
+.mcp-preset-transport {
+  color: rgba(13, 13, 14, 0.42);
+  font-size: 0.7rem;
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+}
+
+.agent-builtin-skills {
+  display: grid;
+  gap: 8px;
+  margin-top: 8px;
+  padding: 10px;
+  border: 1px dashed rgba(16, 16, 17, 0.18);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.32);
+}
+
+.agent-builtin-skills-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: rgba(13, 13, 14, 0.68);
+  font-size: 0.8rem;
+  font-weight: 680;
+}
+
+.agent-skill-card.is-builtin {
+  border-style: dashed;
+  background: rgba(255, 255, 255, 0.58);
+}
+
+.skill-dependency-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 8px;
+  border-radius: var(--radius-pill);
+  font-size: 0.7rem;
+  font-weight: 600;
+}
+
+.skill-dependency-status.is-met {
+  background: rgba(27, 127, 76, 0.16);
+  color: #1b7f4c;
+}
+
+.skill-dependency-status.is-missing {
+  background: rgba(180, 59, 59, 0.16);
+  color: #b43b3b;
+}
+
+.agent-skill-deps {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+}
+
+.agent-skill-deps small {
+  flex: 0 0 auto;
+  color: rgba(13, 13, 14, 0.42);
+  font-size: 0.7rem;
+}
+
+.agent-skill-tag.is-met {
+  background: rgba(27, 127, 76, 0.16);
+  color: #1b7f4c;
+}
+
+.agent-skill-tag.is-missing {
+  background: rgba(180, 59, 59, 0.16);
+  color: #b43b3b;
+}
+
+.task-ledger {
+  display: grid;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid rgba(0, 0, 0, 0.06);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.42);
+}
+
+.task-ledger-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: rgba(13, 13, 14, 0.74);
+  font-size: 0.82rem;
+  font-weight: 680;
+}
+
+.task-ledger-block {
+  display: grid;
+  gap: 4px;
+}
+
+.task-ledger-block-head {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  color: rgba(13, 13, 14, 0.62);
+  font-size: 0.76rem;
+  font-weight: 680;
+}
+
+.task-ledger-block-head.is-risk {
+  color: #b43b3b;
+}
+
+.task-ledger-list {
+  margin: 0;
+  padding-left: 18px;
+  color: rgba(13, 13, 14, 0.66);
+  font-size: 0.78rem;
+  line-height: 1.5;
+}
+
+.task-ledger-list li {
+  margin: 2px 0;
+  word-break: break-word;
+}
+
+.task-step-progress {
+  display: grid;
+  gap: 6px;
+}
+
+.task-step-progress-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: rgba(13, 13, 14, 0.66);
+  font-size: 0.78rem;
+}
+
+.task-step-progress-head strong {
+  color: rgba(13, 13, 14, 0.82);
+  font-weight: 700;
+}
+
+.task-step-progress-head small {
+  color: rgba(13, 13, 14, 0.42);
+  font-size: 0.72rem;
+}
+
+.task-step-list {
+  display: grid;
+  gap: 4px;
+  margin-top: 4px;
+}
+
+.task-step-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 8px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.5);
+  color: rgba(13, 13, 14, 0.6);
+  font-size: 0.76rem;
+}
+
+.task-step-item.is-completed {
+  background: rgba(27, 127, 76, 0.1);
+  color: #1b7f4c;
+}
+
+.task-step-item.is-current {
+  border: 1px solid rgba(16, 16, 17, 0.2);
+  background: rgba(255, 255, 255, 0.78);
+  color: rgba(13, 13, 14, 0.82);
+  font-weight: 600;
+}
+
+.task-step-item span {
+  overflow: hidden;
+  flex: 1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-permission-reason {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 6px 0;
+  padding: 6px 8px;
+  border-radius: 8px;
+  background: rgba(180, 59, 59, 0.1);
+  color: #b43b3b;
+  font-size: 0.76rem;
+  line-height: 1.4;
+  word-break: break-word;
+}
+

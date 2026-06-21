@@ -6,7 +6,7 @@ based on rule scoring + optional LLM re-judge in the ambiguous zone.
 from __future__ import annotations
 
 import re
-from typing import Any, Callable
+from typing import Any, Awaitable, Callable
 
 from .domain import OpencodeRoutingConfig, OpencodeRoutingDecision, OpencodeRoutingRule
 
@@ -52,7 +52,7 @@ def default_opencode_routing_config() -> OpencodeRoutingConfig:
             OpencodeRoutingRule(
                 id="run_tests", name="跑测试", weight=30,
                 keywords=["跑测试", "运行测试", "run test", "run tests", "执行测试",
-                          "pytest", "jest", "vitest", "unittest", "测试"],
+                          "pytest", "jest", "vitest", "unittest", "跑一下测试", "跑下测试"],
                 description="运行测试",
             ),
             OpencodeRoutingRule(
@@ -157,14 +157,14 @@ def _rule_matches(rule: OpencodeRoutingRule, text: str, text_lower: str) -> bool
 # Decision computation
 # ---------------------------------------------------------------------------
 
-def compute_opencode_routing_decision(
+async def compute_opencode_routing_decision(
     *,
     prompt: str,
     planner_steps: list[dict[str, Any]],
     skill_info: list[dict[str, Any]],
     config: OpencodeRoutingConfig,
     opencode_enabled: bool,
-    llm_rejudge_fn: Callable[[str, list[dict[str, Any]], OpencodeRoutingConfig], bool] | None = None,
+    llm_rejudge_fn: Callable[[str, list[dict[str, Any]], OpencodeRoutingConfig], Awaitable[bool]] | None = None,
 ) -> OpencodeRoutingDecision:
     """Compute whether OpenCode should be exposed for this task.
 
@@ -238,7 +238,7 @@ def compute_opencode_routing_decision(
     # 8. Ambiguous zone → LLM re-judge
     if config.allow_llm_rejudge and llm_rejudge_fn is not None:
         try:
-            allowed = bool(llm_rejudge_fn(prompt, planner_steps, config))
+            allowed = bool(await llm_rejudge_fn(prompt, planner_steps, config))
             return OpencodeRoutingDecision(
                 allowed=allowed, score=score, matched_rules=matched,
                 reason=f"LLM re-judge in ambiguous zone ({config.ambiguous_threshold}-"

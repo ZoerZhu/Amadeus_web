@@ -74,7 +74,11 @@ const DEFAULT_AGENT_SETTINGS: AgentSettings = {
 };
 
 function normalizeAgentSettings(value?: Partial<AgentSettings> | null): AgentSettings {
-  return { ...DEFAULT_AGENT_SETTINGS, ...(value ?? {}) };
+  const base = { ...DEFAULT_AGENT_SETTINGS, ...(value ?? {}) };
+  if (!base.opencodeRouting) {
+    base.opencodeRouting = { ...DEFAULT_AGENT_SETTINGS.opencodeRouting };
+  }
+  return base;
 }
 
 function emptyMcpServer(): McpServerConfig {
@@ -509,6 +513,175 @@ export function AgentSettingsPanel({
             type="checkbox"
           />
         </label>
+        {normalizedAgent.opencodeEnabled && (
+          <div className="opencode-routing-config">
+            <label className="switch-row">
+              <span>启用 OpenCode 路由（按复杂度按需调用）</span>
+              <input
+                checked={normalizedAgent.opencodeRouting.enabled}
+                onChange={(event) => updateAgent({
+                  opencodeRouting: {
+                    ...normalizedAgent.opencodeRouting,
+                    enabled: event.target.checked,
+                  },
+                })}
+                type="checkbox"
+              />
+            </label>
+            {normalizedAgent.opencodeRouting.enabled && (
+              <>
+                <div className="inline-fields">
+                  <label className="field">
+                    <span>允许阈值（分数 ≥ 此值 → 允许 OpenCode）</span>
+                    <input
+                      type="number"
+                      min={0}
+                      max={100}
+                      value={normalizedAgent.opencodeRouting.allowThreshold}
+                      onChange={(event) => updateAgent({
+                        opencodeRouting: {
+                          ...normalizedAgent.opencodeRouting,
+                          allowThreshold: Number(event.target.value) || 0,
+                        },
+                      })}
+                    />
+                  </label>
+                  <label className="field">
+                    <span>模糊阈值（分数 &lt; 此值 → 拒绝）</span>
+                    <input
+                      type="number"
+                      min={0}
+                      max={100}
+                      value={normalizedAgent.opencodeRouting.ambiguousThreshold}
+                      onChange={(event) => updateAgent({
+                        opencodeRouting: {
+                          ...normalizedAgent.opencodeRouting,
+                          ambiguousThreshold: Number(event.target.value) || 0,
+                        },
+                      })}
+                    />
+                  </label>
+                </div>
+                <label className="switch-row">
+                  <span>允许 LLM 复判（模糊区间内用 LLM 二次判定）</span>
+                  <input
+                    checked={normalizedAgent.opencodeRouting.allowLlmRejudge}
+                    onChange={(event) => updateAgent({
+                      opencodeRouting: {
+                        ...normalizedAgent.opencodeRouting,
+                        allowLlmRejudge: event.target.checked,
+                      },
+                    })}
+                    type="checkbox"
+                  />
+                </label>
+                <label className="field">
+                  <span>强制允许关键词（逗号分隔，命中即允许）</span>
+                  <input
+                    value={normalizedAgent.opencodeRouting.forceAllowKeywords.join(", ")}
+                    onChange={(event) => updateAgent({
+                      opencodeRouting: {
+                        ...normalizedAgent.opencodeRouting,
+                        forceAllowKeywords: event.target.value
+                          .split(",").map((s) => s.trim()).filter(Boolean),
+                      },
+                    })}
+                    placeholder="opencode, coding agent"
+                  />
+                </label>
+                <label className="field">
+                  <span>强制禁用关键词（逗号分隔，命中即拒绝，优先级最高）</span>
+                  <input
+                    value={normalizedAgent.opencodeRouting.forceDenyKeywords.join(", ")}
+                    onChange={(event) => updateAgent({
+                      opencodeRouting: {
+                        ...normalizedAgent.opencodeRouting,
+                        forceDenyKeywords: event.target.value
+                          .split(",").map((s) => s.trim()).filter(Boolean),
+                      },
+                    })}
+                    placeholder="留空则无强制禁用"
+                  />
+                </label>
+                <div className="opencode-routing-rules">
+                  <div className="opencode-routing-rules-head">
+                    <span>路由规则（权重为正=允许信号，为负=拒绝信号）</span>
+                  </div>
+                  {normalizedAgent.opencodeRouting.rules.map((rule, index) => (
+                    <div className="opencode-routing-rule-item" key={rule.id || index}>
+                      <input
+                        value={rule.name}
+                        onChange={(event) => {
+                          const rules = [...normalizedAgent.opencodeRouting.rules];
+                          rules[index] = { ...rule, name: event.target.value };
+                          updateAgent({
+                            opencodeRouting: { ...normalizedAgent.opencodeRouting, rules },
+                          });
+                        }}
+                        placeholder="规则名称"
+                      />
+                      <input
+                        type="number"
+                        value={rule.weight}
+                        onChange={(event) => {
+                          const rules = [...normalizedAgent.opencodeRouting.rules];
+                          rules[index] = { ...rule, weight: Number(event.target.value) || 0 };
+                          updateAgent({
+                            opencodeRouting: { ...normalizedAgent.opencodeRouting, rules },
+                          });
+                        }}
+                        placeholder="权重"
+                      />
+                      <input
+                        value={rule.keywords.join(", ")}
+                        onChange={(event) => {
+                          const rules = [...normalizedAgent.opencodeRouting.rules];
+                          rules[index] = {
+                            ...rule,
+                            keywords: event.target.value.split(",").map((s) => s.trim()).filter(Boolean),
+                          };
+                          updateAgent({
+                            opencodeRouting: { ...normalizedAgent.opencodeRouting, rules },
+                          });
+                        }}
+                        placeholder="关键词（逗号分隔）"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const rules = normalizedAgent.opencodeRouting.rules.filter((_, i) => i !== index);
+                          updateAgent({
+                            opencodeRouting: { ...normalizedAgent.opencodeRouting, rules },
+                          });
+                        }}
+                      >
+                        删除
+                      </button>
+                    </div>
+                  ))}
+                  <button
+                    type="button"
+                    onClick={() => {
+                      const rules = [...normalizedAgent.opencodeRouting.rules, {
+                        id: `rule-${Date.now()}`,
+                        name: "新规则",
+                        weight: 0,
+                        keywords: [],
+                        matchType: "keyword" as const,
+                        description: "",
+                      }];
+                      updateAgent({
+                        opencodeRouting: { ...normalizedAgent.opencodeRouting, rules },
+                      });
+                    }}
+                  >
+                    添加规则
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+        )}
       </ConfigGroup>
 
       <ConfigGroup

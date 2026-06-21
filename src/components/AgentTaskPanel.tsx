@@ -14,6 +14,7 @@ import {
   Pause,
   Play,
   RotateCcw,
+  Route,
   Shield,
   Square,
   TriangleAlert,
@@ -177,6 +178,8 @@ function eventIcon(kind: AgentEventKind) {
   switch (kind) {
     case "plan":
       return <FileText size={14} />;
+    case "opencode_routing":
+      return <Route size={14} />;
     case "step":
       return <Play size={14} />;
     case "tool":

@@ -109,7 +109,8 @@ ROLE_PROMPTS: dict[str, str] = {
     ),
     "researcher": (
         "你是研究员。使用 web_search、code_search、file_reader 和 local_git 工具收集信息，"
-        "输出结构化摘要和来源引用。"
+        "输出结构化摘要和来源引用。web_search 会自动优先使用已连接的 Firecrawl/Fetch MCP "
+        "并在失败时回退到内置搜索，无需手动选择搜索源。"
     ),
     "browser_operator": (
         "你是浏览器操作员。使用 browser 工具打开页面、点击、输入、截图、提取文本。"

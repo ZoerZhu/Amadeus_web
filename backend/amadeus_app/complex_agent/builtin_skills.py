@@ -134,6 +134,7 @@ BUILTIN_SKILLS: list[dict[str, Any]] = [
 - 标注信息来源
 - 区分事实和观点
 - 报告结构：摘要、背景、发现、结论、来源
+- web_search 会自动优先使用已连接的 Firecrawl/Fetch MCP，失败时自动回退到内置搜索
 """,
     },
     {

@@ -14,8 +14,16 @@ import httpx
 from bs4 import BeautifulSoup
 from langgraph.graph import END, START, StateGraph
 
+from .mcp_web_search import (
+    McpWebTools,
+    discover_mcp_web_tools,
+    fetch_via_mcp,
+    firecrawl_scrape_via_mcp,
+    firecrawl_search_via_mcp,
+)
 
-SearchProviderName = Literal["direct_url", "searxng", "duckduckgo_html"]
+
+SearchProviderName = Literal["direct_url", "searxng", "duckduckgo_html", "firecrawl_mcp", "fetch_mcp"]
 
 DEFAULT_USER_AGENT = "AmadeusWebSearch/0.1"
 DEFAULT_MAX_RESULTS = 10
@@ -186,13 +194,15 @@ async def search_agent(state: WebSearchState) -> dict[str, Any]:
     max_results = state.get("max_results", DEFAULT_MAX_RESULTS)
     retrieved_at = current_time_iso()
     queries = plan_queries(query=query, intent=intent, domains=domains)
-    provider = choose_provider(queries)
     warnings = list(state.get("warnings", []))
+
+    # Discover MCP web tools (Firecrawl/Fetch). Cheap scan of the registry.
+    mcp_tools = discover_mcp_web_tools()
 
     raw_results: list[SearchResult] = []
     direct_urls = extract_urls(" ".join([query, intent]))
     if direct_urls:
-        provider = "direct_url"
+        provider: SearchProviderName = "direct_url"
         raw_results = [
             make_result(
                 title=url,
@@ -202,10 +212,52 @@ async def search_agent(state: WebSearchState) -> dict[str, Any]:
             )
             for url in direct_urls
         ]
-    elif provider == "searxng":
-        raw_results = await search_searxng(queries, max_results=max_results, retrieved_at=retrieved_at)
+    elif mcp_tools.has_firecrawl:
+        provider = "firecrawl_mcp"
+        try:
+            raw_results = await firecrawl_search_via_mcp(
+                mcp_tools.firecrawl_search,  # type: ignore[arg-type]
+                queries[0] if queries else query,
+                max_results=max_results,
+                domains=domains,
+                exclude_domains=state.get("exclude_domains", []),
+                freshness=state.get("freshness", "any"),
+                retrieved_at=retrieved_at,
+            )
+        except Exception as error:  # noqa: BLE001
+            warnings.append(
+                {
+                    "type": "mcp_fallback",
+                    "message": f"Firecrawl MCP 搜索失败，回退到内置搜索: {error}",
+                    "sources": [],
+                }
+            )
+            provider = choose_provider(queries)
+            if provider == "searxng":
+                raw_results = await search_searxng(queries, max_results=max_results, retrieved_at=retrieved_at)
+            else:
+                provider = "duckduckgo_html"
+                raw_results = await search_duckduckgo_html(queries, max_results=max_results, retrieved_at=retrieved_at)
+        if provider == "firecrawl_mcp" and not raw_results:
+            warnings.append(
+                {
+                    "type": "mcp_fallback",
+                    "message": "Firecrawl MCP 返回 0 条结果，回退到内置搜索",
+                    "sources": [],
+                }
+            )
+            provider = choose_provider(queries)
+            if provider == "searxng":
+                raw_results = await search_searxng(queries, max_results=max_results, retrieved_at=retrieved_at)
+            else:
+                provider = "duckduckgo_html"
+                raw_results = await search_duckduckgo_html(queries, max_results=max_results, retrieved_at=retrieved_at)
     else:
-        raw_results = await search_duckduckgo_html(queries, max_results=max_results, retrieved_at=retrieved_at)
+        provider = choose_provider(queries)
+        if provider == "searxng":
+            raw_results = await search_searxng(queries, max_results=max_results, retrieved_at=retrieved_at)
+        else:
+            raw_results = await search_duckduckgo_html(queries, max_results=max_results, retrieved_at=retrieved_at)
 
     if not raw_results:
         warnings.append(
@@ -234,6 +286,10 @@ async def search_agent(state: WebSearchState) -> dict[str, Any]:
         "debug": {
             **state.get("debug", {}),
             "provider": provider,
+            "mcpTools": {
+                "firecrawl": mcp_tools.has_firecrawl,
+                "scrape": mcp_tools.has_scrape,
+            },
             "rawResultCount": len(raw_results),
             "dedupedResultCount": len(normalized),
         },
@@ -248,6 +304,65 @@ async def reader_agent(state: WebSearchState) -> dict[str, Any]:
     fetch_top_n = clamp_int(os.getenv("AMADEUS_SEARCH_FETCH_TOP_N"), DEFAULT_FETCH_TOP_N, 1, 10)
     top_results = results[: min(fetch_top_n, len(results))]
     warnings = list(state.get("warnings", []))
+    debug = dict(state.get("debug", {}))
+
+    # Discover MCP scrape tools (Firecrawl_scrape / Fetch). Cheap registry scan.
+    mcp_tools = discover_mcp_web_tools()
+    mcp_fetch_used = 0
+
+    if mcp_tools.has_scrape:
+        scrape_tool = mcp_tools.firecrawl_scrape or mcp_tools.fetch
+        if mcp_tools.firecrawl_scrape:
+            scrape_fn = firecrawl_scrape_via_mcp
+        else:
+            scrape_fn = fetch_via_mcp  # type: ignore[assignment]
+        next_results = list(results)
+        async with httpx.AsyncClient(
+            timeout=httpx.Timeout(FETCH_TIMEOUT_SECONDS),
+            follow_redirects=True,
+            headers={"User-Agent": os.getenv("AMADEUS_SEARCH_USER_AGENT", DEFAULT_USER_AGENT)},
+        ) as client:
+            for index, result in enumerate(top_results):
+                url = result.get("url", "")
+                if not url:
+                    continue
+                try:
+                    content = await scrape_fn(scrape_tool, url)  # type: ignore[arg-type]
+                    next_results[index] = {**next_results[index], **content}
+                    if content.get("fetchStatus") == "ok":
+                        mcp_fetch_used += 1
+                except Exception as error:  # noqa: BLE001
+                    warnings.append(
+                        {
+                            "type": "mcp_fallback",
+                            "message": f"MCP 抓取失败，回退到内置抓取: {error}",
+                            "sources": [result.get("id", "")],
+                        }
+                    )
+                    try:
+                        item = await fetch_and_extract(client, result, state.get("query", ""))
+                        next_results[index] = {**next_results[index], **item}
+                    except Exception as inner_error:  # noqa: BLE001
+                        next_results[index]["fetchStatus"] = "error"
+                        warnings.append(
+                            {
+                                "type": "fetch_error",
+                                "message": str(inner_error) or inner_error.__class__.__name__,
+                                "sources": [next_results[index].get("id", "")],
+                            }
+                        )
+        debug["mcpFetchUsed"] = mcp_fetch_used
+        ranked = rank_results(
+            next_results,
+            query=state.get("query", ""),
+            intent=state.get("intent", ""),
+            domains=state.get("domains", []),
+        )
+        return {
+            "ranked_results": ranked,
+            "warnings": warnings,
+            "debug": debug,
+        }
 
     async with httpx.AsyncClient(
         timeout=httpx.Timeout(FETCH_TIMEOUT_SECONDS),
@@ -278,7 +393,7 @@ async def reader_agent(state: WebSearchState) -> dict[str, Any]:
         "ranked_results": ranked,
         "warnings": warnings,
         "debug": {
-            **state.get("debug", {}),
+            **debug,
             "fetchCount": len(top_results),
         },
     }

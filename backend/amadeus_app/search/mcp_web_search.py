@@ -12,6 +12,8 @@ results.
 
 from __future__ import annotations
 
+import json
+import re
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlparse
@@ -73,13 +75,7 @@ async def firecrawl_search_via_mcp(
 ) -> list[dict[str, Any]]:
     """Call ``firecrawl_search`` MCP tool and normalize results to SearchResult dicts.
 
-    Handles multiple response shapes:
-      - ``{"ok": True, "data": {"data": [...], "success": True}}`` (Firecrawl MCP wrapper)
-      - ``{"ok": True, "data": [...]}`` (direct list)
-      - ``{"ok": True, "data": {"result": [...]}}`` / ``{"results": [...]}`` (alt keys)
-      - ``{"ok": True, "result": [...]}`` (top-level result)
-
-    Raises ``RuntimeError`` when the MCP call reports ``ok=False``.
+    Raises ``RuntimeError`` when the MCP call fails or reports an error.
     """
     from ..complex_agent.tool_registry import unified_tool_registry
 
@@ -92,12 +88,13 @@ async def firecrawl_search_via_mcp(
         args["tbs"] = _freshness_to_tbs(freshness)
 
     response = await unified_tool_registry.call(tool_name, args)
-    if not response.get("ok"):
+    unwrapped = _unwrap_mcp_response(response)
+    if not unwrapped["ok"]:
         raise RuntimeError(
-            f"firecrawl_search failed: {response.get('error', 'unknown')}"
+            f"firecrawl_search failed: {_sanitize_error(unwrapped.get('error', 'unknown'))}"
         )
 
-    raw_items = _extract_search_items(response)
+    raw_items = _extract_search_items(unwrapped["data"])
     results: list[dict[str, Any]] = []
     for item in raw_items:
         if not isinstance(item, dict):
@@ -105,6 +102,7 @@ async def firecrawl_search_via_mcp(
         url = str(item.get("url") or item.get("link") or "").strip()
         if not url:
             continue
+        markdown = str(item.get("markdown") or "")
         results.append(
             {
                 "id": "",
@@ -119,14 +117,16 @@ async def firecrawl_search_via_mcp(
                     or item.get("content")
                     or ""
                 ),
-                "contentSummary": "",
-                "text": str(item.get("markdown") or ""),
+                "contentSummary": _truncate(markdown, 500) if markdown else "",
+                "text": markdown,
                 "publishedAt": str(item.get("publishedDate") or ""),
                 "retrievedAt": retrieved_at,
                 "score": 0.0,
                 "scores": {},
                 "evidence": [],
-                "fetchStatus": "not_fetched",
+                # If Firecrawl search already returned markdown, mark as fetched
+                # so reader_agent does not waste a redundant scrape call (P2 fix).
+                "fetchStatus": "ok" if markdown else "not_fetched",
             }
         )
     return results
@@ -143,11 +143,12 @@ async def firecrawl_scrape_via_mcp(tool_name: str, url: str) -> dict[str, Any]:
     response = await unified_tool_registry.call(
         tool_name, {"url": url, "formats": ["markdown"]}
     )
-    if not response.get("ok"):
+    unwrapped = _unwrap_mcp_response(response)
+    if not unwrapped["ok"]:
         raise RuntimeError(
-            f"firecrawl_scrape failed: {response.get('error', 'unknown')}"
+            f"firecrawl_scrape failed: {_sanitize_error(unwrapped.get('error', 'unknown'))}"
         )
-    data = response.get("data", {})
+    data = unwrapped["data"]
     inner = data.get("data", data) if isinstance(data, dict) else {}
     if not isinstance(inner, dict):
         inner = {}
@@ -169,9 +170,12 @@ async def fetch_via_mcp(tool_name: str, url: str) -> dict[str, Any]:
     from ..complex_agent.tool_registry import unified_tool_registry
 
     response = await unified_tool_registry.call(tool_name, {"url": url})
-    if not response.get("ok"):
-        raise RuntimeError(f"fetch MCP failed: {response.get('error', 'unknown')}")
-    data = response.get("data", {})
+    unwrapped = _unwrap_mcp_response(response)
+    if not unwrapped["ok"]:
+        raise RuntimeError(
+            f"fetch MCP failed: {_sanitize_error(unwrapped.get('error', 'unknown'))}"
+        )
+    data = unwrapped["data"]
     inner = data.get("data", data) if isinstance(data, dict) else {}
     if not isinstance(inner, dict):
         inner = {}
@@ -186,14 +190,71 @@ async def fetch_via_mcp(tool_name: str, url: str) -> dict[str, Any]:
     }
 
 
-def _extract_search_items(response: dict[str, Any]) -> list[Any]:
-    """Extract the list of search result items from a Firecrawl MCP response.
+def _unwrap_mcp_response(response: Any) -> dict[str, Any]:
+    """Normalize a ``unified_tool_registry.call()`` response into ``{ok, data, error}``.
 
-    Handles the response shape variations documented on
-    :func:`firecrawl_search_via_mcp`.
+    Handles three response shapes:
+
+    1. ``{"ok": True/False, "data": ..., "error": ...}`` — registry wrapper used
+       by test fakes and returned directly when the handler already returns this
+       shape. Passed through unchanged.
+    2. ``{"content": [{"type": "text", "text": "..."}], "isError": bool}`` — raw
+       MCP ``tools/call`` result. The ``content`` text items are concatenated and
+       parsed as JSON when possible. ``isError=True`` maps to ``ok=False``.
+    3. Plain dict / list — treated as successful data.
+
+    This ensures real MCP tools (whose handlers return raw MCP results without
+    an ``ok`` field) are not mistakenly treated as failures (P1 fix).
     """
-    data = response.get("data")
-    # Case: top-level result list ({"ok": True, "result": [...]})
+    if not isinstance(response, dict):
+        return {"ok": True, "data": response, "error": None}
+
+    # Case 1: already has "ok" field (test fakes, registry-level errors)
+    if "ok" in response:
+        return {
+            "ok": bool(response.get("ok")),
+            "data": response.get("data"),
+            "error": response.get("error"),
+        }
+
+    # Case 2: raw MCP tools/call response {content: [...], isError: bool}
+    content = response.get("content")
+    if isinstance(content, list):
+        if response.get("isError"):
+            error_text = ""
+            for item in content:
+                if isinstance(item, dict) and item.get("type") == "text":
+                    error_text += str(item.get("text", ""))
+            return {
+                "ok": False,
+                "data": None,
+                "error": error_text or "MCP tool returned isError",
+            }
+        text_parts: list[str] = []
+        for item in content:
+            if isinstance(item, dict) and item.get("type") == "text":
+                text_parts.append(str(item.get("text", "")))
+        combined = "\n".join(text_parts).strip()
+        if combined:
+            try:
+                parsed = json.loads(combined)
+                return {"ok": True, "data": parsed, "error": None}
+            except (json.JSONDecodeError, ValueError):
+                return {"ok": True, "data": combined, "error": None}
+        return {"ok": True, "data": None, "error": None}
+
+    # Case 3: plain dict — treat as successful data
+    return {"ok": True, "data": response, "error": None}
+
+
+def _extract_search_items(data: Any) -> list[Any]:
+    """Extract the list of search result items from unwrapped Firecrawl data.
+
+    Handles:
+      - Direct list of items
+      - ``{"data": [...]}`` / ``{"result": [...]}`` / ``{"results": [...]}``
+      - Single dict with a url (treated as one item)
+    """
     if isinstance(data, list):
         return data
     if isinstance(data, dict):
@@ -201,13 +262,8 @@ def _extract_search_items(response: dict[str, Any]) -> list[Any]:
             value = data.get(key)
             if isinstance(value, list):
                 return value
-        # Fall through: treat dict itself as a single item if it has a url
         if data.get("url") or data.get("link"):
             return [data]
-    # Case: top-level result key alongside data
-    top_result = response.get("result")
-    if isinstance(top_result, list):
-        return top_result
     return []
 
 
@@ -236,3 +292,25 @@ def _truncate(text: str, max_len: int) -> str:
     if len(text) <= max_len:
         return text
     return text[:max_len] + "..."
+
+
+# Patterns that may carry API keys / tokens — sanitized from error messages
+# to avoid leaking credentials into warnings or debug logs (P2 fix).
+_SENSITIVE_PATTERNS = [
+    # Firecrawl API key in URL path: https://api.firecrawl.dev/v1/fc-xxxxxxxx
+    (re.compile(r"fc-[a-zA-Z0-9_-]{10,}"), "fc-***"),
+    # Query params: key=..., token=..., api_key=..., apikey=...
+    (re.compile(r"([?&](?:api_?key|token|key|secret)=)[^&\s]+", re.IGNORECASE), r"\1***"),
+    # URL userinfo: https://user:pass@host
+    (re.compile(r"(https?://)[^:@/\s]+:[^@/\s]+@"), r"\1***@"),
+]
+
+
+def _sanitize_error(text: str) -> str:
+    """Strip API keys / tokens from error text before it enters warnings or logs."""
+    if not text:
+        return text
+    result = str(text)
+    for pattern, replacement in _SENSITIVE_PATTERNS:
+        result = pattern.sub(replacement, result)
+    return result

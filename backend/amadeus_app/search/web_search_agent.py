@@ -16,6 +16,7 @@ from langgraph.graph import END, START, StateGraph
 
 from .mcp_web_search import (
     McpWebTools,
+    _sanitize_error,
     discover_mcp_web_tools,
     fetch_via_mcp,
     firecrawl_scrape_via_mcp,
@@ -228,7 +229,7 @@ async def search_agent(state: WebSearchState) -> dict[str, Any]:
             warnings.append(
                 {
                     "type": "mcp_fallback",
-                    "message": f"Firecrawl MCP 搜索失败，回退到内置搜索: {error}",
+                    "message": f"Firecrawl MCP 搜索失败，回退到内置搜索: {_sanitize_error(str(error))}",
                     "sources": [],
                 }
             )
@@ -326,6 +327,24 @@ async def reader_agent(state: WebSearchState) -> dict[str, Any]:
                 url = result.get("url", "")
                 if not url:
                     continue
+                # P2: skip results that already have content (e.g. Firecrawl
+                # search returned markdown inline — no need to scrape again).
+                if result.get("fetchStatus") == "ok" and result.get("text"):
+                    continue
+                # P1: enforce public-URL check before MCP scrape to prevent
+                # SSRF / local network access via MCP tools.
+                try:
+                    await ensure_public_url(url)
+                except Exception as url_error:  # noqa: BLE001
+                    next_results[index]["fetchStatus"] = "error"
+                    warnings.append(
+                        {
+                            "type": "fetch_error",
+                            "message": f"URL 安全检查失败: {_sanitize_error(str(url_error))}",
+                            "sources": [result.get("id", "")],
+                        }
+                    )
+                    continue
                 try:
                     content = await scrape_fn(scrape_tool, url)  # type: ignore[arg-type]
                     next_results[index] = {**next_results[index], **content}
@@ -335,7 +354,7 @@ async def reader_agent(state: WebSearchState) -> dict[str, Any]:
                     warnings.append(
                         {
                             "type": "mcp_fallback",
-                            "message": f"MCP 抓取失败，回退到内置抓取: {error}",
+                            "message": f"MCP 抓取失败，回退到内置抓取: {_sanitize_error(str(error))}",
                             "sources": [result.get("id", "")],
                         }
                     )
@@ -347,7 +366,7 @@ async def reader_agent(state: WebSearchState) -> dict[str, Any]:
                         warnings.append(
                             {
                                 "type": "fetch_error",
-                                "message": str(inner_error) or inner_error.__class__.__name__,
+                                "message": _sanitize_error(str(inner_error) or inner_error.__class__.__name__),
                                 "sources": [next_results[index].get("id", "")],
                             }
                         )

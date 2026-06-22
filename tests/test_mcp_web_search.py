@@ -599,3 +599,319 @@ class TestResearchReportSkillAllowlist:
             assert not name.startswith("mcp__"), (
                 f"research-report allowlist must not contain MCP tool name: {name}"
             )
+
+
+# ---------------------------------------------------------------------------
+# TestMcpResponseUnwrapping — P1a: raw MCP tools/call response must be unwrapped
+# ---------------------------------------------------------------------------
+
+
+class TestMcpResponseUnwrapping:
+    """_unwrap_mcp_response must handle raw MCP {content: [...], isError: bool}
+    responses, not just {ok: True, data: ...} test fakes (P1 fix)."""
+
+    def test_unwrap_raw_mcp_text_content_parsed_as_json(self):
+        """Real MCP tools/call returns {content: [{type: text, text: '...'}]}.
+        The text is JSON-encoded data that must be parsed."""
+        from backend.amadeus_app.search.mcp_web_search import _unwrap_mcp_response
+        import json
+
+        payload = {"data": [{"url": "https://example.com", "title": "Test"}], "success": True}
+        response = {
+            "content": [{"type": "text", "text": json.dumps(payload)}],
+            "isError": False,
+        }
+        result = _unwrap_mcp_response(response)
+        assert result["ok"] is True
+        assert result["data"] == payload
+
+    def test_unwrap_raw_mcp_is_error(self):
+        """MCP isError=True must map to ok=False with error text."""
+        from backend.amadeus_app.search.mcp_web_search import _unwrap_mcp_response
+
+        response = {
+            "content": [{"type": "text", "text": "API key invalid"}],
+            "isError": True,
+        }
+        result = _unwrap_mcp_response(response)
+        assert result["ok"] is False
+        assert "API key invalid" in result["error"]
+
+    def test_unwrap_ok_wrapper_passthrough(self):
+        """{ok: True, data: ...} shape (test fakes) passes through unchanged."""
+        from backend.amadeus_app.search.mcp_web_search import _unwrap_mcp_response
+
+        result = _unwrap_mcp_response({"ok": True, "data": [1, 2, 3], "error": None})
+        assert result["ok"] is True
+        assert result["data"] == [1, 2, 3]
+
+    def test_unwrap_plain_dict_treated_as_data(self):
+        """A plain dict without ok/content is treated as successful data."""
+        from backend.amadeus_app.search.mcp_web_search import _unwrap_mcp_response
+
+        result = _unwrap_mcp_response({"markdown": "# Hello", "title": "Page"})
+        assert result["ok"] is True
+        assert result["data"] == {"markdown": "# Hello", "title": "Page"}
+
+    def test_unwrap_non_json_text_returned_as_string(self):
+        """When MCP text content is not JSON, it's returned as a string."""
+        from backend.amadeus_app.search.mcp_web_search import _unwrap_mcp_response
+
+        response = {
+            "content": [{"type": "text", "text": "plain text not json"}],
+            "isError": False,
+        }
+        result = _unwrap_mcp_response(response)
+        assert result["ok"] is True
+        assert result["data"] == "plain text not json"
+
+    @pytest.mark.asyncio
+    async def test_firecrawl_search_works_with_raw_mcp_response(self):
+        """End-to-end: firecrawl_search_via_mcp must succeed when the MCP tool
+        returns a raw MCP {content: [...]} response (not {ok: True, data: ...})."""
+        import json
+
+        payload = {"data": [{"url": "https://example.com/a", "title": "A", "description": "Desc", "markdown": "# A"}]}
+
+        async def handler(args):
+            return {
+                "content": [{"type": "text", "text": json.dumps(payload)}],
+                "isError": False,
+            }
+
+        name = register_mcp_tool(
+            server_id="test_raw_mcp",
+            tool_name="firecrawl_search",
+            description="test",
+            input_schema={"type": "object", "properties": {}},
+            handler=handler,
+            meta={"serverName": "test"},
+        )
+        try:
+            results = await firecrawl_search_via_mcp(
+                name, "test query", max_results=5, domains=[],
+                exclude_domains=[], freshness="any",
+                retrieved_at="2026-01-01T00:00:00+08:00",
+            )
+            assert len(results) == 1
+            assert results[0]["url"] == "https://example.com/a"
+            assert results[0]["text"] == "# A"
+            assert results[0]["fetchStatus"] == "ok"
+        finally:
+            _unregister(name)
+
+
+# ---------------------------------------------------------------------------
+# TestSsrfProtection — P1b: MCP scrape must enforce ensure_public_url
+# ---------------------------------------------------------------------------
+
+
+class TestSsrfProtection:
+    """reader_agent must reject localhost/internal IPs before MCP scrape (P1 fix)."""
+
+    @pytest.mark.asyncio
+    async def test_reader_agent_rejects_localhost_before_mcp_scrape(self):
+        """A result with a localhost URL must not be sent to MCP scrape."""
+        call_log: list[str] = []
+
+        async def scrape_handler(args):
+            call_log.append(args.get("url", ""))
+            return {"ok": True, "data": {"markdown": "should not reach here"}}
+
+        name = register_mcp_tool(
+            server_id="test_ssrf",
+            tool_name="firecrawl_scrape",
+            description="test",
+            input_schema={"type": "object", "properties": {}},
+            handler=scrape_handler,
+            meta={"serverName": "test"},
+        )
+        try:
+            state = _make_state(
+                fetch_content=True,
+                ranked_results=[
+                    {
+                        "id": "src_001",
+                        "url": "http://localhost:8080/secret",
+                        "title": "Local",
+                        "domain": "localhost",
+                        "fetchStatus": "not_fetched",
+                    }
+                ],
+            )
+            result = await reader_agent(state)
+            # MCP scrape must NOT have been called
+            assert call_log == []
+            # The result should have fetchStatus=error
+            assert result["ranked_results"][0]["fetchStatus"] == "error"
+            # A fetch_error warning should be present
+            warnings = result.get("warnings", [])
+            assert any(w["type"] == "fetch_error" for w in warnings)
+        finally:
+            _unregister(name)
+
+    @pytest.mark.asyncio
+    async def test_reader_agent_rejects_internal_ip_before_mcp_scrape(self):
+        """A result with an internal IP URL must not be sent to MCP scrape."""
+        call_log: list[str] = []
+
+        async def scrape_handler(args):
+            call_log.append(args.get("url", ""))
+            return {"ok": True, "data": {"markdown": "no"}}
+
+        name = register_mcp_tool(
+            server_id="test_ssrf_ip",
+            tool_name="firecrawl_scrape",
+            description="test",
+            input_schema={"type": "object", "properties": {}},
+            handler=scrape_handler,
+            meta={"serverName": "test"},
+        )
+        try:
+            state = _make_state(
+                fetch_content=True,
+                ranked_results=[
+                    {
+                        "id": "src_001",
+                        "url": "http://192.168.1.1/admin",
+                        "title": "Internal",
+                        "domain": "192.168.1.1",
+                        "fetchStatus": "not_fetched",
+                    }
+                ],
+            )
+            result = await reader_agent(state)
+            assert call_log == []
+            assert result["ranked_results"][0]["fetchStatus"] == "error"
+        finally:
+            _unregister(name)
+
+
+# ---------------------------------------------------------------------------
+# TestSkipRedundantScrape — P2a: don't re-scrape results that already have text
+# ---------------------------------------------------------------------------
+
+
+class TestSkipRedundantScrape:
+    """reader_agent must skip results where Firecrawl search already returned
+    markdown (fetchStatus=ok + text non-empty) (P2 fix)."""
+
+    @pytest.mark.asyncio
+    async def test_reader_agent_skips_results_with_existing_content(self):
+        """Results with fetchStatus=ok and text should not be re-scraped."""
+        call_log: list[str] = []
+
+        async def scrape_handler(args):
+            call_log.append(args.get("url", ""))
+            return {"ok": True, "data": {"markdown": "re-scraped"}}
+
+        name = register_mcp_tool(
+            server_id="test_skip",
+            tool_name="firecrawl_scrape",
+            description="test",
+            input_schema={"type": "object", "properties": {}},
+            handler=scrape_handler,
+            meta={"serverName": "test"},
+        )
+        try:
+            state = _make_state(
+                fetch_content=True,
+                ranked_results=[
+                    {
+                        "id": "src_001",
+                        "url": "https://example.com/already-fetched",
+                        "title": "Already Fetched",
+                        "domain": "example.com",
+                        "text": "# Existing markdown from Firecrawl search",
+                        "fetchStatus": "ok",
+                    }
+                ],
+            )
+            result = await reader_agent(state)
+            # MCP scrape must NOT have been called — content already present
+            assert call_log == []
+            # Original text must be preserved
+            assert "Existing markdown" in result["ranked_results"][0]["text"]
+        finally:
+            _unregister(name)
+
+    @pytest.mark.asyncio
+    async def test_reader_agent_scrapes_results_without_content(self):
+        """Results with fetchStatus=not_fetched should still be scraped."""
+        call_log: list[str] = []
+
+        async def scrape_handler(args):
+            call_log.append(args.get("url", ""))
+            return {"ok": True, "data": {"markdown": "# Scraped content"}}
+
+        name = register_mcp_tool(
+            server_id="test_noskip",
+            tool_name="firecrawl_scrape",
+            description="test",
+            input_schema={"type": "object", "properties": {}},
+            handler=scrape_handler,
+            meta={"serverName": "test"},
+        )
+        try:
+            state = _make_state(
+                fetch_content=True,
+                ranked_results=[
+                    {
+                        "id": "src_001",
+                        "url": "https://example.com/needs-scrape",
+                        "title": "Needs Scrape",
+                        "domain": "example.com",
+                        "fetchStatus": "not_fetched",
+                    }
+                ],
+            )
+            result = await reader_agent(state)
+            assert len(call_log) == 1
+            assert "needs-scrape" in call_log[0]
+            assert result["ranked_results"][0]["text"] == "# Scraped content"
+        finally:
+            _unregister(name)
+
+
+# ---------------------------------------------------------------------------
+# TestErrorSanitization — P2b: API keys must be stripped from error messages
+# ---------------------------------------------------------------------------
+
+
+class TestErrorSanitization:
+    """_sanitize_error must strip API keys/tokens from error text (P2 fix)."""
+
+    def test_sanitize_firecrawl_api_key(self):
+        from backend.amadeus_app.search.mcp_web_search import _sanitize_error
+
+        raw = "Request to https://api.firecrawl.dev/v1/fc-abc123def456ghi789 failed"
+        sanitized = _sanitize_error(raw)
+        assert "fc-abc123def456ghi789" not in sanitized
+        assert "fc-***" in sanitized
+
+    def test_sanitize_query_param_key(self):
+        from backend.amadeus_app.search.mcp_web_search import _sanitize_error
+
+        raw = "GET https://example.com/api?api_key=secret123&query=test failed"
+        sanitized = _sanitize_error(raw)
+        assert "secret123" not in sanitized
+        assert "api_key=***" in sanitized
+
+    def test_sanitize_url_userinfo(self):
+        from backend.amadeus_app.search.mcp_web_search import _sanitize_error
+
+        raw = "Failed to fetch https://user:pass123@internal.host/path"
+        sanitized = _sanitize_error(raw)
+        assert "pass123" not in sanitized
+        assert "user:" not in sanitized
+
+    def test_sanitize_preserves_normal_text(self):
+        from backend.amadeus_app.search.mcp_web_search import _sanitize_error
+
+        raw = "Connection timeout after 10 seconds"
+        assert _sanitize_error(raw) == raw
+
+    def test_sanitize_empty_string(self):
+        from backend.amadeus_app.search.mcp_web_search import _sanitize_error
+
+        assert _sanitize_error("") == ""

@@ -39,6 +39,28 @@ CODE_FILE_EXTENSIONS: set[str] = {
 }
 
 
+# Build/config filenames that also require OpenCode routing approval.
+# These are not code files by extension, but modifying them affects how the
+# project builds, lints, or resolves dependencies — equivalent to a code
+# change. Matched case-insensitively against the basename.
+BUILD_CONFIG_FILENAMES: set[str] = {
+    "package.json", "pyproject.toml", "tsconfig.json", "tsconfig.base.json",
+    "cargo.toml", "go.mod", "go.sum", "pom.xml",
+    "build.gradle", "build.gradle.kts", "settings.gradle",
+    "requirements.txt", "pipfile", "pipfile.lock", "setup.py", "setup.cfg",
+    "vite.config.ts", "vite.config.js", "vite.config.mts",
+    "webpack.config.js", "webpack.config.ts", "webpack.config.cjs",
+    "rollup.config.js", "rollup.config.mjs",
+    ".eslintrc", ".eslintrc.js", ".eslintrc.json", ".eslintrc.cjs",
+    ".prettierrc", ".prettierrc.js", ".prettierrc.json",
+    "babel.config.js", "babel.config.json",
+    "jest.config.js", "jest.config.ts", "jest.config.cjs",
+    "vitest.config.ts", "vitest.config.js", "vitest.config.mts",
+    "cmakelists.txt", "makefile",
+    "dockerfile", "docker-compose.yml", "docker-compose.yaml",
+}
+
+
 def _is_blocked(path: Path) -> bool:
     parts = set(path.parts)
     return bool(parts & BLOCKED_WRITE_PATHS)
@@ -48,6 +70,11 @@ def _is_code_file(path: str) -> bool:
     """Check if the path has a code file extension."""
     suffix = Path(path).suffix.lower()
     return suffix in CODE_FILE_EXTENSIONS
+
+
+def _is_build_config_file(path: str) -> bool:
+    """Check if the path's basename is a known build/config file."""
+    return Path(path).name.lower() in BUILD_CONFIG_FILENAMES
 
 
 def _resolve_workspace_path(workspace: str, relative_path: str) -> Path:
@@ -166,14 +193,15 @@ def make_file_writer_tool(
         mode = str(args.get("mode", "write")).lower()
         if mode not in {"write", "append"}:
             return {"ok": False, "error": f"invalid mode: {mode}"}
-        # Code-file protection: when OpenCode is not allowed, reject code files.
+        # Code-file protection: when OpenCode is not allowed, reject code files
+        # and build/config files (package.json, pyproject.toml, tsconfig, etc.).
         if code_write_allowed_fn is not None and not code_write_allowed_fn():
-            if _is_code_file(path):
+            if _is_code_file(path) or _is_build_config_file(path):
                 return {
                     "ok": False,
                     "error": (
-                        f"Writing code file '{path}' requires OpenCode routing approval. "
-                        f"Use opencode_delegate for code modifications, or output "
+                        f"Writing code or build config file '{path}' requires OpenCode routing approval. "
+                        f"Use opencode_delegate for code/config modifications, or output "
                         f"analysis and suggestions as text instead."
                     ),
                 }
@@ -194,7 +222,9 @@ def make_file_writer_tool(
         description="Write or append text to a file inside the task workspace. "
                     "Creates a snapshot of the existing file for rollback. "
                     "Blocked paths: .env, .git, node_modules, .venv. "
-                    "Code files (.py/.ts/.tsx/.js/etc.) require OpenCode routing approval.",
+                    "Code files (.py/.ts/.tsx/.js/etc.) and build config files "
+                    "(package.json, pyproject.toml, tsconfig.json, etc.) require "
+                    "OpenCode routing approval.",
         parameters={
             "type": "object",
             "properties": {

@@ -23,6 +23,35 @@ def _decode_json(value: Any) -> dict[str, Any]:
     return {}
 
 
+def _mcp_server_key(server: dict[str, Any]) -> str:
+    name = str(server.get("name") or "").strip().lower()
+    if name:
+        return f"name:{name}"
+    if server.get("transport") == "http":
+        return f"http:{str(server.get('url') or '').strip().lower()}"
+    args = "\0".join(str(arg).strip() for arg in server.get("args", []) if str(arg).strip())
+    return f"stdio:{str(server.get('command') or '').strip().lower()}:{args}"
+
+
+def _clean_mcp_servers(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    seen: set[str] = set()
+    cleaned: list[dict[str, Any]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        server_id = str(item.get("id") or "")
+        if not server_id or server_id.startswith("draft-"):
+            continue
+        key = _mcp_server_key(item)
+        if key in seen:
+            continue
+        seen.add(key)
+        cleaned.append(item)
+    return cleaned
+
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -468,7 +497,7 @@ class SQLiteStorage:
             "voice": _decode_json(row["voice_settings"]),
             "desktopAssistant": _decode_json(row["desktop_assistant_settings"]),
             "agent": _decode_json(row["agent_settings"]) if "agent_settings" in row.keys() else {},
-            "mcpServers": _decode_json(row["mcp_servers_json"]) if "mcp_servers_json" in row.keys() else [],
+            "mcpServers": _clean_mcp_servers(_decode_json(row["mcp_servers_json"]) if "mcp_servers_json" in row.keys() else []),
             "mode": row["mode"],
             "updatedAt": row["updated_at"],
         }
@@ -519,9 +548,9 @@ class SQLiteStorage:
             (user_id,),
         ).fetchone()
         existing_agent = _decode_json(existing["agent_settings"]) if existing else {}
-        existing_mcp = _decode_json(existing["mcp_servers_json"]) if existing else []
+        existing_mcp = _clean_mcp_servers(_decode_json(existing["mcp_servers_json"]) if existing else [])
         agent_value = agent if agent is not None else existing_agent
-        mcp_value = mcp_servers if mcp_servers is not None else existing_mcp
+        mcp_value = _clean_mcp_servers(mcp_servers) if mcp_servers is not None else existing_mcp
         conn.execute(
             """
             INSERT INTO app_settings (user_id, model_settings, vision_settings, speech_input_settings, voice_settings, desktop_assistant_settings, agent_settings, mcp_servers_json, mode, updated_at)

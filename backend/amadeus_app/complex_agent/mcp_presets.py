@@ -33,7 +33,7 @@ MCP_PRESETS: list[dict[str, Any]] = [
         "description": "Up-to-date, version-specific library documentation.",
         "transport": "http",
         "url": "https://mcp.context7.com/mcp",
-        "authType": "none",
+        "authType": "api_key",
         "headers": {},
         "trusted": False,
         "allowedTools": [],

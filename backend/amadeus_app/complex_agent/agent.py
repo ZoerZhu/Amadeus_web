@@ -268,10 +268,14 @@ async def apply_opencode_routing(
     ``task.settings["_opencode_allowed"] = True`` so ``file_writer`` can write
     code files. Emits an ``opencode_routing`` event with the decision details.
     """
-    # Resolve routing config: use settings.opencode_routing, or defaults if empty.
+    # Resolve routing config. When the user has not defined any custom rules,
+    # fall back to the built-in default rule set — but preserve the user's
+    # thresholds, force keywords, and llm_rejudge setting. Replacing the entire
+    # config would silently discard user customizations (P1 fix).
     config = settings.opencode_routing
-    if not config.rules and config.enabled:
-        config = default_opencode_routing_config()
+    if config.enabled and not config.rules:
+        default = default_opencode_routing_config()
+        config = config.model_copy(update={"rules": default.rules})
 
     # Build LLM re-judge function if enabled.
     llm_rejudge_fn = None

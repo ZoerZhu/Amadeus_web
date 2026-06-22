@@ -38,6 +38,7 @@ import type {
   McpTransport,
   SkillPackageInfo
 } from "../types";
+import { normalizeAgentSettings } from "../agentDefaults";
 
 type AgentSettingsPanelProps = {
   agent: AgentSettings;
@@ -46,40 +47,16 @@ type AgentSettingsPanelProps = {
   onMcpServersChange: (servers: McpServerConfig[]) => void;
   skills: SkillPackageInfo[];
   onSkillsChange: (skills: SkillPackageInfo[]) => void;
+  section?: SectionKey;
 };
 
 type SectionKey = "agent" | "mcp" | "skills";
-
-const DEFAULT_AGENT_SETTINGS: AgentSettings = {
-  enabled: true,
-  trustMode: true,
-  defaultWorkspace: "",
-  maxRounds: 20,
-  maxToolCalls: 80,
-  maxRuntimeSeconds: 1800,
-  maxSamplingDepth: 3,
-  artifactRoot: "generated_docs/agent_artifacts",
-  rollbackEnabled: true,
-  browserEnabled: false,
-  opencodeEnabled: true,
-  opencodeRouting: {
-    enabled: true,
-    allowThreshold: 60,
-    ambiguousThreshold: 40,
-    allowLlmRejudge: true,
-    forceAllowKeywords: [],
-    forceDenyKeywords: [],
-    rules: []
-  }
+type McpFeedbackKind = "info" | "success" | "error";
+type McpFeedback = {
+  kind: McpFeedbackKind;
+  message: string;
+  serverId?: string;
 };
-
-function normalizeAgentSettings(value?: Partial<AgentSettings> | null): AgentSettings {
-  const base = { ...DEFAULT_AGENT_SETTINGS, ...(value ?? {}) };
-  if (!base.opencodeRouting) {
-    base.opencodeRouting = { ...DEFAULT_AGENT_SETTINGS.opencodeRouting };
-  }
-  return base;
-}
 
 function emptyMcpServer(): McpServerConfig {
   return {
@@ -103,13 +80,44 @@ function emptyMcpServer(): McpServerConfig {
   };
 }
 
+function isDraftMcpServerId(id: string): boolean {
+  return !id || id.startsWith("draft-");
+}
+
+function normalizedMcpText(value?: string): string {
+  return (value ?? "").trim().toLowerCase();
+}
+
+function sameStringList(left: string[] = [], right: string[] = []): boolean {
+  return left.map((item) => item.trim()).join("\u0000") === right.map((item) => item.trim()).join("\u0000");
+}
+
+function isSameMcpServerConfig(left: McpServerConfig, right: McpServerConfig): boolean {
+  if (left.transport !== right.transport) {
+    return false;
+  }
+  if (normalizedMcpText(left.name) && normalizedMcpText(left.name) === normalizedMcpText(right.name)) {
+    return true;
+  }
+  if (left.transport === "http") {
+    return Boolean(left.url && right.url && normalizedMcpText(left.url) === normalizedMcpText(right.url));
+  }
+  return Boolean(
+    left.command &&
+      right.command &&
+      normalizedMcpText(left.command) === normalizedMcpText(right.command) &&
+      sameStringList(left.args, right.args)
+  );
+}
+
 export function AgentSettingsPanel({
   agent,
   onAgentChange,
   mcpServers,
   onMcpServersChange,
   skills,
-  onSkillsChange
+  onSkillsChange,
+  section
 }: AgentSettingsPanelProps) {
   const [openSections, setOpenSections] = useState<Record<SectionKey, boolean>>({
     agent: false,
@@ -118,6 +126,7 @@ export function AgentSettingsPanel({
   });
   const [mcpBusyId, setMcpBusyId] = useState<string | null>(null);
   const [mcpStatus, setMcpStatus] = useState<string>("");
+  const [mcpFeedback, setMcpFeedback] = useState<McpFeedback | null>(null);
   const [skillImportBusy, setSkillImportBusy] = useState(false);
   const [skillImportStatus, setSkillImportStatus] = useState<string>("");
   const [gitUrl, setGitUrl] = useState("");
@@ -131,9 +140,15 @@ export function AgentSettingsPanel({
   const [builtinLoading, setBuiltinLoading] = useState(false);
   const [installBusy, setInstallBusy] = useState(false);
   const [installStatus, setInstallStatus] = useState<string>("");
+  const [selectedMcpId, setSelectedMcpId] = useState<string>("");
 
   function toggleSection(section: SectionKey) {
     setOpenSections((prev) => ({ ...prev, [section]: !prev[section] }));
+  }
+
+  function setMcpNotice(message: string, kind: McpFeedbackKind = "info", serverId?: string) {
+    setMcpStatus(message);
+    setMcpFeedback({ kind, message, serverId });
   }
 
   function updateAgent(patch: Partial<AgentSettings>) {
@@ -147,10 +162,15 @@ export function AgentSettingsPanel({
   }
 
   function addServer() {
+    if (mcpServers.some((server) => isDraftMcpServerId(server.id))) {
+      setMcpNotice("已有未保存 MCP 配置，请先保存或删除", "info");
+      return;
+    }
     const draft = emptyMcpServer();
     draft.id = `draft-${Date.now()}`;
     draft.name = "新 MCP 服务器";
     onMcpServersChange([...mcpServers, draft]);
+    setSelectedMcpId(draft.id);
   }
 
   function removeServer(id: string) {
@@ -159,10 +179,14 @@ export function AgentSettingsPanel({
         if (!id.startsWith("draft-")) {
           await deleteMcpServer(id);
         }
-        onMcpServersChange(mcpServers.filter((server) => server.id !== id));
-        setMcpStatus(`已删除服务器`);
+        const nextServers = mcpServers.filter((server) => server.id !== id);
+        onMcpServersChange(nextServers);
+        if (selectedMcpId === id) {
+          setSelectedMcpId(nextServers[0]?.id ?? "");
+        }
+        setMcpNotice(`已删除服务器`, "success");
       } catch (error) {
-        setMcpStatus(error instanceof Error ? error.message : "删除失败");
+        setMcpNotice(error instanceof Error ? error.message : "删除失败", "error", id);
       }
     })();
   }
@@ -171,13 +195,17 @@ export function AgentSettingsPanel({
     void (async () => {
       setMcpBusyId(server.id);
       try {
-        const saved = await upsertMcpServer(server);
+        const originalId = server.id;
+        const saved = await upsertMcpServer(isDraftMcpServerId(server.id) ? { ...server, id: "" } : server);
         onMcpServersChange(
-          mcpServers.map((item) => (item.id === server.id ? saved : item))
+          mcpServers.some((item) => item.id === originalId)
+            ? mcpServers.map((item) => (item.id === originalId ? saved : item))
+            : [saved, ...mcpServers]
         );
-        setMcpStatus(`已保存 ${saved.name}`);
+        setSelectedMcpId(saved.id);
+        setMcpNotice(`已保存 ${saved.name}`, "success", saved.id);
       } catch (error) {
-        setMcpStatus(error instanceof Error ? error.message : "保存失败");
+        setMcpNotice(error instanceof Error ? error.message : "保存失败", "error", server.id);
       } finally {
         setMcpBusyId(null);
       }
@@ -187,16 +215,20 @@ export function AgentSettingsPanel({
   function handleTestServer(server: McpServerConfig) {
     void (async () => {
       setMcpBusyId(server.id);
-      setMcpStatus(`测试 ${server.name} 中…`);
+      setMcpNotice(`测试 ${server.name} 中…`, "info", server.id);
       try {
         const result = await testMcpServer(server);
         if (result.ok) {
-          setMcpStatus(`连接成功，工具 ${result.toolCount ?? 0} 个，资源 ${result.resourceCount ?? 0} 个`);
+          setMcpNotice(
+            `测试成功，工具 ${result.toolCount ?? 0} 个，资源 ${result.resourceCount ?? 0} 个`,
+            "success",
+            server.id
+          );
         } else {
-          setMcpStatus(result.error || "连接失败");
+          setMcpNotice(result.error || "测试失败", "error", server.id);
         }
       } catch (error) {
-        setMcpStatus(error instanceof Error ? error.message : "测试失败");
+        setMcpNotice(error instanceof Error ? error.message : "测试失败", "error", server.id);
       } finally {
         setMcpBusyId(null);
       }
@@ -206,12 +238,17 @@ export function AgentSettingsPanel({
   function handleConnect(server: McpServerConfig) {
     void (async () => {
       setMcpBusyId(server.id);
+      setMcpNotice(`连接 ${server.name} 中…`, "info", server.id);
       try {
         const result = await connectMcpServer(server.id);
         updateServer(server.id, { connected: true });
-        setMcpStatus(`已连接 ${server.name}，工具 ${result.toolCount} 个`);
+        setMcpNotice(
+          `已连接 ${server.name}，工具 ${result.toolCount} 个，资源 ${result.resourceCount} 个`,
+          "success",
+          server.id
+        );
       } catch (error) {
-        setMcpStatus(error instanceof Error ? error.message : "连接失败");
+        setMcpNotice(error instanceof Error ? error.message : "连接失败", "error", server.id);
       } finally {
         setMcpBusyId(null);
       }
@@ -221,12 +258,13 @@ export function AgentSettingsPanel({
   function handleDisconnect(server: McpServerConfig) {
     void (async () => {
       setMcpBusyId(server.id);
+      setMcpNotice(`断开 ${server.name} 中…`, "info", server.id);
       try {
         await disconnectMcpServer(server.id);
         updateServer(server.id, { connected: false });
-        setMcpStatus(`已断开 ${server.name}`);
+        setMcpNotice(`已断开 ${server.name}`, "success", server.id);
       } catch (error) {
-        setMcpStatus(error instanceof Error ? error.message : "断开失败");
+        setMcpNotice(error instanceof Error ? error.message : "断开失败", "error", server.id);
       } finally {
         setMcpBusyId(null);
       }
@@ -356,17 +394,23 @@ export function AgentSettingsPanel({
   }
 
   function applyPreset(preset: McpPreset) {
+    const draft = presetToServer(preset);
+    const existing = mcpServers.find((server) => isSameMcpServerConfig(server, draft));
+    if (existing) {
+      setMcpNotice(`${existing.name} 已存在，未重复添加`, "info", existing.id);
+      return;
+    }
     void (async () => {
       setMcpBusyId(`preset-${preset.id}`);
-      setMcpStatus(`添加模板 ${preset.name} 中…`);
+      setMcpNotice(`添加模板 ${preset.name} 中…`, "info");
       try {
-        const draft = presetToServer(preset);
-        draft.id = `draft-${Date.now()}`;
+        draft.id = "";
         const saved = await upsertMcpServer(draft);
         onMcpServersChange([...mcpServers, saved]);
-        setMcpStatus(`已从模板添加 ${saved.name}`);
+        setSelectedMcpId(saved.id);
+        setMcpNotice(`已从模板添加 ${saved.name}`, "success", saved.id);
       } catch (error) {
-        setMcpStatus(error instanceof Error ? error.message : "添加模板失败");
+        setMcpNotice(error instanceof Error ? error.message : "添加模板失败", "error");
       } finally {
         setMcpBusyId(null);
       }
@@ -421,13 +465,28 @@ export function AgentSettingsPanel({
 
   const normalizedAgent = normalizeAgentSettings(agent);
 
+  const isSingleSection = Boolean(section);
+  const isAgentOpen = section ? section === "agent" : openSections.agent;
+  const isMcpOpen = section ? section === "mcp" : openSections.mcp;
+  const isSkillsOpen = section ? section === "skills" : openSections.skills;
+  const selectedMcpServer =
+    mcpServers.find((server) => server.id === selectedMcpId) ?? mcpServers[0] ?? null;
+  const selectedMcpFeedback =
+    mcpFeedback && (!mcpFeedback.serverId || mcpFeedback.serverId === selectedMcpServer?.id)
+      ? mcpFeedback
+      : null;
+
   return (
-    <>
+    <div className={`agent-settings-panel ${isSingleSection ? "is-single-section" : ""}`}>
       <ConfigGroup
         title="Agent"
         icon={<Boxes size={16} />}
-        open={openSections.agent}
-        onToggle={() => toggleSection("agent")}
+        open={isAgentOpen}
+        onToggle={() => {
+          if (!section) {
+            toggleSection("agent");
+          }
+        }}
       >
         <label className="switch-row">
           <span>启用复杂 Agent</span>
@@ -632,6 +691,19 @@ export function AgentSettingsPanel({
                         }}
                         placeholder="权重"
                       />
+                      <select
+                        value={rule.matchType}
+                        onChange={(event) => {
+                          const rules = [...normalizedAgent.opencodeRouting.rules];
+                          rules[index] = { ...rule, matchType: event.target.value as "keyword" | "regex" };
+                          updateAgent({
+                            opencodeRouting: { ...normalizedAgent.opencodeRouting, rules },
+                          });
+                        }}
+                      >
+                        <option value="keyword">关键词</option>
+                        <option value="regex">正则</option>
+                      </select>
                       <input
                         value={rule.keywords.join(", ")}
                         onChange={(event) => {
@@ -644,7 +716,18 @@ export function AgentSettingsPanel({
                             opencodeRouting: { ...normalizedAgent.opencodeRouting, rules },
                           });
                         }}
-                        placeholder="关键词（逗号分隔）"
+                        placeholder={rule.matchType === "regex" ? "正则表达式（逗号分隔）" : "关键词（逗号分隔）"}
+                      />
+                      <input
+                        value={rule.description}
+                        onChange={(event) => {
+                          const rules = [...normalizedAgent.opencodeRouting.rules];
+                          rules[index] = { ...rule, description: event.target.value };
+                          updateAgent({
+                            opencodeRouting: { ...normalizedAgent.opencodeRouting, rules },
+                          });
+                        }}
+                        placeholder="描述（可选）"
                       />
                       <button
                         type="button"
@@ -687,8 +770,12 @@ export function AgentSettingsPanel({
       <ConfigGroup
         title="MCP 服务器"
         icon={<Plug size={16} />}
-        open={openSections.mcp}
-        onToggle={() => toggleSection("mcp")}
+        open={isMcpOpen}
+        onToggle={() => {
+          if (!section) {
+            toggleSection("mcp");
+          }
+        }}
       >
         <div className="agent-section-actions">
           <button
@@ -730,13 +817,15 @@ export function AgentSettingsPanel({
                 {presets.map((preset) => {
                   const category = preset._category ?? (preset.transport === "http" ? "远程" : "本地");
                   const busy = mcpBusyId === `preset-${preset.id}`;
+                  const alreadyAdded = mcpServers.some((server) => isSameMcpServerConfig(server, presetToServer(preset)));
                   return (
                     <button
                       key={preset.id}
-                      className="mcp-preset-card"
-                      disabled={busy}
+                      className={`mcp-preset-card ${alreadyAdded ? "is-added" : ""}`}
+                      disabled={busy || alreadyAdded}
                       onClick={() => applyPreset(preset)}
                       type="button"
+                      title={alreadyAdded ? "该 MCP 配置已添加" : undefined}
                     >
                       <div className="mcp-preset-card-head">
                         <strong>{preset.name}</strong>
@@ -748,7 +837,7 @@ export function AgentSettingsPanel({
                         <p className="mcp-preset-desc">{preset.description}</p>
                       )}
                       <div className="mcp-preset-card-foot">
-                        <span className="mcp-preset-transport">{preset.transport}</span>
+                        <span className="mcp-preset-transport">{alreadyAdded ? "已添加" : preset.transport}</span>
                         {busy && <Loader2 className="phase-spinner" size={12} />}
                       </div>
                     </button>
@@ -761,53 +850,88 @@ export function AgentSettingsPanel({
         {mcpServers.length === 0 && (
           <div className="agent-empty-hint">尚未配置 MCP 服务器</div>
         )}
-        {mcpServers.map((server) => (
-          <div className="agent-mcp-card" key={server.id}>
+        {mcpServers.length > 0 && (
+          <div className="mcp-configured-panel">
+            <div className="mcp-preset-panel-head">
+              <span className="mcp-preset-panel-title">已配置 MCP</span>
+            </div>
+            <div className="mcp-preset-grid">
+              {mcpServers.map((server) => (
+                <button
+                  className={`mcp-preset-card mcp-config-card ${selectedMcpServer?.id === server.id ? "is-selected" : ""}`}
+                  key={server.id}
+                  onClick={() => setSelectedMcpId(server.id)}
+                  type="button"
+                >
+                  <div className="mcp-preset-card-head">
+                    <strong>{server.name || "未命名 MCP"}</strong>
+                    <span className={`mcp-preset-category is-${server.transport}`}>
+                      {server.transport === "http" ? "remote" : "local"}
+                    </span>
+                  </div>
+                  <p className="mcp-preset-desc">
+                    {server.transport === "http"
+                      ? server.url || "未填写 URL"
+                      : [server.command, ...server.args].filter(Boolean).join(" ") || "未填写命令"}
+                  </p>
+                  <div className="mcp-preset-card-foot">
+                    <span className={`mcp-config-state ${server.connected ? "is-live" : ""}`}>
+                      {server.connected ? "已连接" : server.enabled ? "已启用" : "已停用"}
+                    </span>
+                    {isDraftMcpServerId(server.id) && <span className="mcp-config-draft">未保存</span>}
+                  </div>
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+        {selectedMcpServer && (
+          <div className="agent-mcp-card" key={selectedMcpServer.id}>
             <div className="agent-mcp-head">
               <input
                 className="agent-mcp-name"
-                value={server.name}
-                onChange={(event) => updateServer(server.id, { name: event.target.value })}
+                value={selectedMcpServer.name}
+                onChange={(event) => updateServer(selectedMcpServer.id, { name: event.target.value })}
                 placeholder="服务器名称"
               />
               <label className="agent-mcp-toggle">
                 <input
-                  checked={server.enabled}
-                  onChange={(event) => updateServer(server.id, { enabled: event.target.checked })}
+                  checked={selectedMcpServer.enabled}
+                  onChange={(event) => updateServer(selectedMcpServer.id, { enabled: event.target.checked })}
                   type="checkbox"
                 />
                 <span>启用</span>
               </label>
-              <span className={`agent-mcp-status ${server.connected ? "is-live" : ""}`}>
-                {server.connected ? "已连接" : "未连接"}
+              <span className={`agent-mcp-status ${selectedMcpServer.connected ? "is-live" : ""}`}>
+                {selectedMcpServer.connected ? "已连接" : "未连接"}
               </span>
             </div>
             <label className="field">
               <span>传输方式</span>
               <select
-                value={server.transport}
-                onChange={(event) => updateServer(server.id, { transport: event.target.value as McpTransport })}
+                value={selectedMcpServer.transport}
+                onChange={(event) => updateServer(selectedMcpServer.id, { transport: event.target.value as McpTransport })}
               >
                 <option value="stdio">stdio</option>
                 <option value="http">http</option>
               </select>
             </label>
-            {server.transport === "stdio" ? (
+            {selectedMcpServer.transport === "stdio" ? (
               <>
                 <label className="field">
                   <span>命令</span>
                   <input
-                    value={server.command}
-                    onChange={(event) => updateServer(server.id, { command: event.target.value })}
+                    value={selectedMcpServer.command}
+                    onChange={(event) => updateServer(selectedMcpServer.id, { command: event.target.value })}
                     placeholder="例如 npx"
                   />
                 </label>
                 <label className="field">
                   <span>参数（空格分隔）</span>
                   <input
-                    value={server.args.join(" ")}
+                    value={selectedMcpServer.args.join(" ")}
                     onChange={(event) =>
-                      updateServer(server.id, {
+                      updateServer(selectedMcpServer.id, {
                         args: event.target.value.split(/\s+/).filter(Boolean)
                       })
                     }
@@ -817,8 +941,8 @@ export function AgentSettingsPanel({
                 <label className="field">
                   <span>工作目录</span>
                   <input
-                    value={server.cwd}
-                    onChange={(event) => updateServer(server.id, { cwd: event.target.value })}
+                    value={selectedMcpServer.cwd}
+                    onChange={(event) => updateServer(selectedMcpServer.id, { cwd: event.target.value })}
                   />
                 </label>
               </>
@@ -827,29 +951,29 @@ export function AgentSettingsPanel({
                 <label className="field">
                   <span>URL</span>
                   <input
-                    value={server.url}
-                    onChange={(event) => updateServer(server.id, { url: event.target.value })}
+                    value={selectedMcpServer.url}
+                    onChange={(event) => updateServer(selectedMcpServer.id, { url: event.target.value })}
                     placeholder="https://example.com/mcp"
                   />
                 </label>
                 <label className="field">
                   <span>认证方式</span>
                   <select
-                    value={server.authType}
-                    onChange={(event) => updateServer(server.id, { authType: event.target.value as McpAuthType })}
+                    value={selectedMcpServer.authType}
+                    onChange={(event) => updateServer(selectedMcpServer.id, { authType: event.target.value as McpAuthType })}
                   >
                     <option value="none">none</option>
                     <option value="bearer">bearer</option>
                     <option value="api_key">api_key</option>
                   </select>
                 </label>
-                {server.authType !== "none" && (
+                {selectedMcpServer.authType !== "none" && (
                   <label className="field">
                     <span>认证令牌</span>
                     <input
                       type="password"
-                      value={server.authToken}
-                      onChange={(event) => updateServer(server.id, { authToken: event.target.value })}
+                      value={selectedMcpServer.authToken}
+                      onChange={(event) => updateServer(selectedMcpServer.id, { authToken: event.target.value })}
                       autoComplete="off"
                     />
                   </label>
@@ -861,15 +985,15 @@ export function AgentSettingsPanel({
               <input
                 type="number"
                 min={1}
-                value={server.timeoutSeconds}
-                onChange={(event) => updateServer(server.id, { timeoutSeconds: Number(event.target.value) || 30 })}
+                value={selectedMcpServer.timeoutSeconds}
+                onChange={(event) => updateServer(selectedMcpServer.id, { timeoutSeconds: Number(event.target.value) || 30 })}
               />
             </label>
             <div className="agent-mcp-actions">
               <button
                 className="text-icon-button"
-                disabled={mcpBusyId === server.id}
-                onClick={() => saveServer(server)}
+                disabled={mcpBusyId === selectedMcpServer.id}
+                onClick={() => saveServer(selectedMcpServer)}
                 type="button"
               >
                 <Power size={15} />
@@ -877,17 +1001,17 @@ export function AgentSettingsPanel({
               </button>
               <button
                 className="text-icon-button"
-                disabled={mcpBusyId === server.id}
-                onClick={() => handleTestServer(server)}
+                disabled={mcpBusyId === selectedMcpServer.id}
+                onClick={() => handleTestServer(selectedMcpServer)}
                 type="button"
               >
                 测试
               </button>
-              {server.connected ? (
+              {selectedMcpServer.connected ? (
                 <button
                   className="text-icon-button"
-                  disabled={mcpBusyId === server.id}
-                  onClick={() => handleDisconnect(server)}
+                  disabled={mcpBusyId === selectedMcpServer.id}
+                  onClick={() => handleDisconnect(selectedMcpServer)}
                   type="button"
                 >
                   断开
@@ -895,8 +1019,8 @@ export function AgentSettingsPanel({
               ) : (
                 <button
                   className="text-icon-button"
-                  disabled={mcpBusyId === server.id || !server.id || server.id.startsWith("draft-")}
-                  onClick={() => handleConnect(server)}
+                  disabled={mcpBusyId === selectedMcpServer.id || isDraftMcpServerId(selectedMcpServer.id)}
+                  onClick={() => handleConnect(selectedMcpServer)}
                   type="button"
                 >
                   连接
@@ -904,24 +1028,33 @@ export function AgentSettingsPanel({
               )}
               <button
                 className="text-icon-button is-muted"
-                disabled={mcpBusyId === server.id}
-                onClick={() => removeServer(server.id)}
+                disabled={mcpBusyId === selectedMcpServer.id}
+                onClick={() => removeServer(selectedMcpServer.id)}
                 type="button"
                 aria-label="删除服务器"
               >
                 <Trash2 size={15} />
               </button>
-              {mcpBusyId === server.id && <Loader2 className="phase-spinner" size={14} />}
+              {mcpBusyId === selectedMcpServer.id && <Loader2 className="phase-spinner" size={14} />}
             </div>
+            {selectedMcpFeedback && (
+              <div className={`agent-mcp-feedback is-${selectedMcpFeedback.kind}`}>
+                {selectedMcpFeedback.message}
+              </div>
+            )}
           </div>
-        ))}
+        )}
       </ConfigGroup>
 
       <ConfigGroup
         title="技能包"
         icon={<Package size={16} />}
-        open={openSections.skills}
-        onToggle={() => toggleSection("skills")}
+        open={isSkillsOpen}
+        onToggle={() => {
+          if (!section) {
+            toggleSection("skills");
+          }
+        }}
       >
         <div className="agent-skill-import">
           <div className="agent-skill-import-row">
@@ -1090,6 +1223,6 @@ export function AgentSettingsPanel({
           </div>
         ))}
       </ConfigGroup>
-    </>
+    </div>
   );
 }

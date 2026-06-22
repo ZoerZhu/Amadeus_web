@@ -1460,6 +1460,80 @@
   opacity: 0.7;
 }
 
+.mcp-preset-card.is-added {
+  border-color: rgba(27, 127, 76, 0.18);
+  background: rgba(255, 255, 255, 0.54);
+}
+
+.mcp-preset-card.is-added .mcp-preset-transport {
+  color: #1b7f4c;
+  font-family: inherit;
+  font-weight: 700;
+}
+
+.mcp-configured-panel {
+  display: grid;
+  gap: 8px;
+  margin-top: 8px;
+  padding: 10px;
+  border: 1px solid rgba(0, 0, 0, 0.06);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.28);
+}
+
+.mcp-config-card {
+  min-height: 108px;
+}
+
+.mcp-config-card.is-selected {
+  border-color: rgba(16, 16, 17, 0.3);
+  background: rgba(255, 255, 255, 0.9);
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.08);
+}
+
+.mcp-config-state,
+.mcp-config-draft {
+  color: rgba(13, 13, 14, 0.46);
+  font-size: 0.7rem;
+  font-weight: 700;
+}
+
+.mcp-config-state.is-live {
+  color: #1b7f4c;
+}
+
+.mcp-config-draft {
+  color: #8a5b11;
+}
+
+.agent-mcp-feedback {
+  min-height: 34px;
+  padding: 9px 12px;
+  border: 1px solid rgba(13, 13, 14, 0.08);
+  border-radius: 14px;
+  color: rgba(13, 13, 14, 0.7);
+  font-size: 0.78rem;
+  font-weight: 650;
+  line-height: 1.35;
+}
+
+.agent-mcp-feedback.is-info {
+  border-color: rgba(13, 13, 14, 0.1);
+  background: rgba(255, 255, 255, 0.58);
+}
+
+.agent-mcp-feedback.is-success {
+  border-color: rgba(27, 127, 76, 0.18);
+  background: rgba(27, 127, 76, 0.1);
+  color: #1b7f4c;
+}
+
+.agent-mcp-feedback.is-error {
+  border-color: rgba(180, 59, 59, 0.2);
+  background: rgba(180, 59, 59, 0.1);
+  color: #a73535;
+}
+
 .mcp-preset-card-head {
   display: flex;
   align-items: center;

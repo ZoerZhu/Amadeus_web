@@ -117,7 +117,14 @@ def _build_routing_text(
     planner_steps: list[dict[str, Any]],
     skill_info: list[dict[str, Any]],
 ) -> str:
-    """Combine all text sources that rules are matched against."""
+    """Combine all text sources that rules are matched against.
+
+    Rule scoring scans the full text (prompt + planner steps + skill metadata)
+    so that, e.g., a coding-focused skill can contribute a positive signal.
+    Force-allow/force-deny keywords intentionally scan only the prompt + planner
+    steps (see ``_build_prompt_steps_text``) so that skill metadata cannot
+    trigger a force-allow bypass (P2 fix).
+    """
     parts: list[str] = [prompt]
     for step in planner_steps:
         if isinstance(step, dict):
@@ -135,6 +142,28 @@ def _build_routing_text(
                 parts.append(str(name))
             if desc:
                 parts.append(str(desc))
+    return "\n".join(parts)
+
+
+def _build_prompt_steps_text(
+    prompt: str,
+    planner_steps: list[dict[str, Any]],
+) -> str:
+    """Build text from user intent only (prompt + planner steps).
+
+    Force-allow/force-deny keywords scan this text, NOT skill metadata, so a
+    skill whose description happens to contain a force-allow keyword cannot
+    bypass routing for a read-only prompt.
+    """
+    parts: list[str] = [prompt]
+    for step in planner_steps:
+        if isinstance(step, dict):
+            goal = step.get("goal", "")
+            if goal:
+                parts.append(str(goal))
+            tools = step.get("tools", [])
+            if isinstance(tools, list):
+                parts.append(" ".join(str(t) for t in tools))
     return "\n".join(parts)
 
 
@@ -192,30 +221,37 @@ async def compute_opencode_routing_decision(
             reason="routing disabled, opencodeEnabled true → allow", method="rule",
         )
 
-    text = _build_routing_text(prompt, planner_steps, skill_info)
-    text_lower = text.lower()
+    # Build two text sources:
+    # - prompt_steps_text: user intent only (prompt + planner steps). Used for
+    #   force-allow/force-deny so skill metadata cannot bypass routing (P2 fix).
+    # - full_text: includes skill metadata. Used for rule scoring so that a
+    #   coding-focused skill can still contribute a positive signal.
+    prompt_steps_text = _build_prompt_steps_text(prompt, planner_steps)
+    prompt_steps_text_lower = prompt_steps_text.lower()
+    full_text = _build_routing_text(prompt, planner_steps, skill_info)
+    full_text_lower = full_text.lower()
 
-    # 3. Force deny (highest priority)
+    # 3. Force deny (highest priority) — user intent only
     for kw in config.force_deny_keywords:
-        if kw.lower() in text_lower:
+        if kw.lower() in prompt_steps_text_lower:
             return OpencodeRoutingDecision(
                 allowed=False, score=0, matched_rules=[],
                 reason=f"force deny keyword matched: {kw}", method="force_deny",
             )
 
-    # 4. Force allow
+    # 4. Force allow — user intent only
     for kw in config.force_allow_keywords:
-        if kw.lower() in text_lower:
+        if kw.lower() in prompt_steps_text_lower:
             return OpencodeRoutingDecision(
                 allowed=True, score=100, matched_rules=[],
                 reason=f"force allow keyword matched: {kw}", method="force_allow",
             )
 
-    # 5. Rule scoring
+    # 5. Rule scoring — full text (includes skill info)
     score = 30  # neutral base
     matched: list[str] = []
     for rule in config.rules:
-        if _rule_matches(rule, text, text_lower):
+        if _rule_matches(rule, full_text, full_text_lower):
             score += rule.weight
             matched.append(rule.name)
 

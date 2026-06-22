@@ -390,6 +390,80 @@ class TestFileWriterCodeProtection:
         for ext in [".py", ".ts", ".tsx", ".js", ".jsx", ".go", ".rs", ".java", ".vue", ".svelte"]:
             assert ext in CODE_FILE_EXTENSIONS
 
+    @pytest.mark.asyncio
+    async def test_code_write_blocked_rejects_package_json(self, tmp_path: Path):
+        """Build config files (package.json) must be rejected when OpenCode
+        is not allowed (P2 fix)."""
+        from backend.amadeus_app.complex_agent.file_writer import make_file_writer_tool
+
+        storage, task_id = await _make_storage_with_task()
+        try:
+            tool = make_file_writer_tool(
+                storage=storage, task_id=task_id, workspace=tmp_path,
+                artifact_root=tmp_path / "agent_artifacts",
+                code_write_allowed_fn=lambda: False,
+            )
+            result = await tool.handler({"path": "package.json", "content": "{}"})
+            assert result["ok"] is False
+            assert "OpenCode routing approval" in result["error"]
+        finally:
+            await storage.close()
+
+    @pytest.mark.asyncio
+    async def test_code_write_blocked_rejects_pyproject_toml(self, tmp_path: Path):
+        """Build config files (pyproject.toml) must be rejected when OpenCode
+        is not allowed (P2 fix)."""
+        from backend.amadeus_app.complex_agent.file_writer import make_file_writer_tool
+
+        storage, task_id = await _make_storage_with_task()
+        try:
+            tool = make_file_writer_tool(
+                storage=storage, task_id=task_id, workspace=tmp_path,
+                artifact_root=tmp_path / "agent_artifacts",
+                code_write_allowed_fn=lambda: False,
+            )
+            result = await tool.handler({"path": "pyproject.toml", "content": "[tool]"})
+            assert result["ok"] is False
+            assert "OpenCode routing approval" in result["error"]
+        finally:
+            await storage.close()
+
+    @pytest.mark.asyncio
+    async def test_code_write_blocked_rejects_tsconfig_json(self, tmp_path: Path):
+        """Build config files (tsconfig.json) must be rejected when OpenCode
+        is not allowed (P2 fix)."""
+        from backend.amadeus_app.complex_agent.file_writer import make_file_writer_tool
+
+        storage, task_id = await _make_storage_with_task()
+        try:
+            tool = make_file_writer_tool(
+                storage=storage, task_id=task_id, workspace=tmp_path,
+                artifact_root=tmp_path / "agent_artifacts",
+                code_write_allowed_fn=lambda: False,
+            )
+            result = await tool.handler({"path": "tsconfig.json", "content": "{}"})
+            assert result["ok"] is False
+        finally:
+            await storage.close()
+
+    @pytest.mark.asyncio
+    async def test_code_write_allowed_writes_package_json(self, tmp_path: Path):
+        """When OpenCode IS allowed, build config files can be written."""
+        from backend.amadeus_app.complex_agent.file_writer import make_file_writer_tool
+
+        storage, task_id = await _make_storage_with_task()
+        try:
+            tool = make_file_writer_tool(
+                storage=storage, task_id=task_id, workspace=tmp_path,
+                artifact_root=tmp_path / "agent_artifacts",
+                code_write_allowed_fn=lambda: True,
+            )
+            result = await tool.handler({"path": "package.json", "content": "{}"})
+            assert result["ok"] is True
+            assert (tmp_path / "package.json").read_text(encoding="utf-8") == "{}"
+        finally:
+            await storage.close()
+
 
 # ---------------------------------------------------------------------------
 # Integration: assemble_task_tools + apply_opencode_routing
@@ -545,6 +619,92 @@ class TestRoutingIntegration:
             agent_task_hub._tasks.pop(task_id, None)
             await storage.close()
 
+    @pytest.mark.asyncio
+    async def test_user_config_preserved_when_rules_empty(self):
+        """When the user provides no custom rules, the default rule set is used
+        as a baseline — but the user's thresholds, force keywords, and
+        llm_rejudge setting must be preserved (P1 fix). Previously the entire
+        config was replaced by defaults, silently discarding user settings."""
+        from backend.amadeus_app.complex_agent.agent import apply_opencode_routing
+        from backend.amadeus_app.complex_agent.task_hub import ManagedAgentTask, TaskBudget
+        from backend.amadeus_app.complex_agent.domain import OpencodeRoutingConfig
+
+        storage, task_id = await _make_storage_with_task()
+        try:
+            task = ManagedAgentTask(
+                task_id=task_id, user_id="u", title="t", prompt="修复 bug",
+                workspace_path=".", conversation_id=None, active_skill_ids=[],
+                budget=TaskBudget(),
+            )
+            # User config: empty rules, but custom threshold and keywords.
+            settings = AgentSettings()
+            settings.opencode_routing = OpencodeRoutingConfig(
+                enabled=True,
+                allow_threshold=95,        # very high — should deny a normal bug fix
+                ambiguous_threshold=90,
+                allow_llm_rejudge=False,   # user disabled LLM re-judge
+                force_allow_keywords=["my-force-allow"],
+                force_deny_keywords=["my-force-deny"],
+                rules=[],                  # empty → default rules used as baseline
+            )
+            decision = await apply_opencode_routing(
+                storage=storage, task=task, settings=settings,
+                prompt="修复 bug",
+                planner_steps=[],
+                skill_info=[],
+                model_settings={}, mode="fast",
+            )
+            # "修复 bug" matches the default fix_bug rule (weight 30).
+            # Base 30 + 30 = 60, which is < user's allow_threshold 95 and
+            # < ambiguous_threshold 90 → deny. If the user's threshold had been
+            # overwritten by the default (60), this would wrongly allow.
+            assert decision.allowed is False
+            assert decision.score == 60
+            # Confirm the default rules were used (fix_bug matched).
+            assert "修 Bug" in decision.matched_rules
+        finally:
+            await storage.close()
+
+    @pytest.mark.asyncio
+    async def test_user_force_keywords_preserved_when_rules_empty(self):
+        """User's force-allow keywords must work even when rules are empty
+        (P1 fix — previously the whole config was replaced, dropping custom
+        force keywords)."""
+        from backend.amadeus_app.complex_agent.agent import apply_opencode_routing
+        from backend.amadeus_app.complex_agent.task_hub import ManagedAgentTask, TaskBudget
+        from backend.amadeus_app.complex_agent.domain import OpencodeRoutingConfig
+
+        storage, task_id = await _make_storage_with_task()
+        try:
+            task = ManagedAgentTask(
+                task_id=task_id, user_id="u", title="t", prompt="查代码",
+                workspace_path=".", conversation_id=None, active_skill_ids=[],
+                budget=TaskBudget(),
+            )
+            settings = AgentSettings()
+            settings.opencode_routing = OpencodeRoutingConfig(
+                enabled=True,
+                allow_threshold=60,
+                ambiguous_threshold=40,
+                allow_llm_rejudge=False,
+                force_allow_keywords=["my-custom-force-allow"],
+                force_deny_keywords=[],
+                rules=[],
+            )
+            decision = await apply_opencode_routing(
+                storage=storage, task=task, settings=settings,
+                prompt="查代码 my-custom-force-allow",
+                planner_steps=[],
+                skill_info=[],
+                model_settings={}, mode="fast",
+            )
+            # The user's custom force-allow keyword must trigger force-allow.
+            # If defaults had replaced the config, this keyword would be gone.
+            assert decision.allowed is True
+            assert decision.method == "force_allow"
+        finally:
+            await storage.close()
+
 
 # ---------------------------------------------------------------------------
 # Skill allowlist bypass prevention & trustMode preservation
@@ -560,11 +720,12 @@ class TestSkillAllowlistBypass:
     routing must still gate it."""
 
     @pytest.mark.asyncio
-    async def test_skill_allowlist_cannot_bypass_routing_deny(self):
+    async def test_skill_metadata_does_not_trigger_force_allow(self):
         """A skill description containing the force-allow keyword 'opencode'
-        triggers force-allow. This documents the force-allow behavior: the
-        skill_info text is folded into the routing text, so a skill that
-        mentions 'opencode' will force-allow regardless of the prompt."""
+        must NOT trigger force-allow. Force-allow/force-deny keywords scan only
+        the user prompt + planner steps, not skill metadata, so a skill that
+        mentions 'opencode' cannot bypass routing for a read-only prompt
+        (P2 fix)."""
         from backend.amadeus_app.complex_agent.agent import apply_opencode_routing
         from backend.amadeus_app.complex_agent.task_hub import ManagedAgentTask, TaskBudget
 
@@ -584,8 +745,10 @@ class TestSkillAllowlistBypass:
                 skill_info=[{"name": "code-allow-skill", "description": "allows opencode"}],
                 model_settings={}, mode="fast",
             )
-            # "opencode" in skill description triggers force-allow.
-            assert decision.allowed is True
+            # "查代码" is a read-only signal (search_code rule, weight -20).
+            # The skill description "opencode" must NOT force-allow.
+            assert decision.allowed is False
+            assert decision.method != "force_allow"
         finally:
             await storage.close()
 

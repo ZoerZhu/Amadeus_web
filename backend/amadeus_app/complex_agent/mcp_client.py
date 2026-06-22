@@ -27,10 +27,12 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import subprocess
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable
 from uuid import uuid4
+from urllib.parse import urlparse
 
 import httpx
 
@@ -56,6 +58,50 @@ JSONRPC_INVALID_REQUEST = -32600
 JSONRPC_METHOD_NOT_FOUND = -32601
 JSONRPC_INVALID_PARAMS = -32602
 JSONRPC_INTERNAL_ERROR = -32603
+
+
+_ENV_PLACEHOLDER_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+
+
+def _expand_header_value(value: str) -> str:
+    """Expand ${ENV_NAME} placeholders in MCP header values."""
+    return _ENV_PLACEHOLDER_RE.sub(lambda match: os.environ.get(match.group(1), match.group(0)), value)
+
+
+def _mcp_http_headers(config: McpServerConfig) -> dict[str, str]:
+    headers = {
+        "Accept": "application/json, text/event-stream",
+        "Content-Type": "application/json",
+    }
+    headers.update({key: _expand_header_value(value) for key, value in (config.headers or {}).items()})
+    if config.auth_type == "bearer" and config.auth_token:
+        headers["Authorization"] = f"Bearer {config.auth_token}"
+    elif config.auth_type == "api_key" and config.auth_token:
+        headers["X-API-Key"] = config.auth_token
+        hostname = urlparse(config.url or "").hostname or ""
+        if hostname.endswith("context7.com"):
+            headers["CONTEXT7_API_KEY"] = config.auth_token
+    return headers
+
+
+def _is_firecrawl_mcp(config: McpServerConfig) -> bool:
+    hostname = urlparse(config.url or "").hostname or ""
+    return hostname == "mcp.firecrawl.dev"
+
+
+def _validate_discovered_capabilities(config: McpServerConfig, client: "McpClient") -> None:
+    if _is_firecrawl_mcp(config) and not client.tools:
+        raise McpClientError(
+            "Firecrawl MCP 未返回工具。请确认 URL 使用完整的 "
+            "https://mcp.firecrawl.dev/fc-你的APIKEY/v2/mcp，且 API key 有效。"
+        )
+
+
+def _has_mcp_capability(capabilities: dict[str, Any], name: str) -> bool:
+    if name not in capabilities:
+        return False
+    value = capabilities.get(name)
+    return value is not None and value is not False
 
 
 @dataclass
@@ -224,12 +270,12 @@ class McpClient:
         self.protocol_version = str(result.get("protocolVersion", PROTOCOL_VERSION))
         caps = result.get("capabilities", {}) or {}
         self.capabilities = McpServerCapabilities(
-            tools=bool(caps.get("tools")),
-            resources=bool(caps.get("resources")),
-            prompts=bool(caps.get("prompts")),
-            logging=bool(caps.get("logging")),
-            sampling=bool(caps.get("sampling")),
-            elicitation=bool(caps.get("elicitation")),
+            tools=_has_mcp_capability(caps, "tools"),
+            resources=_has_mcp_capability(caps, "resources"),
+            prompts=_has_mcp_capability(caps, "prompts"),
+            logging=_has_mcp_capability(caps, "logging"),
+            sampling=_has_mcp_capability(caps, "sampling"),
+            elicitation=_has_mcp_capability(caps, "elicitation"),
             raw=caps,
         )
         self.server_info = result.get("serverInfo", {}) or {}
@@ -580,12 +626,7 @@ class _HttpTransport(_Transport):
     async def start(cls, config: McpServerConfig) -> "_HttpTransport":
         if not config.url:
             raise McpClientError("http MCP server requires a url")
-        headers = {"Accept": "application/json, text/event-stream", "Content-Type": "application/json"}
-        headers.update(config.headers or {})
-        if config.auth_type == "bearer" and config.auth_token:
-            headers["Authorization"] = f"Bearer {config.auth_token}"
-        elif config.auth_type == "api_key" and config.auth_token:
-            headers["X-API-Key"] = config.auth_token
+        headers = _mcp_http_headers(config)
         client = httpx.AsyncClient(timeout=httpx.Timeout(float(config.timeout_seconds), connect=10.0), headers=headers)
         return cls(config, client, config.url)
 
@@ -595,8 +636,9 @@ class _HttpTransport(_Transport):
         # Notifications (no id) are fire-and-forget POSTs.
         # Requests (with id) may return either JSON or SSE.
         is_notification = "id" not in payload
+        headers = {"Mcp-Session-Id": self._session_id} if self._session_id else None
         try:
-            response = await self._client.post(self._endpoint, json=payload)
+            response = await self._client.post(self._endpoint, json=payload, headers=headers)
         except httpx.HTTPError as error:
             raise McpClientError(f"http MCP POST failed: {error}") from error
         # Track session id returned by the server (Mcp-Session-Id header)
@@ -684,7 +726,12 @@ class McpConnectionManager:
         client = McpClient(config)
         try:
             await client.connect()
+            _validate_discovered_capabilities(config, client)
         except Exception as error:
+            try:
+                await client.disconnect()
+            except Exception:  # noqa: BLE001
+                pass
             self.update_capability_cache_error(config.id, str(error) or error.__class__.__name__)
             raise
         self._clients[config.id] = client
@@ -731,6 +778,7 @@ class McpConnectionManager:
         client = McpClient(config)
         try:
             await client.connect()
+            _validate_discovered_capabilities(config, client)
             return {
                 "ok": True,
                 "protocolVersion": client.protocol_version,

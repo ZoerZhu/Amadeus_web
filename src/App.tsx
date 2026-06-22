@@ -4,7 +4,6 @@ import {
   Bell,
   Boxes,
   Camera,
-  ChevronLeft,
   ChevronRight,
   CircleStop,
   FolderOpen,
@@ -12,9 +11,11 @@ import {
   MessageCircle,
   Mic,
   Mic2,
+  Package,
   PanelRightClose,
   PanelRightOpen,
   Plus,
+  Plug,
   Send,
   SlidersHorizontal,
   RotateCcw,
@@ -59,14 +60,15 @@ import {
   type Live2DModelRecord,
   type Live2DModelTransform
 } from "./agents/live2dImportAgent";
+import { normalizeAgentSettings } from "./agentDefaults";
 import { BootLoader } from "./components/BootLoader";
 import { ChatMessageBubble } from "./components/ChatMessageBubble";
-import { ConfigGroup } from "./components/ConfigGroup";
 import { AgentSettingsPanel } from "./components/AgentSettingsPanel";
 import { AgentTaskPanel } from "./components/AgentTaskPanel";
 import { LeftDock } from "./components/LeftDock";
 import { Live2DStage, type Live2DStageHandle } from "./components/Live2DStage";
 import { Live2DModelHistory, Live2DQuickControls } from "./components/Live2DControls";
+import { SettingsPage, type SettingsPageSection, type SettingsSectionKey } from "./components/SettingsPage";
 import { TaskPanel } from "./components/TaskPanel";
 import { TopBar } from "./components/TopBar";
 import { UploadAttachmentTray, UploadPopover } from "./components/UploadControls";
@@ -107,9 +109,7 @@ import {
   LIVE2D_ACTIVE_STORAGE_KEY,
   LIVE2D_IMPORT_INPUT_ID,
   LIVE2D_LOCK_STORAGE_KEY,
-  LEFT_SIDEBAR_WIDTH,
   MIN_BOOT_DURATION_MS,
-  PANEL_GAP,
   PERSONA_ID,
   STORAGE_KEY,
   appendLimitedCodeTaskText,
@@ -133,6 +133,7 @@ import {
   normalizeDesktopAssistantSettings,
   normalizeLive2dEmotion,
   normalizeMessageContent,
+  normalizeMcpServersForStorage,
   normalizeSpeechInputSettings,
   sanitizeFilename,
   toApiMessages,
@@ -141,7 +142,6 @@ import {
   type AudioQueueItem,
   type CodeTaskMessage,
   type CodeTaskRecord,
-  type ConfigSection,
   type RightPanelTab
 } from "./app/appSupport";
 export default function App() {
@@ -168,6 +168,7 @@ export default function App() {
   const [uploadPanelOpen, setUploadPanelOpen] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [configOpen, setConfigOpen] = useState(false);
+  const [settingsSection, setSettingsSection] = useState<SettingsSectionKey>("profile");
   const [chatOpen, setChatOpen] = useState(false);
   const [chatWidth, setChatWidth] = useState(430);
   const [rightPanelTab, setRightPanelTab] = useState<RightPanelTab>("chat");
@@ -180,15 +181,6 @@ export default function App() {
   const [codeTaskStatus, setCodeTaskStatus] = useState(storedCodeTasks[0]?.status ?? "idle");
   const [codeTaskMessages, setCodeTaskMessages] = useState<CodeTaskMessage[]>(storedCodeTasks[0]?.messages ?? []);
   const [codeTaskQuestionBusyIds, setCodeTaskQuestionBusyIds] = useState<string[]>([]);
-  const [openSections, setOpenSections] = useState<Record<ConfigSection, boolean>>({
-    profile: false,
-    model: false,
-    vision: false,
-    speechInput: false,
-    voice: false,
-    live2d: false,
-    interface: false
-  });
   const [status, setStatus] = useState("idle");
   const [currentEmotion, setCurrentEmotion] = useState("neutral");
   const [live2dModels, setLive2dModels] = useState<Live2DModelRecord[]>([DEFAULT_LIVE2D_MODEL]);
@@ -209,29 +201,10 @@ export default function App() {
   const [voiceRecording, setVoiceRecording] = useState(false);
   const [voiceRecordingSeconds, setVoiceRecordingSeconds] = useState(0);
   const [voiceInputLevels, setVoiceInputLevels] = useState<number[]>(Array.from({ length: 18 }, () => 0.24));
-  const [agentSettings, setAgentSettings] = useState<AgentSettings>({
-    enabled: true,
-    trustMode: true,
-    defaultWorkspace: "",
-    maxRounds: 20,
-    maxToolCalls: 80,
-    maxRuntimeSeconds: 1800,
-    maxSamplingDepth: 3,
-    artifactRoot: "generated_docs/agent_artifacts",
-    rollbackEnabled: true,
-    browserEnabled: false,
-    opencodeEnabled: true,
-    opencodeRouting: {
-      enabled: true,
-      allowThreshold: 60,
-      ambiguousThreshold: 40,
-      allowLlmRejudge: true,
-      forceAllowKeywords: [],
-      forceDenyKeywords: [],
-      rules: []
-    }
-  });
-  const [mcpServers, setMcpServers] = useState<McpServerConfig[]>([]);
+  const [agentSettings, setAgentSettings] = useState<AgentSettings>(() => normalizeAgentSettings(stored.agent));
+  const [mcpServers, setMcpServers] = useState<McpServerConfig[]>(() =>
+    normalizeMcpServersForStorage(stored.mcpServers)
+  );
   const [skills, setSkills] = useState<SkillPackageInfo[]>([]);
   const [agentTaskId, setAgentTaskId] = useState<string | null>(null);
   const [complexTaskByMessage, setComplexTaskByMessage] = useState<
@@ -377,6 +350,7 @@ export default function App() {
     }
     return settings;
   }, [modelSettings.apiKey, speechInputSettingsForPersistence]);
+  const persistedMcpServers = useMemo(() => normalizeMcpServersForStorage(mcpServers), [mcpServers]);
 
   function resizeComposerTextarea(element: HTMLTextAreaElement | null) {
     if (!element) {
@@ -494,17 +468,17 @@ export default function App() {
           );
           setMode(remoteSettings.mode);
           if (remoteSettings.agent) {
-            setAgentSettings((prev) => ({ ...prev, ...remoteSettings.agent }));
+            setAgentSettings((prev) => normalizeAgentSettings({ ...prev, ...remoteSettings.agent }));
           }
           if (remoteSettings.mcpServers) {
-            setMcpServers(remoteSettings.mcpServers);
+            setMcpServers(normalizeMcpServersForStorage(remoteSettings.mcpServers));
           }
         }
         // Load MCP servers and skills (live state includes connection status)
         try {
           const [servers, skillList] = await Promise.all([fetchMcpServers(), fetchSkills()]);
           if (!cancelled) {
-            setMcpServers(servers);
+            setMcpServers(normalizeMcpServersForStorage(servers));
             setSkills(skillList);
           }
         } catch {
@@ -543,7 +517,7 @@ export default function App() {
         desktopAssistant: desktopAssistantSettings,
         mode,
         agent: agentSettings,
-        mcpServers
+        mcpServers: persistedMcpServers
       })
     );
 
@@ -562,12 +536,12 @@ export default function App() {
         desktopAssistant: desktopAssistantSettings,
         mode,
         agent: agentSettings,
-        mcpServers
+        mcpServers: persistedMcpServers
       }).catch((error) => {
         setStorageError(error instanceof Error ? error.message : "settings save failed");
       });
     }, 350);
-  }, [modelSettings, visionSettings, speechInputSettingsForPersistence, voiceSettings, desktopAssistantSettings, mode, agentSettings, mcpServers, storageOnline]);
+  }, [modelSettings, visionSettings, speechInputSettingsForPersistence, voiceSettings, desktopAssistantSettings, mode, agentSettings, persistedMcpServers, storageOnline]);
 
   useEffect(() => {
     const payload = codeTasks.slice(0, CODE_TASK_MAX_HISTORY);
@@ -903,12 +877,12 @@ export default function App() {
 
   useEffect(() => {
     const clampChatWidth = () => {
-      setChatWidth((width) => clamp(width, CHAT_MIN_WIDTH, getChatMaxWidth(menuOpen, configOpen)));
+      setChatWidth((width) => clamp(width, CHAT_MIN_WIDTH, getChatMaxWidth(menuOpen)));
     };
     clampChatWidth();
     window.addEventListener("resize", clampChatWidth);
     return () => window.removeEventListener("resize", clampChatWidth);
-  }, [menuOpen, configOpen]);
+  }, [menuOpen]);
 
   useEffect(() => {
     floatingMessageRef.current?.scrollTo({ top: floatingMessageRef.current.scrollHeight, behavior: "smooth" });
@@ -954,10 +928,6 @@ export default function App() {
   function openConfigPanel() {
     setMenuOpen(true);
     setConfigOpen(true);
-  }
-
-  function toggleSection(section: ConfigSection) {
-    setOpenSections((prev) => ({ ...prev, [section]: !prev[section] }));
   }
 
   function toggleLive2DTransformLock() {
@@ -3679,7 +3649,7 @@ export default function App() {
     document.documentElement.classList.add("is-chat-resizing");
 
     const move = (moveEvent: PointerEvent) => {
-      const maxWidth = getChatMaxWidth(menuOpen, configOpen);
+      const maxWidth = getChatMaxWidth(menuOpen);
       const nextWidth = window.innerWidth - moveEvent.clientX - EDGE_MARGIN;
       setChatWidth(clamp(nextWidth, CHAT_MIN_WIDTH, maxWidth));
     };
@@ -3699,10 +3669,444 @@ export default function App() {
     window.addEventListener("pointercancel", up);
   }
 
-  const settingsOffset = menuOpen ? EDGE_MARGIN + LEFT_SIDEBAR_WIDTH + PANEL_GAP : EDGE_MARGIN;
-  const chatMaxWidth = getChatMaxWidth(menuOpen, configOpen);
+  const chatMaxWidth = getChatMaxWidth(menuOpen);
   const clampedChatWidth = clamp(chatWidth, CHAT_MIN_WIDTH, chatMaxWidth);
   const currentConversation = conversations.find((conversation) => conversation.id === currentConversationId);
+  const settingsSections: SettingsPageSection[] = [
+    {
+      key: "profile",
+      label: "个人信息",
+      icon: <UserRound size={16} />,
+      content: (
+        <>
+          <label className="field">
+            <span>用户昵称</span>
+            <input value="用户" readOnly />
+          </label>
+          <label className="field">
+            <span>人格预设</span>
+            <input value="Amadeus 牧濑红莉栖" readOnly />
+          </label>
+        </>
+      )
+    },
+    {
+      key: "model",
+      label: "基础模型",
+      icon: <SlidersHorizontal size={16} />,
+      content: (
+        <>
+          <label className="field">
+            <span>Provider</span>
+            <select value={modelSettings.providerName} onChange={(event) => applyProvider(event.target.value)}>
+              {providers.map((provider) => (
+                <option key={provider.name} value={provider.name}>
+                  {provider.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="field">
+            <span>Base URL</span>
+            <input
+              value={modelSettings.baseUrl}
+              onChange={(event) => setModelSettings((prev) => ({ ...prev, baseUrl: event.target.value }))}
+            />
+          </label>
+          <label className="field">
+            <span>Model</span>
+            <input
+              value={modelSettings.model}
+              onChange={(event) => setModelSettings((prev) => ({ ...prev, model: event.target.value }))}
+            />
+          </label>
+          <label className="field">
+            <span>API Key</span>
+            <input
+              value={modelSettings.apiKey}
+              onChange={(event) => setModelSettings((prev) => ({ ...prev, apiKey: event.target.value }))}
+              type="password"
+              autoComplete="off"
+            />
+          </label>
+        </>
+      )
+    },
+    {
+      key: "vision",
+      label: "视觉",
+      icon: <Camera size={16} />,
+      content: (
+        <>
+          <label className="switch-row">
+            <span>视觉理解</span>
+            <input
+              checked={visionSettings.enabled}
+              onChange={(event) => setVisionSettings((prev) => ({ ...prev, enabled: event.target.checked }))}
+              type="checkbox"
+            />
+          </label>
+          <label className="switch-row">
+            <span>截图入口</span>
+            <input
+              checked={visionSettings.screenCaptureEnabled}
+              onChange={(event) =>
+                setVisionSettings((prev) => ({ ...prev, screenCaptureEnabled: event.target.checked }))
+              }
+              type="checkbox"
+            />
+          </label>
+          <label className="switch-row">
+            <span>远程视觉 API</span>
+            <input
+              checked={visionSettings.useRemote}
+              onChange={(event) => setVisionSettings((prev) => ({ ...prev, useRemote: event.target.checked }))}
+              type="checkbox"
+            />
+          </label>
+          <label className="field">
+            <span>Provider</span>
+            <select
+              value={visionSettings.providerName}
+              onChange={(event) => {
+                const provider = providers.find((item) => item.name === event.target.value);
+                setVisionSettings((prev) => ({
+                  ...prev,
+                  providerName: event.target.value,
+                  baseUrl: event.target.value ? provider?.baseUrl ?? prev.baseUrl : "",
+                  useRemote: event.target.value ? event.target.value !== "演示模型" : prev.useRemote
+                }));
+              }}
+            >
+              <option value="">继承基础模型</option>
+              {providers.map((provider) => (
+                <option key={provider.name} value={provider.name}>
+                  {provider.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="field">
+            <span>Base URL</span>
+            <input
+              value={visionSettings.baseUrl}
+              onChange={(event) => setVisionSettings((prev) => ({ ...prev, baseUrl: event.target.value }))}
+              placeholder={modelSettings.baseUrl || DEFAULT_MODEL_SETTINGS.baseUrl}
+            />
+          </label>
+          <label className="field">
+            <span>Vision Model</span>
+            <input
+              value={visionSettings.model}
+              onChange={(event) => setVisionSettings((prev) => ({ ...prev, model: event.target.value }))}
+              placeholder={DEFAULT_VISION_SETTINGS.model}
+            />
+          </label>
+          <label className="field">
+            <span>API Key</span>
+            <input
+              value={visionSettings.apiKey}
+              onChange={(event) => setVisionSettings((prev) => ({ ...prev, apiKey: event.target.value }))}
+              placeholder={modelSettings.apiKey ? "继承基础模型 Key" : ""}
+              type="password"
+              autoComplete="off"
+            />
+          </label>
+        </>
+      )
+    },
+    {
+      key: "speechInput",
+      label: "语音输入",
+      icon: <Mic size={16} />,
+      content: (
+        <>
+          <label className="switch-row">
+            <span>语音输入</span>
+            <input
+              checked={speechInputSettings.enabled}
+              onChange={(event) => setSpeechInputSettings((prev) => ({ ...prev, enabled: event.target.checked }))}
+              type="checkbox"
+            />
+          </label>
+          <label className="switch-row">
+            <span>远程转写 API</span>
+            <input
+              checked={speechInputSettings.useRemote}
+              onChange={(event) => setSpeechInputSettings((prev) => ({ ...prev, useRemote: event.target.checked }))}
+              type="checkbox"
+            />
+          </label>
+          <label className="field">
+            <span>Provider</span>
+            <select
+              value={speechInputSettings.providerName}
+              onChange={(event) => {
+                const provider = providers.find((item) => item.name === event.target.value);
+                if (event.target.value === DEFAULT_SPEECH_INPUT_SETTINGS.providerName) {
+                  setSpeechInputSettings((prev) => ({
+                    ...prev,
+                    providerName: DEFAULT_SPEECH_INPUT_SETTINGS.providerName,
+                    baseUrl: DEFAULT_SPEECH_INPUT_SETTINGS.baseUrl,
+                    model: DEFAULT_SPEECH_INPUT_SETTINGS.model,
+                    language: DEFAULT_SPEECH_INPUT_SETTINGS.language,
+                    useRemote: true
+                  }));
+                  return;
+                }
+                setSpeechInputSettings((prev) => ({
+                  ...prev,
+                  providerName: event.target.value,
+                  baseUrl: event.target.value ? provider?.baseUrl ?? prev.baseUrl : DEFAULT_SPEECH_INPUT_SETTINGS.baseUrl,
+                  useRemote: event.target.value ? event.target.value !== "演示模型" : prev.useRemote
+                }));
+              }}
+            >
+              <option value={DEFAULT_SPEECH_INPUT_SETTINGS.providerName}>小米 MiMo ASR</option>
+              {providers.map((provider) => (
+                <option key={provider.name} value={provider.name}>
+                  {provider.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="field">
+            <span>Base URL</span>
+            <input
+              value={speechInputSettings.baseUrl}
+              onChange={(event) => setSpeechInputSettings((prev) => ({ ...prev, baseUrl: event.target.value }))}
+              placeholder={DEFAULT_SPEECH_INPUT_SETTINGS.baseUrl}
+            />
+          </label>
+          <label className="field">
+            <span>ASR Model</span>
+            <input
+              value={speechInputSettings.model}
+              onChange={(event) => setSpeechInputSettings((prev) => ({ ...prev, model: event.target.value }))}
+              placeholder={DEFAULT_SPEECH_INPUT_SETTINGS.model}
+            />
+          </label>
+          <div className="inline-fields">
+            <label className="field">
+              <span>Language</span>
+              <input
+                value={speechInputSettings.language}
+                onChange={(event) => setSpeechInputSettings((prev) => ({ ...prev, language: event.target.value }))}
+                placeholder="auto / zh / en"
+              />
+            </label>
+            <label className="field">
+              <span>API Key</span>
+              <input
+                value={
+                  speechInputSettings.providerName === DEFAULT_SPEECH_INPUT_SETTINGS.providerName &&
+                  modelSettings.apiKey
+                    ? ""
+                    : speechInputSettings.apiKey
+                }
+                onChange={(event) => setSpeechInputSettings((prev) => ({ ...prev, apiKey: event.target.value }))}
+                placeholder={modelSettings.apiKey ? "默认复用基础模型 Key" : "填写 MiMo API Key"}
+                type="password"
+                autoComplete="off"
+              />
+            </label>
+          </div>
+        </>
+      )
+    },
+    {
+      key: "voice",
+      label: "语音",
+      icon: <Mic2 size={16} />,
+      content: (
+        <>
+          <label className="field">
+            <span>语音模型</span>
+            <select
+              value={voiceSettings.ttsBackend}
+              onChange={(event) =>
+                setVoiceSettings((prev) => ({
+                  ...prev,
+                  ttsBackend: event.target.value === "cloud" ? "cloud" : "local"
+                }))
+              }
+            >
+              <option value="local">本地 CosyVoice2</option>
+              <option value="cloud">云端 SiliconFlow</option>
+            </select>
+          </label>
+          <label className="field">
+            <span>Cloud Key</span>
+            <input
+              value={voiceSettings.siliconFlowApiKey}
+              onChange={(event) => setVoiceSettings((prev) => ({ ...prev, siliconFlowApiKey: event.target.value }))}
+              type="password"
+              autoComplete="off"
+            />
+          </label>
+          <label className="field">
+            <span>Cloud Voice URI</span>
+            <input
+              value={voiceSettings.clonedVoiceUri}
+              onChange={(event) => setVoiceSettings((prev) => ({ ...prev, clonedVoiceUri: event.target.value }))}
+              placeholder="speech:..."
+            />
+          </label>
+          <div className="inline-fields">
+            <label className="field">
+              <span>Speed</span>
+              <input
+                value={voiceSettings.speed}
+                min="0.75"
+                max="1.25"
+                step="0.05"
+                type="number"
+                onChange={(event) => setVoiceSettings((prev) => ({ ...prev, speed: Number(event.target.value) }))}
+              />
+            </label>
+            <label className="field">
+              <span>Gain</span>
+              <input
+                value={voiceSettings.gain}
+                min="-6"
+                max="6"
+                step="0.5"
+                type="number"
+                onChange={(event) => setVoiceSettings((prev) => ({ ...prev, gain: Number(event.target.value) }))}
+              />
+            </label>
+          </div>
+          <div className="config-actions">
+            <button className="text-icon-button" onClick={testVoice} disabled={voiceBusy} type="button">
+              <Mic2 size={16} />
+              试听
+            </button>
+            <button className="text-icon-button" onClick={cloneKurisuVoice} disabled={voiceBusy} type="button">
+              <KeyRound size={16} />
+              云端克隆
+            </button>
+          </div>
+        </>
+      )
+    },
+    {
+      key: "live2d",
+      label: "Live2D",
+      icon: <FolderOpen size={16} />,
+      content: (
+        <>
+          <div className="live2d-current">
+            <strong title={activeLive2DModel.name}>{activeLive2DModel.name}</strong>
+            <span>
+              {live2DRuntimeLabel(activeLive2DModel)} · {activeLive2DModel.expressions.length} 表情 · {activeLive2DModel.motions.length} 动作
+            </span>
+          </div>
+          <input
+            className="live2d-folder-input"
+            id={LIVE2D_IMPORT_INPUT_ID}
+            ref={attachLive2DFolderInput}
+            type="file"
+            multiple
+            disabled={live2dImportBusy}
+            onChange={handleLive2DFolderSelection}
+          />
+          <div className="config-actions live2d-import-actions">
+            <label
+              className={`text-icon-button live2d-import-label ${live2dImportBusy ? "is-disabled" : ""}`}
+              htmlFor={LIVE2D_IMPORT_INPUT_ID}
+            >
+              <FolderOpen size={16} />
+              导入模型
+            </label>
+            <button
+              className="text-icon-button"
+              disabled={live2dImportBusy || activeLive2DModel.source === "default"}
+              onClick={() => void switchLive2DModel(DEFAULT_LIVE2D_MODEL)}
+              type="button"
+            >
+              <RotateCcw size={16} />
+              默认
+            </button>
+          </div>
+          {live2dImportStatus && <div className="live2d-import-status">{live2dImportStatus}</div>}
+          {renderLive2DHistory()}
+        </>
+      )
+    },
+    {
+      key: "interface",
+      label: "界面",
+      icon: <Sparkles size={16} />,
+      content: (
+        <>
+          <label className="switch-row">
+            <span>自动语音</span>
+            <input
+              checked={voiceSettings.autoPlay}
+              onChange={(event) => setVoiceSettings((prev) => ({ ...prev, autoPlay: event.target.checked }))}
+              type="checkbox"
+            />
+          </label>
+          <label className="switch-row">
+            <span>字幕同步</span>
+            <input
+              checked={voiceSettings.syncTextOutput}
+              onChange={(event) => setVoiceSettings((prev) => ({ ...prev, syncTextOutput: event.target.checked }))}
+              type="checkbox"
+            />
+          </label>
+        </>
+      )
+    },
+    {
+      key: "agent",
+      label: "Agent",
+      icon: <Boxes size={16} />,
+      content: (
+        <AgentSettingsPanel
+          agent={agentSettings}
+          onAgentChange={setAgentSettings}
+          mcpServers={mcpServers}
+          onMcpServersChange={setMcpServers}
+          skills={skills}
+          onSkillsChange={setSkills}
+          section="agent"
+        />
+      )
+    },
+    {
+      key: "mcp",
+      label: "MCP 服务器",
+      icon: <Plug size={16} />,
+      content: (
+        <AgentSettingsPanel
+          agent={agentSettings}
+          onAgentChange={setAgentSettings}
+          mcpServers={mcpServers}
+          onMcpServersChange={setMcpServers}
+          skills={skills}
+          onSkillsChange={setSkills}
+          section="mcp"
+        />
+      )
+    },
+    {
+      key: "skills",
+      label: "技能包",
+      icon: <Package size={16} />,
+      content: (
+        <AgentSettingsPanel
+          agent={agentSettings}
+          onAgentChange={setAgentSettings}
+          mcpServers={mcpServers}
+          onMcpServersChange={setMcpServers}
+          skills={skills}
+          onSkillsChange={setSkills}
+          section="skills"
+        />
+      )
+    }
+  ];
 
   function renderMessageBubble(message: ChatMessage, surface: "floating" | "panel") {
     const complexTask = complexTaskByMessage[message.id];
@@ -3930,8 +4334,7 @@ export default function App() {
       ].join(" ")}
       style={
         {
-          "--chat-panel-width": `${clampedChatWidth}px`,
-          "--settings-left": `${settingsOffset}px`
+          "--chat-panel-width": `${clampedChatWidth}px`
         } as CSSProperties
       }
     >
@@ -4008,410 +4411,13 @@ export default function App() {
         onDeleteCodeTask={deleteCodeTaskRecord}
       />
 
-      <aside
-        className={`config-dock glass-panel ${configOpen ? "is-open" : ""}`}
-        style={{ left: "var(--settings-left)" }}
-        aria-hidden={!configOpen}
-      >
-        <div className="dock-head">
-          <div>
-            <span className="eyebrow">Control</span>
-            <h2>设置</h2>
-          </div>
-          <button className="icon-button" onClick={() => setConfigOpen(false)} type="button" aria-label="收起设置">
-            <ChevronLeft size={18} />
-          </button>
-        </div>
-
-        <div className="config-list">
-          <ConfigGroup
-            title="个人信息"
-            icon={<UserRound size={16} />}
-            open={openSections.profile}
-            onToggle={() => toggleSection("profile")}
-          >
-            <label className="field">
-              <span>用户昵称</span>
-              <input value="用户" readOnly />
-            </label>
-            <label className="field">
-              <span>人格预设</span>
-              <input value="Amadeus 牧濑红莉栖" readOnly />
-            </label>
-          </ConfigGroup>
-
-          <ConfigGroup
-            title="基础模型"
-            icon={<SlidersHorizontal size={16} />}
-            open={openSections.model}
-            onToggle={() => toggleSection("model")}
-          >
-            <label className="field">
-              <span>Provider</span>
-              <select value={modelSettings.providerName} onChange={(event) => applyProvider(event.target.value)}>
-                {providers.map((provider) => (
-                  <option key={provider.name} value={provider.name}>
-                    {provider.name}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label className="field">
-              <span>Base URL</span>
-              <input
-                value={modelSettings.baseUrl}
-                onChange={(event) => setModelSettings((prev) => ({ ...prev, baseUrl: event.target.value }))}
-              />
-            </label>
-            <label className="field">
-              <span>Model</span>
-              <input
-                value={modelSettings.model}
-                onChange={(event) => setModelSettings((prev) => ({ ...prev, model: event.target.value }))}
-              />
-            </label>
-            <label className="field">
-              <span>API Key</span>
-              <input
-                value={modelSettings.apiKey}
-                onChange={(event) => setModelSettings((prev) => ({ ...prev, apiKey: event.target.value }))}
-                type="password"
-                autoComplete="off"
-              />
-            </label>
-          </ConfigGroup>
-
-          <ConfigGroup
-            title="视觉"
-            icon={<Camera size={16} />}
-            open={openSections.vision}
-            onToggle={() => toggleSection("vision")}
-          >
-            <label className="switch-row">
-              <span>视觉理解</span>
-              <input
-                checked={visionSettings.enabled}
-                onChange={(event) => setVisionSettings((prev) => ({ ...prev, enabled: event.target.checked }))}
-                type="checkbox"
-              />
-            </label>
-            <label className="switch-row">
-              <span>截图入口</span>
-              <input
-                checked={visionSettings.screenCaptureEnabled}
-                onChange={(event) =>
-                  setVisionSettings((prev) => ({ ...prev, screenCaptureEnabled: event.target.checked }))
-                }
-                type="checkbox"
-              />
-            </label>
-            <label className="switch-row">
-              <span>远程视觉 API</span>
-              <input
-                checked={visionSettings.useRemote}
-                onChange={(event) => setVisionSettings((prev) => ({ ...prev, useRemote: event.target.checked }))}
-                type="checkbox"
-              />
-            </label>
-            <label className="field">
-              <span>Provider</span>
-              <select
-                value={visionSettings.providerName}
-                onChange={(event) => {
-                  const provider = providers.find((item) => item.name === event.target.value);
-                  setVisionSettings((prev) => ({
-                    ...prev,
-                    providerName: event.target.value,
-                    baseUrl: event.target.value ? provider?.baseUrl ?? prev.baseUrl : "",
-                    useRemote: event.target.value ? event.target.value !== "演示模型" : prev.useRemote
-                  }));
-                }}
-              >
-                <option value="">继承基础模型</option>
-                {providers.map((provider) => (
-                  <option key={provider.name} value={provider.name}>
-                    {provider.name}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label className="field">
-              <span>Base URL</span>
-              <input
-                value={visionSettings.baseUrl}
-                onChange={(event) => setVisionSettings((prev) => ({ ...prev, baseUrl: event.target.value }))}
-                placeholder={modelSettings.baseUrl || DEFAULT_MODEL_SETTINGS.baseUrl}
-              />
-            </label>
-            <label className="field">
-              <span>Vision Model</span>
-              <input
-                value={visionSettings.model}
-                onChange={(event) => setVisionSettings((prev) => ({ ...prev, model: event.target.value }))}
-                placeholder={DEFAULT_VISION_SETTINGS.model}
-              />
-            </label>
-            <label className="field">
-              <span>API Key</span>
-              <input
-                value={visionSettings.apiKey}
-                onChange={(event) => setVisionSettings((prev) => ({ ...prev, apiKey: event.target.value }))}
-                placeholder={modelSettings.apiKey ? "继承基础模型 Key" : ""}
-                type="password"
-                autoComplete="off"
-              />
-            </label>
-          </ConfigGroup>
-
-          <ConfigGroup
-            title="语音输入"
-            icon={<Mic size={16} />}
-            open={openSections.speechInput}
-            onToggle={() => toggleSection("speechInput")}
-          >
-            <label className="switch-row">
-              <span>语音输入</span>
-              <input
-                checked={speechInputSettings.enabled}
-                onChange={(event) => setSpeechInputSettings((prev) => ({ ...prev, enabled: event.target.checked }))}
-                type="checkbox"
-              />
-            </label>
-            <label className="switch-row">
-              <span>远程转写 API</span>
-              <input
-                checked={speechInputSettings.useRemote}
-                onChange={(event) => setSpeechInputSettings((prev) => ({ ...prev, useRemote: event.target.checked }))}
-                type="checkbox"
-              />
-            </label>
-            <label className="field">
-              <span>Provider</span>
-              <select
-                value={speechInputSettings.providerName}
-                onChange={(event) => {
-                  const provider = providers.find((item) => item.name === event.target.value);
-                  if (event.target.value === DEFAULT_SPEECH_INPUT_SETTINGS.providerName) {
-                    setSpeechInputSettings((prev) => ({
-                      ...prev,
-                      providerName: DEFAULT_SPEECH_INPUT_SETTINGS.providerName,
-                      baseUrl: DEFAULT_SPEECH_INPUT_SETTINGS.baseUrl,
-                      model: DEFAULT_SPEECH_INPUT_SETTINGS.model,
-                      language: DEFAULT_SPEECH_INPUT_SETTINGS.language,
-                      useRemote: true
-                    }));
-                    return;
-                  }
-                  setSpeechInputSettings((prev) => ({
-                    ...prev,
-                    providerName: event.target.value,
-                    baseUrl: event.target.value ? provider?.baseUrl ?? prev.baseUrl : DEFAULT_SPEECH_INPUT_SETTINGS.baseUrl,
-                    useRemote: event.target.value ? event.target.value !== "演示模型" : prev.useRemote
-                  }));
-                }}
-              >
-                <option value={DEFAULT_SPEECH_INPUT_SETTINGS.providerName}>小米 MiMo ASR</option>
-                {providers.map((provider) => (
-                  <option key={provider.name} value={provider.name}>
-                    {provider.name}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label className="field">
-              <span>Base URL</span>
-              <input
-                value={speechInputSettings.baseUrl}
-                onChange={(event) => setSpeechInputSettings((prev) => ({ ...prev, baseUrl: event.target.value }))}
-                placeholder={DEFAULT_SPEECH_INPUT_SETTINGS.baseUrl}
-              />
-            </label>
-            <label className="field">
-              <span>ASR Model</span>
-              <input
-                value={speechInputSettings.model}
-                onChange={(event) => setSpeechInputSettings((prev) => ({ ...prev, model: event.target.value }))}
-                placeholder={DEFAULT_SPEECH_INPUT_SETTINGS.model}
-              />
-            </label>
-            <div className="inline-fields">
-              <label className="field">
-                <span>Language</span>
-                <input
-                  value={speechInputSettings.language}
-                  onChange={(event) => setSpeechInputSettings((prev) => ({ ...prev, language: event.target.value }))}
-                  placeholder="auto / zh / en"
-                />
-              </label>
-              <label className="field">
-                <span>API Key</span>
-                <input
-                  value={
-                    speechInputSettings.providerName === DEFAULT_SPEECH_INPUT_SETTINGS.providerName &&
-                    modelSettings.apiKey
-                      ? ""
-                      : speechInputSettings.apiKey
-                  }
-                  onChange={(event) => setSpeechInputSettings((prev) => ({ ...prev, apiKey: event.target.value }))}
-                  placeholder={modelSettings.apiKey ? "默认复用基础模型 Key" : "填写 MiMo API Key"}
-                  type="password"
-                  autoComplete="off"
-                />
-              </label>
-            </div>
-          </ConfigGroup>
-
-          <ConfigGroup
-            title="语音"
-            icon={<Mic2 size={16} />}
-            open={openSections.voice}
-            onToggle={() => toggleSection("voice")}
-          >
-            <label className="field">
-              <span>语音模型</span>
-              <select
-                value={voiceSettings.ttsBackend}
-                onChange={(event) =>
-                  setVoiceSettings((prev) => ({
-                    ...prev,
-                    ttsBackend: event.target.value === "cloud" ? "cloud" : "local"
-                  }))
-                }
-              >
-                <option value="local">本地 CosyVoice2</option>
-                <option value="cloud">云端 SiliconFlow</option>
-              </select>
-            </label>
-            <label className="field">
-              <span>Cloud Key</span>
-              <input
-                value={voiceSettings.siliconFlowApiKey}
-                onChange={(event) => setVoiceSettings((prev) => ({ ...prev, siliconFlowApiKey: event.target.value }))}
-                type="password"
-                autoComplete="off"
-              />
-            </label>
-            <label className="field">
-              <span>Cloud Voice URI</span>
-              <input
-                value={voiceSettings.clonedVoiceUri}
-                onChange={(event) => setVoiceSettings((prev) => ({ ...prev, clonedVoiceUri: event.target.value }))}
-                placeholder="speech:..."
-              />
-            </label>
-            <div className="inline-fields">
-              <label className="field">
-                <span>Speed</span>
-                <input
-                  value={voiceSettings.speed}
-                  min="0.75"
-                  max="1.25"
-                  step="0.05"
-                  type="number"
-                  onChange={(event) => setVoiceSettings((prev) => ({ ...prev, speed: Number(event.target.value) }))}
-                />
-              </label>
-              <label className="field">
-                <span>Gain</span>
-                <input
-                  value={voiceSettings.gain}
-                  min="-6"
-                  max="6"
-                  step="0.5"
-                  type="number"
-                  onChange={(event) => setVoiceSettings((prev) => ({ ...prev, gain: Number(event.target.value) }))}
-                />
-              </label>
-            </div>
-            <div className="config-actions">
-              <button className="text-icon-button" onClick={testVoice} disabled={voiceBusy} type="button">
-                <Mic2 size={16} />
-                试听
-              </button>
-              <button className="text-icon-button" onClick={cloneKurisuVoice} disabled={voiceBusy} type="button">
-                <KeyRound size={16} />
-                云端克隆
-              </button>
-            </div>
-          </ConfigGroup>
-
-          <ConfigGroup
-            title="Live2D"
-            icon={<FolderOpen size={16} />}
-            open={openSections.live2d}
-            onToggle={() => toggleSection("live2d")}
-          >
-            <div className="live2d-current">
-              <strong title={activeLive2DModel.name}>{activeLive2DModel.name}</strong>
-              <span>
-                {live2DRuntimeLabel(activeLive2DModel)} · {activeLive2DModel.expressions.length} 表情 · {activeLive2DModel.motions.length} 动作
-              </span>
-            </div>
-            <input
-              className="live2d-folder-input"
-              id={LIVE2D_IMPORT_INPUT_ID}
-              ref={attachLive2DFolderInput}
-              type="file"
-              multiple
-              disabled={live2dImportBusy}
-              onChange={handleLive2DFolderSelection}
-            />
-            <div className="config-actions live2d-import-actions">
-              <label
-                className={`text-icon-button live2d-import-label ${live2dImportBusy ? "is-disabled" : ""}`}
-                htmlFor={LIVE2D_IMPORT_INPUT_ID}
-              >
-                <FolderOpen size={16} />
-                导入模型
-              </label>
-              <button
-                className="text-icon-button"
-                disabled={live2dImportBusy || activeLive2DModel.source === "default"}
-                onClick={() => void switchLive2DModel(DEFAULT_LIVE2D_MODEL)}
-                type="button"
-              >
-                <RotateCcw size={16} />
-                默认
-              </button>
-            </div>
-            {live2dImportStatus && <div className="live2d-import-status">{live2dImportStatus}</div>}
-            {renderLive2DHistory()}
-          </ConfigGroup>
-
-          <ConfigGroup
-            title="界面"
-            icon={<Sparkles size={16} />}
-            open={openSections.interface}
-            onToggle={() => toggleSection("interface")}
-          >
-            <label className="switch-row">
-              <span>自动语音</span>
-              <input
-                checked={voiceSettings.autoPlay}
-                onChange={(event) => setVoiceSettings((prev) => ({ ...prev, autoPlay: event.target.checked }))}
-                type="checkbox"
-              />
-            </label>
-            <label className="switch-row">
-              <span>字幕同步</span>
-              <input
-                checked={voiceSettings.syncTextOutput}
-                onChange={(event) => setVoiceSettings((prev) => ({ ...prev, syncTextOutput: event.target.checked }))}
-                type="checkbox"
-              />
-            </label>
-          </ConfigGroup>
-
-          <AgentSettingsPanel
-            agent={agentSettings}
-            onAgentChange={setAgentSettings}
-            mcpServers={mcpServers}
-            onMcpServersChange={setMcpServers}
-            skills={skills}
-            onSkillsChange={setSkills}
-          />
-        </div>
-      </aside>
+      <SettingsPage
+        open={configOpen}
+        activeSection={settingsSection}
+        sections={settingsSections}
+        onSectionChange={setSettingsSection}
+        onClose={() => setConfigOpen(false)}
+      />
 
       <section className="floating-conversation" aria-hidden={chatOpen}>
         <div className="floating-messages" ref={floatingMessageRef}>

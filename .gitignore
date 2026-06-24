@@ -46,6 +46,8 @@ agent_state/*
 agent_uploads/*
 !agent_uploads/.gitkeep
 uploads/
+!backend/amadeus_app/uploads/
+!backend/amadeus_app/uploads/**
 output/
 logs/
 user_voice/

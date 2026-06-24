@@ -810,38 +810,34 @@ def latest_user_message_text(messages: list[Any]) -> str:
     return ""
 
 
-def build_forced_chat_tool_calls(user_request: str) -> list[ModelToolCall]:
+def build_forced_chat_tool_calls(
+    user_request: str,
+    *,
+    attachments: list[ChatAttachment] | None = None,
+) -> list[ModelToolCall]:
     """Create deterministic tool calls when the user explicitly asks for tools.
 
     Normal chat still lets the model decide tool use with tool_choice=auto. This
-    path only handles clear user directives such as "使用 websearch" or requests
-    to generate/save a markdown/docx report.
+    path handles clear user directives such as "使用 websearch", "调用
+    file_reader", or requests to generate/save a markdown/docx report.
     """
     text = user_request.strip()
     if not text:
         return []
 
-    calls: list[ModelToolCall] = []
+    requested_tools = explicit_forced_tool_names(text)
     if should_force_web_search(text):
-        calls.append(
-            make_forced_tool_call(
-                "web_search",
-                {
-                    "query": infer_forced_search_query(text),
-                    "freshness": infer_forced_freshness(text),
-                    "maxResults": 10,
-                    "fetchContent": True,
-                },
-                len(calls),
-            )
-        )
+        requested_tools.add("web_search")
     if should_force_doc_writer(text):
-        doc_args = build_doc_writer_fallback_arguments(raw_arguments="", user_request=text)
-        doc_args.setdefault("writingMode", "advanced")
-        doc_args.setdefault("llmWrite", True)
-        if should_force_web_search(text):
-            doc_args["useWebSearch"] = True
-        calls.append(make_forced_tool_call("doc_writer", doc_args, len(calls)))
+        requested_tools.add("doc_writer")
+
+    calls: list[ModelToolCall] = []
+    for tool_name in ordered_forced_tool_names(requested_tools):
+        tool = tool_registry.get(tool_name)
+        if tool is None or tool.handler is None or tool.permission != "safe":
+            continue
+        args = build_forced_tool_arguments(tool_name, text, attachments=attachments or [])
+        calls.append(make_forced_tool_call(tool_name, args, len(calls)))
     return calls
 
 
@@ -852,6 +848,159 @@ def make_forced_tool_call(name: str, arguments: dict[str, Any], index: int) -> M
         arguments=json.dumps(arguments, ensure_ascii=False),
         index=index,
     )
+
+
+FORCED_TOOL_ORDER = (
+    "get_current_time",
+    "calculate",
+    "describe_capabilities",
+    "file_reader",
+    "image_understand",
+    "recall_memory",
+    "browse_memory_tree",
+    "save_memory",
+    "todo_task",
+    "web_search",
+    "echo",
+    "doc_writer",
+)
+
+
+FORCED_TOOL_ALIASES: dict[str, tuple[str, ...]] = {
+    "get_current_time": ("get_current_time", "current_time", "current time", "时间工具", "当前时间工具", "time tool"),
+    "calculate": ("calculate", "calculator", "math", "计算工具", "计算器", "数学工具"),
+    "describe_capabilities": (
+        "describe_capabilities",
+        "capabilities",
+        "工具列表",
+        "能力列表",
+        "能力查询",
+    ),
+    "file_reader": ("file_reader", "file reader", "read_file", "文件读取", "读文件工具", "文件工具"),
+    "image_understand": (
+        "image_understand",
+        "image understand",
+        "vision",
+        "vision tool",
+        "视觉理解",
+        "图片理解",
+        "图像理解",
+        "截图理解",
+    ),
+    "todo_task": ("todo_task", "todo task", "todo", "待办工具", "任务工具", "任务管理工具"),
+    "recall_memory": ("recall_memory", "recall memory", "memory recall", "记忆检索", "回忆工具", "检索记忆"),
+    "save_memory": ("save_memory", "save memory", "memory save", "保存记忆", "记住工具"),
+    "browse_memory_tree": ("browse_memory_tree", "memory tree", "记忆树", "浏览记忆", "浏览记忆树"),
+    "web_search": ("websearch", "web_search", "web search", "web-search", "网页搜索", "网络搜索", "web 搜索"),
+    "doc_writer": ("doc_writer", "docwriter", "doc writer", "文档写作", "写作工具", "报告工具"),
+    "echo": ("echo", "回显工具"),
+}
+
+
+def ordered_forced_tool_names(names: set[str]) -> list[str]:
+    ordered = [name for name in FORCED_TOOL_ORDER if name in names]
+    ordered.extend(sorted(name for name in names if name not in set(FORCED_TOOL_ORDER)))
+    return ordered
+
+
+def explicit_forced_tool_names(text: str) -> set[str]:
+    lowered = normalize_tool_directive_text(text)
+    names: set[str] = set()
+    for tool in tool_registry.list_tools():
+        aliases = forced_tool_aliases(tool.name)
+        if has_negative_tool_directive(lowered, aliases=aliases):
+            continue
+        if has_explicit_tool_directive(lowered, aliases=aliases):
+            names.add(tool.name)
+
+    # "使用记忆工具..." is ambiguous; route it by the requested memory action.
+    if has_explicit_tool_directive(lowered, aliases=("memory", "记忆工具", "长期记忆")):
+        if any(token in lowered for token in ("保存", "记住", "记录到记忆", "save")):
+            names.add("save_memory")
+        elif any(token in lowered for token in ("浏览", "树", "结构", "browse")):
+            names.add("browse_memory_tree")
+        else:
+            names.add("recall_memory")
+    return names
+
+
+def forced_tool_aliases(tool_name: str) -> tuple[str, ...]:
+    base = {
+        tool_name,
+        tool_name.replace("_", " "),
+        tool_name.replace("_", "-"),
+    }
+    return tuple([*base, *FORCED_TOOL_ALIASES.get(tool_name, ())])
+
+
+def build_forced_tool_arguments(
+    tool_name: str,
+    text: str,
+    *,
+    attachments: list[ChatAttachment],
+) -> dict[str, Any]:
+    if tool_name == "web_search":
+        return {
+            "query": infer_forced_search_query(text),
+            "freshness": infer_forced_freshness(text),
+            "maxResults": 10,
+            "fetchContent": True,
+        }
+    if tool_name == "doc_writer":
+        doc_args = build_doc_writer_fallback_arguments(raw_arguments="", user_request=text)
+        doc_args.setdefault("writingMode", "advanced")
+        doc_args.setdefault("llmWrite", True)
+        if should_force_web_search(text):
+            doc_args["useWebSearch"] = True
+        return doc_args
+    if tool_name == "get_current_time":
+        return {"timezone": infer_timezone_from_text(text)}
+    if tool_name == "calculate":
+        return {"expression": infer_calculation_expression(text)}
+    if tool_name == "describe_capabilities":
+        return {}
+    if tool_name == "file_reader":
+        return {
+            "action": infer_file_reader_action(text),
+            "path": infer_workspace_path_from_text(text) or ".",
+            "includeLineNumbers": "行号" in text or "line number" in text.lower(),
+        }
+    if tool_name == "image_understand":
+        args: dict[str, Any] = {"prompt": strip_forced_tool_directives(text)}
+        if attachments:
+            args["attachments"] = [attachment.model_dump(by_alias=True) for attachment in attachments]
+        else:
+            image_path = infer_workspace_path_from_text(text)
+            if image_path:
+                args["path"] = image_path
+        return args
+    if tool_name == "todo_task":
+        return {
+            "intent": strip_forced_tool_directives(text),
+            "action": infer_todo_action_from_text(text),
+            **infer_todo_payload_from_text(text),
+        }
+    if tool_name == "recall_memory":
+        return {"query": strip_forced_tool_directives(text) or text}
+    if tool_name == "save_memory":
+        memory_text = infer_memory_content_from_text(text)
+        return {
+            "title": infer_memory_title(memory_text),
+            "domain": infer_memory_domain(text),
+            "summary": truncate_text(memory_text, 120) or "用户要求保存的记忆",
+            "full_content": memory_text or text,
+            "category": "preference" if any(token in text for token in ("喜欢", "偏好", "习惯", "preference")) else "fact",
+            "keywords": infer_memory_keywords(memory_text),
+            "importance": 0.6,
+        }
+    if tool_name == "browse_memory_tree":
+        return {
+            "path": infer_memory_path_from_text(text) or "/",
+            "depth": 2,
+        }
+    if tool_name == "echo":
+        return {"intent": strip_forced_tool_directives(text) or text}
+    return {"intent": strip_forced_tool_directives(text) or text}
 
 
 def should_force_web_search(text: str) -> bool:
@@ -882,22 +1031,204 @@ def has_explicit_tool_directive(text: str, *, aliases: tuple[str, ...]) -> bool:
     verbs = r"(使用|调用|启用|走|用|强制使用|必须使用|use|call|invoke|run)"
     suffix = r"(工具|tool)?"
     for alias in aliases:
-        pattern = re.escape(alias).replace(r"\ ", r"\s*").replace("_", r"[-_\s]*")
-        if re.search(rf"{verbs}\s*{pattern}\s*{suffix}", text):
+        pattern = tool_alias_pattern(alias)
+        if re.search(rf"{verbs}\s*(工具|tool)?\s*{pattern}\s*{suffix}", text):
             return True
     return False
+
+
+def has_negative_tool_directive(text: str, *, aliases: tuple[str, ...]) -> bool:
+    prefix = r"(不用|不要用|不使用|禁止使用|禁用|without|do not use|don't use)"
+    suffix = r"(工具|tool)?"
+    for alias in aliases:
+        pattern = tool_alias_pattern(alias)
+        if re.search(rf"{prefix}\s*(工具|tool)?\s*{pattern}\s*{suffix}", text):
+            return True
+    return False
+
+
+def tool_alias_pattern(alias: str) -> str:
+    return re.escape(alias).replace(r"\ ", r"\s*").replace("_", r"[-_\s]*")
 
 
 def normalize_tool_directive_text(text: str) -> str:
     return unicodedata.normalize("NFKC", text).lower()
 
 
+def strip_forced_tool_directives(text: str) -> str:
+    cleaned = normalize_tool_directive_text(text)
+    aliases: set[str] = set()
+    for tool in tool_registry.list_tools():
+        aliases.update(forced_tool_aliases(tool.name))
+    for alias_items in FORCED_TOOL_ALIASES.values():
+        aliases.update(alias_items)
+    aliases.update(("memory", "记忆工具", "长期记忆"))
+    for alias in sorted(aliases, key=len, reverse=True):
+        pattern = tool_alias_pattern(alias)
+        cleaned = re.sub(
+            rf"(使用|调用|启用|走|用|强制使用|必须使用|use|call|invoke|run)\s*{pattern}\s*(工具|tool)?\s*[，,：:\-]*",
+            " ",
+            cleaned,
+        )
+    return re.sub(r"\s+", " ", cleaned).strip(" ，,。；;：:")
+
+
+def infer_timezone_from_text(text: str) -> str:
+    if any(token in text for token in ("北京时间", "中国时间", "上海时间")):
+        return "Asia/Shanghai"
+    match = re.search(r"\b([A-Za-z]+/[A-Za-z_]+)\b", text)
+    if match:
+        return match.group(1)
+    if re.search(r"\butc\b|协调世界时", text, re.IGNORECASE):
+        return "UTC"
+    return "Asia/Shanghai"
+
+
+def infer_calculation_expression(text: str) -> str:
+    cleaned = strip_forced_tool_directives(text)
+    match = re.search(r"[-+]?\d[\d\s+\-*/().%]*\d(?:\s*[%)]*)?", cleaned)
+    if match:
+        return match.group(0).strip()
+    return cleaned
+
+
+def infer_file_reader_action(text: str) -> str:
+    lowered = normalize_tool_directive_text(text)
+    if any(token in lowered for token in ("列目录", "列出目录", "list", "ls", "dir", "文件列表")):
+        return "list"
+    if any(token in lowered for token in ("元信息", "metadata", "stat", "属性", "大小")):
+        return "stat"
+    return "read"
+
+
+def infer_workspace_path_from_text(text: str) -> str:
+    quoted = re.search(r"[\"'“”‘’「」『』]([^\"'“”‘’「」『』]+?)[\"'“”‘’「」『』]", text)
+    if quoted:
+        candidate = clean_inferred_path(quoted.group(1))
+        if candidate:
+            return candidate
+
+    windows_path = re.search(r"([A-Za-z]:\\[^\r\n\"'<>|，。；;]+)", text)
+    if windows_path:
+        candidate = clean_inferred_path(windows_path.group(1))
+        if candidate:
+            return candidate
+
+    file_like = re.search(r"([\w./\\-]+\.[A-Za-z0-9_]+)", text)
+    if file_like:
+        return clean_inferred_path(file_like.group(1))
+
+    after_label = re.search(
+        r"(?:路径|文件|目录|(?<![\w])path(?![\w])|(?<![\w])file(?![\w])|(?<![\w])dir(?![\w]))\s*[：:=]?\s*([^\s，。；;]+)",
+        text,
+        re.IGNORECASE,
+    )
+    if after_label:
+        candidate = clean_inferred_path(after_label.group(1))
+        if candidate and not candidate.lower() in {"reader", "tool", "工具"}:
+            return candidate
+
+    return ""
+
+
+def clean_inferred_path(value: str) -> str:
+    candidate = value.strip().strip("\"'“”‘’「」『』")
+    candidate = re.sub(r"(下|目录|文件夹|文件|里|中)$", "", candidate).strip()
+    return candidate.strip(" ，,。；;：:")
+
+
+def infer_todo_action_from_text(text: str) -> str:
+    lowered = normalize_tool_directive_text(text)
+    if any(token in lowered for token in ("统计", "概览", "summary")):
+        return "summary"
+    if any(token in lowered for token in ("列出", "查看待办", "任务列表", "list")):
+        return "list"
+    if any(token in lowered for token in ("拆解", "规划", "计划", "plan")):
+        return "plan"
+    if any(token in lowered for token in ("标记完成", "完成任务", "done", "complete")):
+        return "complete"
+    if any(token in lowered for token in ("开始", "进行中", "start")):
+        return "start"
+    if any(token in lowered for token in ("阻塞", "blocked", "block")):
+        return "block"
+    if any(token in lowered for token in ("归档", "archive")):
+        return "archive"
+    if any(token in lowered for token in ("删除", "delete")):
+        return "delete"
+    if any(token in lowered for token in ("备注", "note")):
+        return "add_note"
+    if any(token in lowered for token in ("更新", "修改", "update")):
+        return "update"
+    return "create"
+
+
+def infer_todo_payload_from_text(text: str) -> dict[str, Any]:
+    action = infer_todo_action_from_text(text)
+    cleaned = strip_forced_tool_directives(text)
+    payload: dict[str, Any] = {}
+    task_id_match = re.search(r"(todo_[0-9]{14}_[a-f0-9]{8})", cleaned, re.IGNORECASE)
+    if task_id_match:
+        payload["taskId"] = task_id_match.group(1)
+
+    if action in {"create", "plan"}:
+        title = re.sub(r"^(创建|新增|添加|加入|记录|帮我|请|一个|一条|待办|任务|todo|task|create|add|new)\s*", "", cleaned, flags=re.IGNORECASE)
+        title = title.strip(" ：:，,。.；;")
+        if title:
+            payload["title"] = truncate_text(title, 160)
+    elif action not in {"list", "summary"} and "taskId" not in payload:
+        match = re.search(r"(?:任务|待办|matchTitle|标题)\s*[：:=]?\s*([^，。；;\n]+)", cleaned, re.IGNORECASE)
+        if match:
+            payload["matchTitle"] = truncate_text(match.group(1).strip(), 160)
+    if action == "delete":
+        payload["confirmDelete"] = any(token in cleaned for token in ("确认删除", "confirmdelete=true", "confirm delete"))
+    return payload
+
+
+def infer_memory_content_from_text(text: str) -> str:
+    cleaned = strip_forced_tool_directives(text)
+    match = re.search(r"(?:记住|保存(?:到)?记忆|记录到记忆)\s*[：:，,]?\s*(.+)", cleaned, re.IGNORECASE | re.S)
+    if match:
+        return match.group(1).strip(" ：:，,。.；;")
+    return cleaned or text.strip()
+
+
+def infer_memory_title(content: str) -> str:
+    if not content.strip():
+        return "用户记忆"
+    sentence = re.split(r"[。！？.!?\n]", content.strip(), maxsplit=1)[0]
+    return truncate_text(sentence.strip(" ：:，,。.；;"), 40) or "用户记忆"
+
+
+def infer_memory_domain(text: str) -> str:
+    lowered = normalize_tool_directive_text(text)
+    if any(token in lowered for token in ("代码", "工程", "项目", "code", "repository")):
+        return "code"
+    if any(token in lowered for token in ("任务", "待办", "todo", "task")):
+        return "task"
+    if any(token in lowered for token in ("知识", "资料", "学习", "knowledge")):
+        return "knowledge"
+    return "daily_chat"
+
+
+def infer_memory_keywords(content: str) -> list[str]:
+    parts = [item.strip() for item in re.split(r"[,，;；、\s]+", content) if item.strip()]
+    return [truncate_text(item, 24) for item in parts[:8]]
+
+
+def infer_memory_path_from_text(text: str) -> str:
+    match = re.search(r"(/(?:daily_chat|task|code|environment|creative|knowledge)[^\s，。；;]*)", text)
+    if match:
+        return match.group(1)
+    return ""
+
+
 def infer_forced_search_query(text: str) -> str:
     query = normalize_tool_directive_text(text)
     query = re.sub(r"(使用|调用|启用|走|用|强制使用|必须使用|use|call|invoke|run)\s*(web\s*search|web[-_]?search|websearch|网页搜索|网络搜索|web\s*搜索)\s*[，,：:\s]*", "", query)
-    query = re.sub(r"(写成|生成|保存|导出|输出|文件放在|保存到|输出到).*$", "", query).strip()
+    query = re.sub(r"(并)?\s*(写成|生成|保存|导出|输出|文件放在|保存到|输出到|放在).*$", "", query).strip()
     query = re.sub(r"^(完成|帮我|请|请帮我)\s*", "", query)
     query = re.sub(r"^(查一下|查询|搜索|检索)\s*", "", query)
+    query = re.sub(r"(并|和|然后)$", "", query).strip()
     query = query.strip(" ，,。；;：:")
     return query or text.strip()
 
@@ -925,21 +1256,44 @@ def extract_search_sources_for_doc_writer(executed: ExecutedToolCall) -> list[di
     return [dict(item) for item in results if isinstance(item, dict)]
 
 
-def enrich_doc_writer_call_with_sources(call: ModelToolCall, sources: list[dict[str, Any]]) -> ModelToolCall:
-    if call.name != "doc_writer" or not sources:
+def enrich_doc_writer_call_with_sources(
+    call: ModelToolCall,
+    sources: list[dict[str, Any]],
+    prior_results: list[ExecutedToolCall] | None = None,
+) -> ModelToolCall:
+    if call.name != "doc_writer" or (not sources and not prior_results):
         return call
     try:
         args = parse_tool_arguments(call.arguments)
     except Exception:
         args = {}
-    args["sources"] = sources
-    args["useWebSearch"] = False
+    if sources:
+        args["sources"] = sources
+        args["useWebSearch"] = False
+    context = build_prior_tool_context_for_doc_writer(prior_results or [])
+    if context:
+        existing = str(args.get("content") or "").strip()
+        args["content"] = f"{existing}\n\n{context}".strip() if existing else context
     return ModelToolCall(
         id=call.id,
         name=call.name,
         arguments=json.dumps(args, ensure_ascii=False),
         index=call.index,
     )
+
+
+def build_prior_tool_context_for_doc_writer(prior_results: list[ExecutedToolCall]) -> str:
+    if not prior_results:
+        return ""
+    lines = ["前置工具结果："]
+    for item in prior_results:
+        if item.call.name == "doc_writer":
+            continue
+        status = "成功" if item.ok else "失败"
+        lines.append(f"- {item.call.name}（{status}）：{item.summary}")
+        if item.content:
+            lines.append(truncate_text(item.content, 1200))
+    return "\n".join(lines).strip()
 
 
 async def execute_model_tool_call(call: ModelToolCall, *, fallback_user_request: str = "") -> ExecutedToolCall:
@@ -1090,6 +1444,13 @@ def infer_output_path_from_text(text: str) -> str:
     match = re.search(r"([A-Za-z]:\\[^\r\n\"'<>|，。；;]+?)(?=下|目录|文件夹|保存|$|\s|，|。|；|;)", text)
     if match:
         return match.group(1).strip()
+    relative = re.search(
+        r"(?:文件放在|放在|保存到|输出到)\s*([A-Za-z0-9_.\\/-]+)\s*(?:下|目录|文件夹)?",
+        text,
+        re.IGNORECASE,
+    )
+    if relative:
+        return clean_inferred_path(relative.group(1))
     return ""
 
 
@@ -1113,7 +1474,8 @@ def infer_report_topic(text: str) -> str:
     if match and match.group(1).strip():
         return match.group(1).strip()
     cleaned = re.sub(r"(使用|调用|启用|走|用|强制使用|必须使用)?\s*(web\s*search|web[-_]?search|websearch|网页搜索|网络搜索|web\s*搜索)", " ", text, flags=re.IGNORECASE)
-    cleaned = re.sub(r"(查一下|查询|搜索|检索|完成|生成|写成\s*(md|markdown|docx|xlsx|csv|txt)?|写|编写|起草|一份|报告|文档|给我|文件放在.+$)", " ", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"(查一下|查询|搜索|检索|完成|生成|写成\s*(md|markdown|docx|xlsx|csv|txt)?|写|编写|起草|一份|报告|文档|给我|文件放在.+$|放在.+$|保存到.+$|输出到.+$)", " ", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"(并|和|然后)$", "", cleaned.strip(), flags=re.IGNORECASE)
     cleaned = re.sub(r"\s+", " ", cleaned).strip(" ：:，,。.；;")
     return truncate_text(cleaned, 80) if cleaned else "调研报告"
 
@@ -1712,7 +2074,7 @@ async def stream_chat(
     for voice_event in voice_stream.startup_events():
         yield voice_event
     executed_tool_history: list[ExecutedToolCall] = []
-    forced_tool_calls = build_forced_chat_tool_calls(last_user_request)
+    forced_tool_calls = build_forced_chat_tool_calls(last_user_request, attachments=request.attachments)
     if forced_tool_calls:
         thinking_log.append("检测到用户显式要求使用工具，已由后端强制执行对应工具。")
         yield sse("thinking", {"text": "检测到用户显式要求使用工具，正在先执行指定工具。\n"})
@@ -1720,7 +2082,7 @@ async def stream_chat(
         forced_search_sources: list[dict[str, Any]] = []
         yield sse("status", {"phase": "tools", "forced": True})
         for raw_call in forced_tool_calls:
-            call = enrich_doc_writer_call_with_sources(raw_call, forced_search_sources)
+            call = enrich_doc_writer_call_with_sources(raw_call, forced_search_sources, forced_executed)
             started_payload = tool_event_payload(
                 call,
                 status="started",

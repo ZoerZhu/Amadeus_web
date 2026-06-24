@@ -8,6 +8,7 @@ runtime.
 
 from __future__ import annotations
 
+import asyncio
 import mimetypes
 import os
 import sys
@@ -32,6 +33,13 @@ from .storage import SQLiteStorage
 _log = get_logger(__name__)
 
 # ---------------- paths / env ----------------
+
+
+def _env_float(name: str, default: float) -> float:
+    try:
+        return float(os.getenv(name, "").strip() or default)
+    except ValueError:
+        return default
 
 
 def _root_dir() -> Path:
@@ -113,14 +121,17 @@ async def startup() -> None:
             from .complex_agent.domain import McpServerConfig
             from .storage import DEFAULT_USER_ID
 
+            connect_timeout = max(1.0, _env_float("AMADEUS_MCP_CONNECT_TIMEOUT", 12.0))
             servers = await agent_storage.list_mcp_servers(_global_storage, DEFAULT_USER_ID)
             for server in servers:
                 if not server.get("enabled", True):
                     continue
                 try:
                     config = McpServerConfig.model_validate(server)
-                    await mcp_manager.connect_server(config)
+                    await asyncio.wait_for(mcp_manager.connect_server(config), timeout=connect_timeout)
                     _log.info("MCP server %s connected.", server["id"])
+                except TimeoutError:
+                    _log.warning("MCP server %s connect timed out after %.1fs.", server["id"], connect_timeout)
                 except Exception as error:
                     _log.warning("MCP server %s failed to connect: %s", server["id"], error)
         except Exception as error:

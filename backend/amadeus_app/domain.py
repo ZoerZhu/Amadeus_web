@@ -13,6 +13,9 @@ AgentAction = Literal["call_tool", "call_agent", "query_capabilities"]
 AgentTargetType = Literal["tool", "agent", "auto"]
 AttachmentMediaType = Literal["text", "document", "image", "audio"]
 
+# Centralized default — change here to switch the default persona project-wide
+DEFAULT_PERSONA_ID = "kurisu_amadeus"
+
 
 class ModelProviderPreset(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
@@ -102,7 +105,7 @@ class ChatStreamRequest(BaseModel):
     messages: list[ChatMessage]
     attachments: list[ChatAttachment] = Field(default_factory=list)
     conversation_id: UUID | None = Field(default=None, alias="conversationId")
-    persona_id: str = Field(default="kurisu_amadeus", alias="personaId")
+    persona_id: str = Field(default=DEFAULT_PERSONA_ID, alias="personaId")
     mode: ChatMode = "fast"
     model: ModelSettings = Field(default_factory=ModelSettings)
     vision: VisionSettings = Field(default_factory=VisionSettings)
@@ -125,7 +128,7 @@ class VoiceSynthesisRequest(BaseModel):
     text: str
     conversation_id: UUID | None = Field(default=None, alias="conversationId")
     message_id: UUID | None = Field(default=None, alias="messageId")
-    persona_id: str = Field(default="kurisu_amadeus", alias="personaId")
+    persona_id: str = Field(default=DEFAULT_PERSONA_ID, alias="personaId")
     model: ModelSettings = Field(default_factory=ModelSettings)
     voice: VoiceSettings = Field(default_factory=VoiceSettings)
 
@@ -134,7 +137,7 @@ class TaskSummaryVoiceRequest(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
     summary: str
-    persona_id: str = Field(default="kurisu_amadeus", alias="personaId")
+    persona_id: str = Field(default=DEFAULT_PERSONA_ID, alias="personaId")
     model: ModelSettings = Field(default_factory=ModelSettings)
     voice: VoiceSettings = Field(default_factory=VoiceSettings)
 
@@ -156,6 +159,8 @@ class SettingsSaveRequest(BaseModel):
     voice: VoiceSettings = Field(default_factory=VoiceSettings)
     desktop_assistant: DesktopAssistantSettings = Field(default_factory=DesktopAssistantSettings, alias="desktopAssistant")
     mode: ChatMode = "fast"
+    agent: dict[str, Any] | None = None
+    mcp_servers: list[dict[str, Any]] | None = Field(default=None, alias="mcpServers")
 
 
 class DesktopObserveRequest(BaseModel):
@@ -165,7 +170,7 @@ class DesktopObserveRequest(BaseModel):
     attachments: list[ChatAttachment] = Field(default_factory=list)
     conversation_id: UUID | None = Field(default=None, alias="conversationId")
     save_response: bool = Field(default=False, alias="saveResponse")
-    persona_id: str = Field(default="kurisu_amadeus", alias="personaId")
+    persona_id: str = Field(default=DEFAULT_PERSONA_ID, alias="personaId")
     mode: ChatMode = "fast"
     model: ModelSettings = Field(default_factory=ModelSettings)
     vision: VisionSettings = Field(default_factory=VisionSettings)
@@ -175,7 +180,7 @@ class ConversationCreateRequest(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
     title: str = ""
-    persona_id: str = Field(default="kurisu_amadeus", alias="personaId")
+    persona_id: str = Field(default=DEFAULT_PERSONA_ID, alias="personaId")
     mode: ChatMode = "fast"
 
 

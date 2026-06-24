@@ -3,16 +3,22 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import unicodedata
+from collections.abc import AsyncGenerator
 from dataclasses import dataclass
-from typing import Any, AsyncGenerator
+from typing import Any
 from uuid import uuid4
 
 import httpx
 
 from .agent_registry import tool_registry
 from .domain import ChatAttachment, ChatStreamRequest, ModelProviderPreset, ModelSettings, VoiceSettings
+from .logging_config import get_logger
 from .model_adapter import build_chat_payload, should_read_reasoning
+
+_log = get_logger(__name__)
+from .local_voice_service import local_voice_engine_url
 from .personas import PersonaPreset, build_system_prompt, get_persona
 from .providers import get_provider
 from .runtime_config import effective_model_settings, effective_voice_settings
@@ -24,13 +30,13 @@ from .text_cleaning import (
     strip_emotion_tags_for_display,
     to_speech_source_text,
 )
-from .local_voice_service import local_voice_engine_url
+from .vision.image_understand_agent import MAX_IMAGES as VISION_MAX_IMAGES
+from .vision.image_understand_agent import run_image_understand_agent
 from .voice_service import (
     synthesize_for_persona,
     synthesize_local_segment_pcm_for_persona,
     write_local_pcm_audio,
 )
-from .vision.image_understand_agent import MAX_IMAGES as VISION_MAX_IMAGES, run_image_understand_agent
 
 
 def env_int(name: str, default: int) -> int:
@@ -53,6 +59,8 @@ SPEECH_SOFT_BREAKS = {"，", ",", "、", " ", "：", ":"}
 CHAT_TOOL_MAX_ROUNDS = env_int("AMADEUS_CHAT_TOOL_MAX_ROUNDS", 4)
 CHAT_TOOL_RESULT_MAX_CHARS = env_int("AMADEUS_CHAT_TOOL_RESULT_MAX_CHARS", 12000)
 CHAT_TOOL_EVENT_PREVIEW_CHARS = env_int("AMADEUS_CHAT_TOOL_EVENT_PREVIEW_CHARS", 900)
+CHAT_WEB_SEARCH_RESULT_MAX_CHARS = env_int("AMADEUS_CHAT_WEB_SEARCH_RESULT_MAX_CHARS", 5000)
+CHAT_DOC_WRITER_RESULT_MAX_CHARS = env_int("AMADEUS_CHAT_DOC_WRITER_RESULT_MAX_CHARS", 8000)
 
 
 @dataclass
@@ -795,11 +803,29 @@ def build_model_tool_calls(tool_call_chunks: dict[int, dict[str, Any]]) -> list[
     return calls
 
 
-async def execute_model_tool_call(call: ModelToolCall) -> ExecutedToolCall:
+def latest_user_message_text(messages: list[Any]) -> str:
+    for message in reversed(messages):
+        if getattr(message, "role", "") == "user" and str(getattr(message, "content", "")).strip():
+            return str(getattr(message, "content", "")).strip()
+    return ""
+
+
+async def execute_model_tool_call(call: ModelToolCall, *, fallback_user_request: str = "") -> ExecutedToolCall:
     try:
         arguments = parse_tool_arguments(call.arguments)
     except Exception as error:
         message = str(error) or error.__class__.__name__
+        if call.name == "doc_writer" and fallback_user_request.strip():
+            arguments = build_doc_writer_fallback_arguments(
+                raw_arguments=call.arguments,
+                user_request=fallback_user_request,
+            )
+            if arguments:
+                return await execute_registered_tool(
+                    call,
+                    arguments,
+                    parse_warning=f"原始工具参数 JSON 不完整，已使用用户请求兜底：{message}",
+                )
         return ExecutedToolCall(
             call=call,
             ok=False,
@@ -809,6 +835,16 @@ async def execute_model_tool_call(call: ModelToolCall) -> ExecutedToolCall:
             error=message,
             result_payload={"ok": False, "error": message},
         )
+
+    return await execute_registered_tool(call, arguments)
+
+
+async def execute_registered_tool(
+    call: ModelToolCall,
+    arguments: dict[str, Any],
+    *,
+    parse_warning: str = "",
+) -> ExecutedToolCall:
     tool = tool_registry.get(call.name)
     if tool is None or tool.handler is None:
         return ExecutedToolCall(
@@ -834,6 +870,8 @@ async def execute_model_tool_call(call: ModelToolCall) -> ExecutedToolCall:
     try:
         result = await tool.handler(arguments)
         summary = str(result.get("summary") or f"{call.name} 执行完成。")
+        if parse_warning:
+            summary = f"{summary}（{parse_warning}）"
         payload = {
             "ok": True,
             "summary": summary,
@@ -843,7 +881,7 @@ async def execute_model_tool_call(call: ModelToolCall) -> ExecutedToolCall:
             call=call,
             ok=True,
             summary=summary,
-            content=truncate_json(payload, CHAT_TOOL_RESULT_MAX_CHARS),
+            content=truncate_json(payload, tool_result_max_chars(call.name)),
             arguments=arguments,
             result_payload=payload,
         )
@@ -858,6 +896,138 @@ async def execute_model_tool_call(call: ModelToolCall) -> ExecutedToolCall:
             error=message,
             result_payload={"ok": False, "error": message},
         )
+
+
+def tool_result_max_chars(tool_name: str) -> int:
+    if tool_name == "web_search":
+        return CHAT_WEB_SEARCH_RESULT_MAX_CHARS
+    if tool_name == "doc_writer":
+        return CHAT_DOC_WRITER_RESULT_MAX_CHARS
+    return CHAT_TOOL_RESULT_MAX_CHARS
+
+
+def build_doc_writer_fallback_arguments(*, raw_arguments: str, user_request: str) -> dict[str, Any]:
+    """Build a safe doc_writer request when streamed JSON arguments are truncated."""
+    request_text = user_request.strip()
+    if not request_text:
+        return {}
+
+    raw_fields = extract_partial_json_string_fields(
+        raw_arguments,
+        fields=("title", "topic", "instruction", "format", "outputPath", "fileName", "searchQuery"),
+    )
+    output_path = raw_fields.get("outputPath") or infer_output_path_from_text(request_text)
+    doc_format = raw_fields.get("format") or infer_doc_format_from_text(request_text, output_path, raw_fields.get("fileName", ""))
+    topic = raw_fields.get("topic") or infer_report_topic(request_text)
+    title = raw_fields.get("title") or infer_report_title(request_text, topic)
+    instruction = raw_fields.get("instruction") or request_text
+    search_query = raw_fields.get("searchQuery") or topic or title
+
+    args: dict[str, Any] = {
+        "instruction": instruction,
+        "topic": topic or title,
+        "title": title,
+        "format": doc_format or "md",
+        "useWebSearch": should_doc_writer_fallback_search(request_text),
+        "searchQuery": search_query,
+        "save": True,
+        "overwrite": False,
+    }
+    if output_path:
+        args["outputPath"] = output_path
+    if raw_fields.get("fileName"):
+        args["fileName"] = raw_fields["fileName"]
+    return args
+
+
+def extract_partial_json_string_fields(raw: str, *, fields: tuple[str, ...]) -> dict[str, str]:
+    values: dict[str, str] = {}
+    for field in fields:
+        match = re.search(rf'"{re.escape(field)}"\s*:\s*"((?:\\.|[^"\\])*)', raw)
+        if not match:
+            continue
+        fragment = match.group(1)
+        try:
+            values[field] = json.loads(f'"{fragment}"')
+        except json.JSONDecodeError:
+            values[field] = fragment.replace(r"\/", "/").replace(r"\\", "\\")
+    return {key: value.strip() for key, value in values.items() if value.strip()}
+
+
+def infer_output_path_from_text(text: str) -> str:
+    match = re.search(r"([A-Za-z]:\\[^\r\n\"'<>|，。；;]+?)(?=下|目录|文件夹|保存|$|\s|，|。|；|;)", text)
+    if match:
+        return match.group(1).strip()
+    return ""
+
+
+def infer_doc_format_from_text(text: str, output_path: str = "", file_name: str = "") -> str:
+    haystack = " ".join([text, output_path, file_name]).lower()
+    if re.search(r"\bdocx\b|\.docx", haystack):
+        return "docx"
+    if re.search(r"\bxlsx\b|\.xlsx", haystack):
+        return "xlsx"
+    if re.search(r"\bcsv\b|\.csv", haystack):
+        return "csv"
+    if re.search(r"\btxt\b|\.txt", haystack):
+        return "txt"
+    return "md"
+
+
+def infer_report_topic(text: str) -> str:
+    match = re.search(r"关于\s*([^，。,.；;\n]+?)(?:最新|调研|报告|md|markdown|文档|$)", text, re.IGNORECASE)
+    if match and match.group(1).strip():
+        return match.group(1).strip()
+    cleaned = re.sub(r"(完成|生成|写|编写|起草|一份|报告|文档|给我|文件放在.+$)", " ", text, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" ：:，,。.；;")
+    return truncate_text(cleaned, 80) if cleaned else "调研报告"
+
+
+def infer_report_title(text: str, topic: str) -> str:
+    topic_text = topic.strip() or "调研"
+    if any(keyword in text.lower() for keyword in ("最新", "latest")):
+        return f"{topic_text} 最新调研报告"
+    if any(keyword in text.lower() for keyword in ("调研", "research")):
+        return f"{topic_text} 调研报告"
+    if any(keyword in text.lower() for keyword in ("报告", "report")):
+        return f"{topic_text} 报告"
+    return truncate_text(text.strip(), 80) or "调研报告"
+
+
+def should_doc_writer_fallback_search(text: str) -> bool:
+    lowered = text.lower()
+    return any(keyword in lowered for keyword in ("最新", "当前", "调研", "研究", "资料", "来源", "引用", "latest", "research", "source"))
+
+
+def build_tool_execution_fallback_response(executed: list[ExecutedToolCall], error_message: str) -> str:
+    """Return a user-visible response when final model synthesis fails after tools ran."""
+    successful_doc_writer = next((item for item in reversed(executed) if item.call.name == "doc_writer" and item.ok), None)
+    if successful_doc_writer and successful_doc_writer.result_payload:
+        payload = successful_doc_writer.result_payload
+        data = payload.get("data") or {}
+        summary = str(payload.get("summary") or successful_doc_writer.summary or "文档已生成。").strip()
+        lines = [summary]
+        output_path = data.get("outputPath") or data.get("absolutePath")
+        absolute_path = data.get("absolutePath")
+        if output_path:
+            lines.extend(["", f"- 输出路径：{output_path}"])
+        if absolute_path and absolute_path != output_path:
+            lines.append(f"- 绝对路径：{absolute_path}")
+        if data.get("usedWebSearch"):
+            lines.append("- 已使用 Web Search 获取资料。")
+        if error_message:
+            lines.extend(["", f"注：模型最终总结阶段失败，已直接返回工具执行结果。错误：{error_message}"])
+        return "\n".join(lines)
+
+    successful = [item for item in executed if item.ok]
+    if successful:
+        lines = ["工具已经执行完成，但模型最终总结阶段失败。已直接返回工具摘要："]
+        for item in successful[-5:]:
+            lines.append(f"- {item.call.name}: {item.summary}")
+        if error_message:
+            lines.append(f"\n最终总结错误：{error_message}")
+        return "\n".join(lines)
+    return ""
 
 
 def parse_tool_arguments(raw_arguments: str) -> dict[str, Any]:
@@ -1021,7 +1191,103 @@ async def stream_chat(
     voice_settings = effective_voice_settings(request.voice)
     stored_conversation_id = request.conversation_id
     chat_messages = [message.model_copy() for message in request.messages]
+    last_user_request = latest_user_message_text(chat_messages)
     thinking_log: list[str] = []
+
+    # Complex task routing: if the latest user message indicates a complex
+    # multi-step task, create an Agent Task and emit a complex_task event
+    # so the frontend can open the task panel. The task runs in the
+    # background and writes its summary back to the conversation.
+    try:
+        from .complex_agent.chat_router import detect_complex_task_intent
+        from .complex_agent.domain import AgentSettings
+        from .complex_agent.task_hub import TaskBudget, agent_task_hub
+        from .complex_agent.skills import load_skill_context
+        from .complex_agent.runner import default_agent_runner
+        from .complex_agent.tool_registry import sync_builtin_tools
+        from .storage import DEFAULT_USER_ID as _DEFAULT_USER_ID
+
+        last_user_msg = next(
+            (m for m in reversed(chat_messages) if m.role == "user" and m.content.strip()),
+            None,
+        )
+        if last_user_msg is not None and storage is not None and storage.connected:
+            agent_settings_dict = (await storage.get_settings(_DEFAULT_USER_ID) or {}).get("agent") or {}
+            agent_settings = AgentSettings.model_validate(agent_settings_dict)
+            if agent_settings.enabled:
+                enabled_skills = await __import__(
+                    "amadeus_app.complex_agent.agent_storage", fromlist=["list_skill_packages"]
+                ).list_skill_packages(storage, _DEFAULT_USER_ID)
+                routing = detect_complex_task_intent(
+                    last_user_msg.content,
+                    enabled_skills=enabled_skills,
+                    agent_settings=agent_settings,
+                )
+                if routing is not None:
+                    sync_builtin_tools()
+                    workspace = agent_settings.default_workspace or "."
+                    skill_contexts = []
+                    for skill_id in routing.get("skillIds", []):
+                        skill = await __import__(
+                            "amadeus_app.complex_agent.agent_storage", fromlist=["get_skill_package"]
+                        ).get_skill_package(storage, skill_id)
+                        if skill is None or not skill.get("enabled", True):
+                            continue
+                        from pathlib import Path
+                        skill_dir = Path(skill["path"])
+                        if skill_dir.exists():
+                            try:
+                                skill_contexts.append(load_skill_context(skill_dir))
+                            except Exception as error:  # noqa: BLE001
+                                _log.warning("failed to load skill %s: %s", skill_id, error)
+                    budget = TaskBudget(
+                        max_rounds=agent_settings.max_rounds,
+                        max_tool_calls=agent_settings.max_tool_calls,
+                        max_runtime_seconds=agent_settings.max_runtime_seconds,
+                        max_sampling_depth=agent_settings.max_sampling_depth,
+                    )
+                    task = await agent_task_hub.create_task(
+                        storage=storage,
+                        user_id=_DEFAULT_USER_ID,
+                        title=last_user_msg.content[:60],
+                        prompt=last_user_msg.content,
+                        workspace_path=workspace,
+                        conversation_id=str(stored_conversation_id) if stored_conversation_id else None,
+                        active_skill_ids=routing.get("skillIds", []),
+                        settings=agent_settings.model_dump(by_alias=True),
+                        budget=budget,
+                    )
+                    # Launch the agent in the background
+                    from .complex_agent.domain import AgentTaskCreateRequest
+                    agent_request = AgentTaskCreateRequest(
+                        title=last_user_msg.content[:60],
+                        prompt=last_user_msg.content,
+                        workspacePath=workspace,
+                        conversationId=stored_conversation_id,
+                        skillIds=routing.get("skillIds", []),
+                        model=request.model.model_dump(by_alias=True),
+                        mode=request.mode,
+                    )
+                    background = asyncio.create_task(
+                        default_agent_runner.run(
+                            storage=storage,
+                            task=task,
+                            request=agent_request,
+                            agent_settings=agent_settings,
+                            skill_contexts=skill_contexts,
+                        ),
+                        name=f"agent-task-{task.task_id}",
+                    )
+                    await agent_task_hub.attach_background_task(task.task_id, background)
+                    yield sse("complex_task", {
+                        "taskId": task.task_id,
+                        "title": task.title,
+                        "reason": routing.get("reason", ""),
+                        "skillIds": routing.get("skillIds", []),
+                    })
+                    return
+    except Exception as error:  # noqa: BLE001
+        _log.debug("Complex task routing failed (non-fatal): %s", error)
 
     image_attachments = chat_image_attachments(request.attachments)
     if image_attachments:
@@ -1161,7 +1427,134 @@ async def stream_chat(
         return
 
     endpoint = f"{settings.base_url.rstrip('/')}/chat/completions"
-    payload_messages: list[dict[str, Any]] = [{"role": "system", "content": build_system_prompt(persona, request.mode)}]
+
+    # 记忆检索与注入
+    memory_context = ""
+    session_summary_text: str | None = None
+    if storage is not None and stored_conversation_id is not None:
+        try:
+            from ._common import get_memory_tree
+            tree = get_memory_tree()
+            if tree is not None:
+                from .memory.injector import build_memory_context
+                from .memory.query_rewriter import _detect_recall_triggers, is_profile_query
+                from .memory.tree_search import search_memory_tree, get_user_profile_memories
+
+                # 获取最后一条用户消息作为检索 query
+                last_user_msg = ""
+                for msg in reversed(chat_messages):
+                    if msg.role == "user" and msg.content.strip():
+                        last_user_msg = msg.content[:500]
+                        break
+
+                # 获取会话滚动摘要（用于 query 改写 + 注入，无论是否检索记忆都需要）
+                try:
+                    session_summary_text = await tree.get_session_summary(str(stored_conversation_id))
+                except Exception:
+                    session_summary_text = None
+
+                # 记忆检索门控：
+                # - 触发词出现 → 全量树检索
+                # - 用户画像类问题（我叫什么/我偏好/按我的习惯）→ 轻量 profile 召回
+                # - 普通具体问题 → 不检索
+                gate_enabled = os.getenv("AMADEUS_MEMORY_GATE_ENABLED", "1").lower() not in ("0", "false", "no")
+                need_full_search = bool(last_user_msg) and (
+                    not gate_enabled or _detect_recall_triggers(last_user_msg)
+                )
+                need_profile_only = (
+                    bool(last_user_msg)
+                    and gate_enabled
+                    and not need_full_search
+                    and is_profile_query(last_user_msg)
+                )
+
+                if need_full_search:
+                    # 构造最近消息 dict 列表（用于 query 改写）
+                    recent_msgs_dict: list[dict] = [
+                        {"role": m.role, "content": m.content}
+                        for m in chat_messages[-6:]
+                        if m.content.strip() and m.role in {"user", "assistant"}
+                    ]
+
+                    # 获取项目关联
+                    project_id = await tree.get_conversation_project(str(stored_conversation_id))
+
+                    # 获取项目名（用于 query 改写）
+                    project_name: str | None = None
+                    if project_id:
+                        try:
+                            projects = await tree.list_projects(DEFAULT_USER_ID)
+                            for p in projects:
+                                if p.get("id") == project_id:
+                                    project_name = p.get("name")
+                                    break
+                        except Exception:
+                            pass
+
+                    # 检索记忆树（传递 provider/recent_messages/session_summary 用于 query 改写）
+                    search_result = await search_memory_tree(
+                        query=last_user_msg,
+                        tree_store=tree,
+                        settings=settings,
+                        provider=provider,
+                        conversation_id=str(stored_conversation_id),
+                        project_id=project_id,
+                        recent_messages=recent_msgs_dict,
+                        session_summary=session_summary_text,
+                        project_name=project_name,
+                    )
+
+                    # 无相关命中时不注入 MemoryContext（避免无关历史干扰模型）
+                    result_dict = search_result.model_dump() if hasattr(search_result, "model_dump") else {}
+                    leaf_nodes = result_dict.get("leaf_nodes", [])
+                    if leaf_nodes:
+                        # 获取用户画像
+                        profile_memories = await get_user_profile_memories(tree)
+
+                        # 构造记忆上下文（传递 user_profile）
+                        memory_context = build_memory_context(
+                            selected_paths=result_dict.get("selected_paths", []),
+                            topic_nodes=result_dict.get("topic_nodes", []),
+                            leaf_nodes=leaf_nodes,
+                            session_summary=session_summary_text,
+                            budget_chars=int(os.getenv("AMADEUS_MEMORY_CONTEXT_CHAR_BUDGET", "5000")),
+                            user_profile=profile_memories,
+                        )
+                        if not memory_context.strip():
+                            memory_context = ""
+                    else:
+                        _log.debug("记忆检索无相关命中，跳过注入: query=%r", last_user_msg[:60])
+
+                elif need_profile_only:
+                    # 用户画像类问题：轻量召回 profile memories，不做全量树检索
+                    try:
+                        profile_memories = await get_user_profile_memories(tree)
+                        if profile_memories:
+                            memory_context = build_memory_context(
+                                selected_paths=[],
+                                topic_nodes=[],
+                                leaf_nodes=[],
+                                session_summary=session_summary_text,
+                                budget_chars=int(os.getenv("AMADEUS_MEMORY_CONTEXT_CHAR_BUDGET", "5000")),
+                                user_profile=profile_memories,
+                            )
+                            if not memory_context.strip():
+                                memory_context = ""
+                            _log.debug("用户画像召回: %d 条 profile 记忆", len(profile_memories))
+                    except Exception as profile_err:
+                        _log.debug("Profile 召回失败 (non-fatal): %s", profile_err)
+        except Exception as error:
+            _log.debug("Memory retrieval failed (non-fatal): %s", error)
+
+    payload_messages: list[dict[str, Any]] = [{"role": "system", "content": build_system_prompt(persona, request.mode, memory_context=memory_context)}]
+
+    # 会话滚动摘要注入：当历史消息超过 12 条时，注入摘要替代硬截断
+    if session_summary_text and len(chat_messages) > 12:
+        payload_messages.append({
+            "role": "system",
+            "content": f"<PreviousConversationSummary>\n{session_summary_text}\n</PreviousConversationSummary>"
+        })
+
     payload_messages.extend(
         {"role": message.role, "content": message.content}
         for message in chat_messages[-12:]
@@ -1183,6 +1576,7 @@ async def stream_chat(
     yield sse("status", {"phase": "connecting", "provider": provider.name, "model": initial_payload["model"]})
     for voice_event in voice_stream.startup_events():
         yield voice_event
+    executed_tool_history: list[ExecutedToolCall] = []
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(None, connect=20.0, read=None)) as client:
             final_turn: ModelTurn | None = None
@@ -1234,7 +1628,7 @@ async def stream_chat(
                         thinking_log.append(tool_event_log_line(started_payload))
                         yield sse("tool", started_payload)
 
-                        executed = await execute_model_tool_call(call)
+                        executed = await execute_model_tool_call(call, fallback_user_request=last_user_request)
                         executed_calls.append(executed)
                         completed_payload = tool_event_payload(
                             call,
@@ -1249,6 +1643,7 @@ async def stream_chat(
                         thinking_log.append(tool_event_log_line(completed_payload))
                         yield sse("tool", completed_payload)
 
+                    executed_tool_history.extend(executed_calls)
                     append_tool_messages(payload_messages, turn, executed_calls)
                     continue
 
@@ -1265,17 +1660,50 @@ async def stream_chat(
             ):
                 yield output_event
     except httpx.ConnectError as error:
-        voice_stream.cancel()
-        yield sse("error", {"message": f"连接模型服务失败：{error}"})
-        return
+        fallback_text = build_tool_execution_fallback_response(
+            executed_tool_history,
+            f"连接模型服务失败：{error}",
+        )
+        if fallback_text:
+            async for output_event in _emit_generated_events(
+                state.accept_content(fallback_text),
+                voice_stream=voice_stream,
+            ):
+                yield output_event
+        else:
+            voice_stream.cancel()
+            yield sse("error", {"message": f"连接模型服务失败：{error}"})
+            return
     except httpx.HTTPError as error:
-        voice_stream.cancel()
-        yield sse("error", {"message": f"模型请求失败：{error}"})
-        return
+        fallback_text = build_tool_execution_fallback_response(
+            executed_tool_history,
+            f"模型请求失败：{error}",
+        )
+        if fallback_text:
+            async for output_event in _emit_generated_events(
+                state.accept_content(fallback_text),
+                voice_stream=voice_stream,
+            ):
+                yield output_event
+        else:
+            voice_stream.cancel()
+            yield sse("error", {"message": f"模型请求失败：{error}"})
+            return
     except Exception as error:
-        voice_stream.cancel()
-        yield sse("error", {"message": str(error) or error.__class__.__name__})
-        return
+        fallback_text = build_tool_execution_fallback_response(
+            executed_tool_history,
+            str(error) or error.__class__.__name__,
+        )
+        if fallback_text:
+            async for output_event in _emit_generated_events(
+                state.accept_content(fallback_text),
+                voice_stream=voice_stream,
+            ):
+                yield output_event
+        else:
+            voice_stream.cancel()
+            yield sse("error", {"message": str(error) or error.__class__.__name__})
+            return
 
     for voice_event in voice_stream.finish():
         yield voice_event
@@ -1296,6 +1724,44 @@ async def stream_chat(
         except Exception as error:
             yield sse("error", {"message": f"写入助手消息失败：{error}"})
             return
+
+    # 异步记忆提取入队
+    if storage is not None and stored_conversation_id is not None:
+        try:
+            from ._common import get_memory_tree
+            tree = get_memory_tree()
+            if tree is not None:
+                # 按批次提取记忆：仅在累计到 N 轮后入队 ingest
+                # AMADEUS_MEMORY_EXTRACT_INTERVAL=6 表示每 6 轮用户消息提取一次
+                extract_interval = int(os.getenv("AMADEUS_MEMORY_EXTRACT_INTERVAL", "6"))
+                # 从 SQLite 持久化消息统计用户消息数，不依赖请求携带的 messages 数量
+                # 这样即使移动端/外部 API 只发最近一条消息也能正确触发
+                user_msg_count = 0
+                try:
+                    from uuid import UUID as _UUID
+                    conv = await storage.get_conversation(
+                        user_id=DEFAULT_USER_ID,
+                        conversation_id=_UUID(str(stored_conversation_id)),
+                    )
+                    if conv and conv.get("messages"):
+                        user_msg_count = sum(
+                            1 for m in conv["messages"] if m.get("role") == "user"
+                        )
+                except Exception:
+                    # 降级：用请求中的消息数
+                    user_msg_count = sum(1 for m in chat_messages if m.role == "user")
+                if extract_interval > 0 and user_msg_count > 0 and user_msg_count % extract_interval == 0:
+                    await tree.enqueue_job(
+                        user_id=DEFAULT_USER_ID,
+                        job_type="ingest",
+                        conversation_id=str(stored_conversation_id),
+                        payload={
+                            "conversationId": str(stored_conversation_id),
+                            "extractWindow": extract_interval * 2,  # 处理最近 N*2 条消息
+                        },
+                    )
+        except Exception:
+            pass  # 记忆入队失败不影响聊天
 
     yield sse("done", {"text": state.displayed_buffer, "assistantVoice": assistant_voice})
 

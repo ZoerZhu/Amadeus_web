@@ -561,6 +561,12 @@ def register_builtin_tools() -> None:
                     "fileName": {"type": "string", "description": "输出文件名"},
                     "overwrite": {"type": "boolean", "description": "是否覆盖已存在文件，默认 false"},
                     "frontMatter": {"type": "boolean", "description": "是否生成 YAML front matter"},
+                    "llmWrite": {"type": "boolean", "description": "是否启用 LLM 高级写作，默认 true；失败时自动回退到结构化写作"},
+                    "writingMode": {
+                        "type": "string",
+                        "enum": ["auto", "llm", "advanced", "structured", "template"],
+                        "description": "写作模式。llm/advanced 会让模型根据资料生成自然段；structured/template 使用规则结构化输出",
+                    },
                 },
             },
             handler=doc_writer,

@@ -681,7 +681,6 @@ export const WorldLineDivergenceMeter = forwardRef<
     return () => {
       stopRunningAnimation();
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const labelValue = slots.join("");

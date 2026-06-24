@@ -39,6 +39,7 @@ body.desktop-assistant-active {
 .is-desktop-assistant .emotion-chip,
 .is-desktop-assistant .left-dock,
 .is-desktop-assistant .config-dock,
+.is-desktop-assistant .settings-page-overlay,
 .is-desktop-assistant .floating-conversation,
 .is-desktop-assistant .chat-edge-toggle,
 .is-desktop-assistant .chat-panel {

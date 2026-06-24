@@ -525,7 +525,7 @@ function analyzeCubism2Candidate(
   };
 }
 
-function synthesizeLooseModel(entries: Live2DFileEntry[], index: FileIndex): AnalyzedLive2DModel {
+function synthesizeLooseModel(entries: Live2DFileEntry[], _index: FileIndex): AnalyzedLive2DModel {
   const warnings = ["未找到 model.json/model3.json，已按目录内 moc/moc3、贴图、表情和动作文件生成临时 manifest。"];
   const moc3 = entries.find((entry) => /\.moc3$/i.test(entry.path));
   const moc2 = entries.find((entry) => /\.moc$/i.test(entry.path));
@@ -932,7 +932,7 @@ function resolveReference(ref: string, baseDir: string, index: FileIndex): strin
   return global?.path ?? "";
 }
 
-function findTexturePaths(entries: Live2DFileEntry[], baseDir: string): string[] {
+function findTexturePaths(entries: Live2DFileEntry[], _baseDir: string): string[] {
   const images = entries
     .filter((entry) => /\.(?:png|jpe?g|webp)$/i.test(entry.path))
     .sort((a, b) => naturalCompare(a.path, b.path));
@@ -1296,7 +1296,9 @@ async function deleteStoredFiles(modelId: string): Promise<void> {
 }
 
 function stripRuntimeFields(record: Live2DModelRecord): PersistedLive2DModelRecord {
-  const { modelUrl: _modelUrl, objectUrls: _objectUrls, ...persisted } = record;
+  const { modelUrl, objectUrls, ...persisted } = record;
+  void modelUrl;
+  void objectUrls;
   return persisted;
 }
 

@@ -23,6 +23,35 @@ def _decode_json(value: Any) -> dict[str, Any]:
     return {}
 
 
+def _mcp_server_key(server: dict[str, Any]) -> str:
+    name = str(server.get("name") or "").strip().lower()
+    if name:
+        return f"name:{name}"
+    if server.get("transport") == "http":
+        return f"http:{str(server.get('url') or '').strip().lower()}"
+    args = "\0".join(str(arg).strip() for arg in server.get("args", []) if str(arg).strip())
+    return f"stdio:{str(server.get('command') or '').strip().lower()}:{args}"
+
+
+def _clean_mcp_servers(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    seen: set[str] = set()
+    cleaned: list[dict[str, Any]] = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        server_id = str(item.get("id") or "")
+        if not server_id or server_id.startswith("draft-"):
+            continue
+        key = _mcp_server_key(item)
+        if key in seen:
+            continue
+        seen.add(key)
+        cleaned.append(item)
+    return cleaned
+
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -66,7 +95,8 @@ class SQLiteStorage:
     async def connect(self) -> None:
         if self.connection is not None:
             return
-        self.database_path.parent.mkdir(parents=True, exist_ok=True)
+        if str(self.database_path) != ":memory:":
+            self.database_path.parent.mkdir(parents=True, exist_ok=True)
         connection = sqlite3.connect(
             self.database_path,
             check_same_thread=False,
@@ -90,6 +120,19 @@ class SQLiteStorage:
         if self.connection is None:
             raise RuntimeError("SQLite storage is not connected.")
         return self.connection
+
+    async def run_in_thread(self, func, /, *args, **kwargs):
+        """Run a blocking callable against the SQLite connection in a worker thread.
+
+        The callable receives the connection as its first positional argument
+        when called without extra args; otherwise it is called with ``*args``.
+        Acquires the storage lock to serialize writes.
+        """
+        async with self._lock:
+            conn = self.require_connection()
+            if args or kwargs:
+                return await asyncio.to_thread(func, *args, **kwargs)
+            return await asyncio.to_thread(func, conn)
 
     async def init_schema(self) -> None:
         async with self._lock:
@@ -137,6 +180,250 @@ class SQLiteStorage:
 
             CREATE INDEX IF NOT EXISTS chat_messages_conversation_position_idx
                 ON chat_messages (conversation_id, position ASC);
+
+            -- ===== Memory System Tables =====
+
+            CREATE TABLE IF NOT EXISTS memory_nodes (
+                id              TEXT PRIMARY KEY,
+                user_id         TEXT NOT NULL,
+                parent_id       TEXT REFERENCES memory_nodes(id) ON DELETE CASCADE,
+                node_type       TEXT NOT NULL
+                                CHECK (node_type IN ('root', 'domain', 'topic', 'cluster', 'leaf')),
+                domain          TEXT NOT NULL DEFAULT '',
+                label           TEXT NOT NULL,
+                path            TEXT NOT NULL DEFAULT '',
+                depth           INTEGER NOT NULL DEFAULT 0,
+                summary         TEXT NOT NULL DEFAULT '',
+                full_content    TEXT NOT NULL DEFAULT '',
+                category        TEXT NOT NULL DEFAULT 'general'
+                                CHECK (category IN ('general','fact','decision','preference','summary','technical','task_state','tool_result')),
+                keywords        TEXT NOT NULL DEFAULT '[]',
+                project_id      TEXT,
+                conversation_id TEXT,
+                source_message_ids TEXT NOT NULL DEFAULT '[]',
+                source_summary  TEXT NOT NULL DEFAULT '',
+                importance      REAL NOT NULL DEFAULT 0.5,
+                confidence      REAL NOT NULL DEFAULT 0.7,
+                access_count    INTEGER NOT NULL DEFAULT 0,
+                leaf_count      INTEGER NOT NULL DEFAULT 0,
+                last_accessed_at TEXT,
+                created_at      TEXT NOT NULL,
+                updated_at      TEXT NOT NULL,
+                expires_at      TEXT,
+                is_active       INTEGER NOT NULL DEFAULT 1
+            );
+
+            CREATE INDEX IF NOT EXISTS memory_nodes_parent_idx
+                ON memory_nodes (user_id, parent_id, is_active);
+            CREATE INDEX IF NOT EXISTS memory_nodes_domain_idx
+                ON memory_nodes (user_id, domain, node_type, is_active);
+            CREATE INDEX IF NOT EXISTS memory_nodes_project_idx
+                ON memory_nodes (project_id, is_active) WHERE project_id IS NOT NULL;
+            CREATE INDEX IF NOT EXISTS memory_nodes_path_idx
+                ON memory_nodes (user_id, path);
+            CREATE INDEX IF NOT EXISTS memory_nodes_updated_idx
+                ON memory_nodes (user_id, updated_at DESC);
+
+            CREATE TABLE IF NOT EXISTS memory_edges (
+                parent_id       TEXT NOT NULL REFERENCES memory_nodes(id) ON DELETE CASCADE,
+                child_id        TEXT NOT NULL REFERENCES memory_nodes(id) ON DELETE CASCADE,
+                relation        TEXT NOT NULL DEFAULT 'contains'
+                                CHECK (relation IN ('contains','references','supersedes','conflicts_with')),
+                weight          REAL NOT NULL DEFAULT 1.0,
+                created_at      TEXT NOT NULL,
+                PRIMARY KEY (parent_id, child_id, relation)
+            );
+
+            CREATE TABLE IF NOT EXISTS memory_embedding_meta (
+                node_id         TEXT PRIMARY KEY REFERENCES memory_nodes(id) ON DELETE CASCADE,
+                vector_kind     TEXT NOT NULL CHECK (vector_kind IN ('node','leaf')),
+                embedding_model TEXT NOT NULL,
+                embedding_dim   INTEGER NOT NULL,
+                content_hash    TEXT NOT NULL DEFAULT '',
+                updated_at      TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS projects (
+                id          TEXT PRIMARY KEY,
+                user_id     TEXT NOT NULL,
+                name        TEXT NOT NULL,
+                description TEXT NOT NULL DEFAULT '',
+                workspace_path TEXT NOT NULL DEFAULT '',
+                color       TEXT NOT NULL DEFAULT '#8b5cf6',
+                created_at  TEXT NOT NULL,
+                updated_at  TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS projects_user_idx
+                ON projects (user_id, updated_at DESC);
+
+            CREATE TABLE IF NOT EXISTS conversation_projects (
+                conversation_id TEXT PRIMARY KEY
+                                REFERENCES conversations(id) ON DELETE CASCADE,
+                project_id      TEXT NOT NULL
+                                REFERENCES projects(id) ON DELETE CASCADE
+            );
+
+            CREATE TABLE IF NOT EXISTS memory_jobs (
+                id              TEXT PRIMARY KEY,
+                user_id         TEXT NOT NULL,
+                conversation_id TEXT,
+                job_type        TEXT NOT NULL
+                                CHECK (job_type IN ('ingest', 'summarize_node', 'reembed', 'merge', 'cleanup')),
+                status          TEXT NOT NULL DEFAULT 'pending'
+                                CHECK (status IN ('pending', 'running', 'done', 'failed')),
+                payload         TEXT NOT NULL DEFAULT '{}',
+                attempts        INTEGER NOT NULL DEFAULT 0,
+                last_error      TEXT NOT NULL DEFAULT '',
+                created_at      TEXT NOT NULL,
+                updated_at      TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS memory_jobs_status_idx
+                ON memory_jobs (status, updated_at ASC);
+
+            -- ===== Complex Agent / MCP / Skills Tables =====
+
+            CREATE TABLE IF NOT EXISTS agent_tasks (
+                id              TEXT PRIMARY KEY,
+                user_id         TEXT NOT NULL,
+                title           TEXT NOT NULL DEFAULT '',
+                prompt          TEXT NOT NULL DEFAULT '',
+                workspace_path  TEXT NOT NULL DEFAULT '',
+                conversation_id TEXT,
+                status          TEXT NOT NULL DEFAULT 'created'
+                                CHECK (status IN ('created','running','paused','cancelled','done','failed','rolled_back')),
+                active_skill_ids TEXT NOT NULL DEFAULT '[]',
+                settings_json   TEXT NOT NULL DEFAULT '{}',
+                budget_json     TEXT NOT NULL DEFAULT '{}',
+                error           TEXT NOT NULL DEFAULT '',
+                created_at      TEXT NOT NULL,
+                updated_at      TEXT NOT NULL,
+                finished_at     TEXT
+            );
+
+            CREATE INDEX IF NOT EXISTS agent_tasks_user_updated_idx
+                ON agent_tasks (user_id, updated_at DESC);
+            CREATE INDEX IF NOT EXISTS agent_tasks_conversation_idx
+                ON agent_tasks (conversation_id) WHERE conversation_id IS NOT NULL;
+
+            CREATE TABLE IF NOT EXISTS agent_task_events (
+                id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                task_id         TEXT NOT NULL REFERENCES agent_tasks(id) ON DELETE CASCADE,
+                seq             INTEGER NOT NULL,
+                kind            TEXT NOT NULL
+                                CHECK (kind IN ('status','plan','step','tool','mcp','browser','artifact','question','sampling','opencode_routing','error','done')),
+                role            TEXT NOT NULL DEFAULT '',
+                name            TEXT NOT NULL DEFAULT '',
+                status          TEXT NOT NULL DEFAULT '',
+                summary         TEXT NOT NULL DEFAULT '',
+                payload         TEXT NOT NULL DEFAULT '{}',
+                artifact_ids    TEXT NOT NULL DEFAULT '[]',
+                created_at      TEXT NOT NULL,
+                UNIQUE (task_id, seq)
+            );
+
+            CREATE INDEX IF NOT EXISTS agent_task_events_task_seq_idx
+                ON agent_task_events (task_id, seq ASC);
+
+            CREATE TABLE IF NOT EXISTS agent_artifacts (
+                id              TEXT PRIMARY KEY,
+                task_id         TEXT NOT NULL REFERENCES agent_tasks(id) ON DELETE CASCADE,
+                kind            TEXT NOT NULL DEFAULT 'file'
+                                CHECK (kind IN ('file','screenshot','document','log','diff','snapshot')),
+                name            TEXT NOT NULL,
+                path            TEXT NOT NULL,
+                mime_type       TEXT NOT NULL DEFAULT 'application/octet-stream',
+                size_bytes      INTEGER NOT NULL DEFAULT 0,
+                description     TEXT NOT NULL DEFAULT '',
+                meta_json       TEXT NOT NULL DEFAULT '{}',
+                created_at      TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS agent_artifacts_task_idx
+                ON agent_artifacts (task_id, created_at ASC);
+
+            CREATE TABLE IF NOT EXISTS mcp_servers (
+                id              TEXT PRIMARY KEY,
+                user_id         TEXT NOT NULL,
+                name            TEXT NOT NULL,
+                enabled         INTEGER NOT NULL DEFAULT 1,
+                transport       TEXT NOT NULL DEFAULT 'stdio'
+                                CHECK (transport IN ('stdio','http')),
+                command         TEXT NOT NULL DEFAULT '',
+                args_json       TEXT NOT NULL DEFAULT '[]',
+                cwd             TEXT NOT NULL DEFAULT '',
+                env_json        TEXT NOT NULL DEFAULT '{}',
+                url             TEXT NOT NULL DEFAULT '',
+                headers_json    TEXT NOT NULL DEFAULT '{}',
+                auth_type       TEXT NOT NULL DEFAULT 'none'
+                                CHECK (auth_type IN ('none','bearer','api_key')),
+                auth_token      TEXT NOT NULL DEFAULT '',
+                allowed_tools_json   TEXT NOT NULL DEFAULT '[]',
+                allowed_resources_json TEXT NOT NULL DEFAULT '[]',
+                trusted         INTEGER NOT NULL DEFAULT 0,
+                timeout_seconds INTEGER NOT NULL DEFAULT 30,
+                created_at      TEXT NOT NULL,
+                updated_at      TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS mcp_servers_user_idx
+                ON mcp_servers (user_id, updated_at DESC);
+
+            CREATE TABLE IF NOT EXISTS skill_packages (
+                id              TEXT PRIMARY KEY,
+                user_id         TEXT NOT NULL,
+                name            TEXT NOT NULL,
+                version         TEXT NOT NULL DEFAULT '0.1.0',
+                enabled         INTEGER NOT NULL DEFAULT 1,
+                source          TEXT NOT NULL DEFAULT 'local'
+                                CHECK (source IN ('zip','git','local')),
+                path            TEXT NOT NULL,
+                description     TEXT NOT NULL DEFAULT '',
+                triggers_json   TEXT NOT NULL DEFAULT '[]',
+                required_mcp_servers_json TEXT NOT NULL DEFAULT '[]',
+                tool_allowlist_json TEXT NOT NULL DEFAULT '[]',
+                roles_json      TEXT NOT NULL DEFAULT '[]',
+                budgets_json    TEXT NOT NULL DEFAULT '{}',
+                manifest_json   TEXT NOT NULL DEFAULT '{}',
+                created_at      TEXT NOT NULL,
+                updated_at      TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS skill_packages_user_idx
+                ON skill_packages (user_id, updated_at DESC);
+
+            CREATE TABLE IF NOT EXISTS agent_file_snapshots (
+                id              TEXT PRIMARY KEY,
+                task_id         TEXT NOT NULL REFERENCES agent_tasks(id) ON DELETE CASCADE,
+                path            TEXT NOT NULL,
+                backup_path     TEXT NOT NULL,
+                size_bytes      INTEGER NOT NULL DEFAULT 0,
+                sha256          TEXT NOT NULL DEFAULT '',
+                created_at      TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS agent_file_snapshots_task_idx
+                ON agent_file_snapshots (task_id, created_at ASC);
+            CREATE INDEX IF NOT EXISTS agent_file_snapshots_path_idx
+                ON agent_file_snapshots (task_id, path);
+
+            CREATE TABLE IF NOT EXISTS agent_permission_requests (
+                id              TEXT PRIMARY KEY,
+                task_id         TEXT NOT NULL REFERENCES agent_tasks(id) ON DELETE CASCADE,
+                tool_name       TEXT NOT NULL,
+                arguments_preview TEXT NOT NULL DEFAULT '',
+                risk_level      TEXT NOT NULL DEFAULT 'confirm'
+                                CHECK (risk_level IN ('safe', 'confirm', 'dangerous')),
+                status          TEXT NOT NULL DEFAULT 'pending'
+                                CHECK (status IN ('pending', 'approved', 'rejected', 'timeout')),
+                reason          TEXT NOT NULL DEFAULT '',
+                created_at      TEXT NOT NULL,
+                resolved_at     TEXT
+            );
+
+            CREATE INDEX IF NOT EXISTS agent_permission_requests_task_idx
+                ON agent_permission_requests (task_id, status, created_at);
             """
         )
         app_settings_columns = {
@@ -149,12 +436,43 @@ class SQLiteStorage:
             conn.execute("ALTER TABLE app_settings ADD COLUMN speech_input_settings TEXT NOT NULL DEFAULT '{}'")
         if "desktop_assistant_settings" not in app_settings_columns:
             conn.execute("ALTER TABLE app_settings ADD COLUMN desktop_assistant_settings TEXT NOT NULL DEFAULT '{}'")
+        if "agent_settings" not in app_settings_columns:
+            conn.execute("ALTER TABLE app_settings ADD COLUMN agent_settings TEXT NOT NULL DEFAULT '{}'")
+        if "mcp_servers_json" not in app_settings_columns:
+            conn.execute("ALTER TABLE app_settings ADD COLUMN mcp_servers_json TEXT NOT NULL DEFAULT '[]'")
         chat_message_columns = {
             row["name"]
             for row in conn.execute("PRAGMA table_info(chat_messages)").fetchall()
         }
         if "assistant_voice" not in chat_message_columns:
             conn.execute("ALTER TABLE chat_messages ADD COLUMN assistant_voice TEXT NOT NULL DEFAULT '{}'")
+
+        # ----- Memory: FTS5 + sqlite-vec -----
+        conn.execute(
+            """
+            CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts
+                USING fts5(
+                    node_id UNINDEXED,
+                    node_type UNINDEXED,
+                    path,
+                    label,
+                    summary,
+                    full_content,
+                    keywords,
+                    tokenize = 'unicode61'
+                )
+            """
+        )
+        try:
+            from .memory.vector_store import ensure_vec_tables, load_vec_extension
+
+            load_vec_extension(conn)
+            ensure_vec_tables(conn)
+        except Exception:
+            import traceback
+
+            traceback.print_exc()
+            # sqlite-vec 不可用时记忆系统降级为纯 FTS
 
     async def get_settings(self, user_id: str) -> dict[str, Any] | None:
         async with self._lock:
@@ -164,7 +482,7 @@ class SQLiteStorage:
         conn = self.require_connection()
         row = conn.execute(
             """
-            SELECT model_settings, vision_settings, speech_input_settings, voice_settings, desktop_assistant_settings, mode, updated_at
+            SELECT model_settings, vision_settings, speech_input_settings, voice_settings, desktop_assistant_settings, agent_settings, mcp_servers_json, mode, updated_at
             FROM app_settings
             WHERE user_id = ?
             """,
@@ -178,6 +496,8 @@ class SQLiteStorage:
             "speechInput": _decode_json(row["speech_input_settings"]),
             "voice": _decode_json(row["voice_settings"]),
             "desktopAssistant": _decode_json(row["desktop_assistant_settings"]),
+            "agent": _decode_json(row["agent_settings"]) if "agent_settings" in row.keys() else {},
+            "mcpServers": _clean_mcp_servers(_decode_json(row["mcp_servers_json"]) if "mcp_servers_json" in row.keys() else []),
             "mode": row["mode"],
             "updatedAt": row["updated_at"],
         }
@@ -192,6 +512,8 @@ class SQLiteStorage:
         voice: dict[str, Any],
         desktop_assistant: dict[str, Any],
         mode: str,
+        agent: dict[str, Any] | None = None,
+        mcp_servers: list[dict[str, Any]] | None = None,
     ) -> None:
         async with self._lock:
             await asyncio.to_thread(
@@ -203,6 +525,8 @@ class SQLiteStorage:
                 voice,
                 desktop_assistant,
                 mode,
+                agent,
+                mcp_servers,
             )
 
     def _save_settings_sync(
@@ -214,18 +538,31 @@ class SQLiteStorage:
         voice: dict[str, Any],
         desktop_assistant: dict[str, Any],
         mode: str,
+        agent: dict[str, Any] | None,
+        mcp_servers: list[dict[str, Any]] | None,
     ) -> None:
         conn = self.require_connection()
+        # Read existing agent/mcp values to preserve them if not provided
+        existing = conn.execute(
+            "SELECT agent_settings, mcp_servers_json FROM app_settings WHERE user_id = ?",
+            (user_id,),
+        ).fetchone()
+        existing_agent = _decode_json(existing["agent_settings"]) if existing else {}
+        existing_mcp = _clean_mcp_servers(_decode_json(existing["mcp_servers_json"]) if existing else [])
+        agent_value = agent if agent is not None else existing_agent
+        mcp_value = _clean_mcp_servers(mcp_servers) if mcp_servers is not None else existing_mcp
         conn.execute(
             """
-            INSERT INTO app_settings (user_id, model_settings, vision_settings, speech_input_settings, voice_settings, desktop_assistant_settings, mode, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO app_settings (user_id, model_settings, vision_settings, speech_input_settings, voice_settings, desktop_assistant_settings, agent_settings, mcp_servers_json, mode, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(user_id) DO UPDATE SET
                 model_settings = excluded.model_settings,
                 vision_settings = excluded.vision_settings,
                 speech_input_settings = excluded.speech_input_settings,
                 voice_settings = excluded.voice_settings,
                 desktop_assistant_settings = excluded.desktop_assistant_settings,
+                agent_settings = excluded.agent_settings,
+                mcp_servers_json = excluded.mcp_servers_json,
                 mode = excluded.mode,
                 updated_at = excluded.updated_at
             """,
@@ -236,6 +573,8 @@ class SQLiteStorage:
                 json.dumps(speech_input, ensure_ascii=False),
                 json.dumps(voice, ensure_ascii=False),
                 json.dumps(desktop_assistant, ensure_ascii=False),
+                json.dumps(agent_value, ensure_ascii=False),
+                json.dumps(mcp_value, ensure_ascii=False),
                 mode,
                 _now_iso(),
             ),

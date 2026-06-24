@@ -1,4 +1,4 @@
-﻿import type { ReactNode } from "react";
+import type { ReactNode } from "react";
 import type {
   ApiChatMessage,
   AssistantVoiceInfo,
@@ -8,6 +8,7 @@ import type {
   CodeTaskMobileViewSnapshot,
   CodeTaskQuestionItem,
   DesktopAssistantSettings,
+  McpServerConfig,
   ModelSettings,
   StoredSettings,
   ToolTraceEvent,
@@ -17,10 +18,11 @@ import type {
   VisionSettings,
   VoiceSettings
 } from "../types";
+import { normalizeAgentSettings } from "../agentDefaults";
+import { PERSONA_ID } from "../config";
+
 const STORAGE_KEY = "amadeus-web-settings-v1";
-const PERSONA_ID = "kurisu_amadeus";
 const LEFT_SIDEBAR_WIDTH = 372;
-const SETTINGS_SIDEBAR_WIDTH = 388;
 const PANEL_GAP = 14;
 const EDGE_MARGIN = 18;
 const CHAT_MIN_WIDTH = 340;
@@ -154,7 +156,6 @@ const ACCEPTED_UPLOAD_TYPES = [
   "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 ].join(",");
 
-type ConfigSection = "profile" | "model" | "vision" | "speechInput" | "voice" | "live2d" | "interface";
 type AudioQueueItem = {
   url: string;
   assistantId?: string;
@@ -172,7 +173,7 @@ type MarkdownBlock =
   | { type: "heading"; level: number; text: string }
   | { type: "orderedList" | "unorderedList"; items: string[] }
   | { type: "code"; text: string };
-type RightPanelTab = "chat" | "tasks";
+type RightPanelTab = "chat" | "tasks" | "agent";
 type CodeTaskMessageKind =
   | "user"
   | "assistant"
@@ -278,7 +279,9 @@ function loadStoredSettings(): StoredSettings {
       speechInput: normalizeSpeechInputSettings(parsed.speechInput),
       voice: { ...DEFAULT_VOICE_SETTINGS, ...(parsed.voice ?? {}) },
       desktopAssistant: normalizeDesktopAssistantSettings(parsed.desktopAssistant),
-      mode: parsed.mode === "thinking" ? "thinking" : "fast"
+      mode: parsed.mode === "thinking" ? "thinking" : "fast",
+      agent: normalizeAgentSettings(parsed.agent),
+      mcpServers: normalizeMcpServersForStorage(parsed.mcpServers)
     };
   } catch {
     return {
@@ -287,9 +290,51 @@ function loadStoredSettings(): StoredSettings {
       speechInput: DEFAULT_SPEECH_INPUT_SETTINGS,
       voice: DEFAULT_VOICE_SETTINGS,
       desktopAssistant: DEFAULT_DESKTOP_ASSISTANT_SETTINGS,
-      mode: "fast"
+      mode: "fast",
+      agent: normalizeAgentSettings(),
+      mcpServers: []
     };
   }
+}
+
+function isPersistableMcpServer(value: unknown): value is McpServerConfig {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+  const server = value as Partial<McpServerConfig>;
+  return Boolean(server.id && !server.id.startsWith("draft-"));
+}
+
+function mcpServerConfigKey(server: McpServerConfig): string {
+  const name = String(server.name ?? "").trim().toLowerCase();
+  if (name) {
+    return `name:${name}`;
+  }
+  if (server.transport === "http") {
+    return `http:${String(server.url ?? "").trim().toLowerCase()}`;
+  }
+  const args = Array.isArray(server.args) ? server.args : [];
+  return `stdio:${String(server.command ?? "").trim().toLowerCase()}:${args.map((arg) => String(arg).trim()).join("\u0000")}`;
+}
+
+function normalizeMcpServersForStorage(value: unknown): McpServerConfig[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+  const seen = new Set<string>();
+  const servers: McpServerConfig[] = [];
+  for (const item of value) {
+    if (!isPersistableMcpServer(item)) {
+      continue;
+    }
+    const key = mcpServerConfigKey(item);
+    if (seen.has(key)) {
+      continue;
+    }
+    seen.add(key);
+    servers.push(item);
+  }
+  return servers;
 }
 
 function toApiMessages(messages: ChatMessage[]): ApiChatMessage[] {
@@ -1490,23 +1535,18 @@ function cleanCodeTaskFinalAnswer(text: string): string {
   return normalized.replace(/\n{3,}/g, "\n\n").trim();
 }
 
-function getLeftOccupiedWidth(menuOpen: boolean, configOpen: boolean): number {
+function getLeftOccupiedWidth(menuOpen: boolean): number {
   if (!menuOpen) {
     return EDGE_MARGIN;
   }
-  return (
-    EDGE_MARGIN +
-    LEFT_SIDEBAR_WIDTH +
-    (configOpen ? PANEL_GAP + SETTINGS_SIDEBAR_WIDTH : 0) +
-    PANEL_GAP
-  );
+  return EDGE_MARGIN + LEFT_SIDEBAR_WIDTH + PANEL_GAP;
 }
 
-function getChatMaxWidth(menuOpen: boolean, configOpen: boolean): number {
+function getChatMaxWidth(menuOpen: boolean): number {
   if (typeof window === "undefined") {
     return CHAT_MAX_WIDTH;
   }
-  const available = window.innerWidth - getLeftOccupiedWidth(menuOpen, configOpen) - EDGE_MARGIN;
+  const available = window.innerWidth - getLeftOccupiedWidth(menuOpen) - EDGE_MARGIN;
   return clamp(available, CHAT_MIN_WIDTH, CHAT_MAX_WIDTH);
 }
 
@@ -1562,6 +1602,7 @@ export {
   normalizeAssistantVoice,
   normalizeDesktopAssistantSettings,
   normalizeLive2dEmotion,
+  normalizeMcpServersForStorage,
   normalizeMessageContent,
   normalizeSpeechInputSettings,
   normalizeThinkingText,
@@ -1582,7 +1623,6 @@ export type {
   CodeTaskPhase,
   CodeTaskQuestionData,
   CodeTaskRecord,
-  ConfigSection,
   RightPanelTab,
   ToolResultLink
 };

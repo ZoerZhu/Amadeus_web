@@ -81,6 +81,8 @@ export interface StoredSettings {
   voice: VoiceSettings;
   desktopAssistant: DesktopAssistantSettings;
   mode: ChatMode;
+  agent?: AgentSettings;
+  mcpServers?: McpServerConfig[];
   updatedAt?: string;
 }
 
@@ -238,6 +240,7 @@ export type StreamEvent =
   | { event: "audio"; payload: { url: string; index?: number; text?: string; syncText?: boolean } }
   | { event: "voice_error"; payload: { message: string; index?: number } }
   | { event: "error"; payload: { message: string } }
+  | { event: "complex_task"; payload: { taskId: string; title: string; reason: string; skillIds: string[] } }
   | { event: "done"; payload: { text: string; assistantVoice?: AssistantVoiceInfo } };
 
 export interface CodeTaskStreamRequest {
@@ -391,3 +394,346 @@ export type TaskSummaryVoiceEvent =
   | { event: "voice_error"; payload: { message: string; index?: number } }
   | { event: "error"; payload: { message: string } }
   | { event: "done"; payload: { speechText: string } };
+
+// ---------------------------------------------------------------------------
+// Complex agent / MCP / skills subsystem
+// ---------------------------------------------------------------------------
+
+export type RoutingMatchType = "keyword" | "regex";
+export type RoutingDecisionMethod = "force_allow" | "force_deny" | "rule" | "llm_rejudge";
+
+export interface OpencodeRoutingRule {
+  id: string;
+  name: string;
+  weight: number;
+  keywords: string[];
+  matchType: RoutingMatchType;
+  description: string;
+}
+
+export interface OpencodeRoutingConfig {
+  enabled: boolean;
+  allowThreshold: number;
+  ambiguousThreshold: number;
+  allowLlmRejudge: boolean;
+  forceAllowKeywords: string[];
+  forceDenyKeywords: string[];
+  rules: OpencodeRoutingRule[];
+}
+
+export interface AgentSettings {
+  enabled: boolean;
+  trustMode: boolean;
+  defaultWorkspace: string;
+  maxRounds: number;
+  maxToolCalls: number;
+  maxRuntimeSeconds: number;
+  maxSamplingDepth: number;
+  artifactRoot: string;
+  rollbackEnabled: boolean;
+  browserEnabled: boolean;
+  opencodeEnabled: boolean;
+  opencodeRouting: OpencodeRoutingConfig;
+}
+
+export type McpTransport = "stdio" | "http";
+export type McpAuthType = "none" | "bearer" | "api_key";
+
+export interface McpServerConfig {
+  id: string;
+  name: string;
+  enabled: boolean;
+  transport: McpTransport;
+  command: string;
+  args: string[];
+  cwd: string;
+  env: Record<string, string>;
+  url: string;
+  headers: Record<string, string>;
+  authType: McpAuthType;
+  authToken: string;
+  allowedTools: string[];
+  allowedResources: string[];
+  trusted: boolean;
+  timeoutSeconds: number;
+  connected?: boolean;
+}
+
+export type SkillSource = "zip" | "git" | "local";
+
+export interface SkillPackageInfo {
+  id: string;
+  name: string;
+  version: string;
+  enabled: boolean;
+  source: SkillSource;
+  path: string;
+  description: string;
+  triggers: string[];
+  requiredMcpServers: string[];
+  toolAllowlist: string[];
+  roles: string[];
+  budgets: Record<string, unknown>;
+  manifest?: Record<string, unknown>;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
+export type AgentTaskStatus =
+  | "created"
+  | "running"
+  | "paused"
+  | "cancelled"
+  | "done"
+  | "failed"
+  | "rolled_back";
+
+export type AgentTaskControlAction = "pause" | "resume" | "cancel" | "rollback";
+
+export type AgentEventKind =
+  | "status"
+  | "plan"
+  | "step"
+  | "tool"
+  | "mcp"
+  | "browser"
+  | "artifact"
+  | "question"
+  | "sampling"
+  | "opencode_routing"
+  | "error"
+  | "done";
+
+export interface AgentTaskBudget {
+  maxRounds: number;
+  maxToolCalls: number;
+  maxRuntimeSeconds: number;
+  maxSamplingDepth: number;
+  rounds: number;
+  toolCalls: number;
+  samplingDepth: number;
+  elapsedSeconds: number;
+  remainingRounds: number;
+  remainingToolCalls: number;
+  remainingSeconds: number;
+}
+
+export interface AgentTaskSummary {
+  id: string;
+  userId?: string;
+  title: string;
+  prompt: string;
+  status: AgentTaskStatus;
+  workspacePath: string;
+  conversationId: string | null;
+  activeSkillIds: string[];
+  createdAt: string;
+  updatedAt: string;
+  finishedAt: string | null;
+  error: string;
+  budget: AgentTaskBudget | Record<string, unknown>;
+  artifactCount?: number;
+  eventCount?: number;
+  settings?: Record<string, unknown>;
+}
+
+export type AgentArtifactKind =
+  | "file"
+  | "screenshot"
+  | "document"
+  | "log"
+  | "diff"
+  | "snapshot";
+
+export interface AgentArtifact {
+  id: string;
+  taskId: string;
+  kind: AgentArtifactKind;
+  name: string;
+  path: string;
+  mimeType: string;
+  sizeBytes: number;
+  description: string;
+  meta: Record<string, unknown>;
+  createdAt: string;
+}
+
+export interface AgentTaskEvent {
+  taskId: string;
+  seq: number;
+  kind: AgentEventKind;
+  role: string;
+  name: string;
+  status: string;
+  summary: string;
+  payload: Record<string, unknown>;
+  artifactIds: string[];
+  timestamp: string;
+}
+
+export interface AgentTaskDetail {
+  task: AgentTaskSummary;
+  events: AgentTaskEvent[];
+  artifacts: AgentArtifact[];
+}
+
+export interface AgentTaskCreateRequest {
+  title?: string;
+  prompt: string;
+  workspacePath?: string;
+  conversationId?: string | null;
+  skillIds?: string[];
+  model?: Record<string, unknown>;
+  mode?: string;
+  trustMode?: boolean | null;
+  maxRounds?: number | null;
+  maxToolCalls?: number | null;
+  maxRuntimeSeconds?: number | null;
+}
+
+export type PermissionRiskLevel = "safe" | "confirm" | "dangerous";
+export type PermissionRequestStatus =
+  | "pending"
+  | "approved"
+  | "rejected"
+  | "timeout";
+
+export interface PermissionRequest {
+  id: string;
+  taskId: string;
+  toolName: string;
+  argumentsPreview: string;
+  riskLevel: PermissionRiskLevel;
+  status: PermissionRequestStatus;
+  reason: string;
+  createdAt: string;
+  resolvedAt: string | null;
+}
+
+export interface McpPreset {
+  id: string;
+  name: string;
+  description: string;
+  transport: "stdio" | "http";
+  url?: string;
+  command?: string;
+  args?: string[];
+  cwd?: string;
+  env?: Record<string, string>;
+  authType?: string;
+  headers?: Record<string, string>;
+  trusted: boolean;
+  allowedTools: string[];
+  allowedResources: string[];
+  enabled: boolean;
+  timeoutSeconds: number;
+  _preset?: boolean;
+  _category?: string;
+}
+
+export interface McpCapability {
+  tools: Array<{ name: string; description?: string }>;
+  resources: Array<{ uri: string; name?: string; description?: string }>;
+  prompts: Array<{ name: string; description?: string }>;
+  lastConnectedAt: string | null;
+  lastError: string | null;
+}
+
+export interface BuiltinSkillInfo {
+  id: string;
+  name: string;
+  version: string;
+  description: string;
+  triggers: string[];
+  roles: string[];
+  toolAllowlist: string[];
+  mcpServers: string[];
+  builtin: boolean;
+}
+
+export interface TaskLedger {
+  currentStepIndex?: number;
+  completedSteps?: number[];
+  openQuestions?: string[];
+  risks?: string[];
+}
+
+// ---------------------------------------------------------------------------
+// Memory subsystem
+// ---------------------------------------------------------------------------
+
+export type MemoryNodeType = "root" | "domain" | "topic" | "cluster" | "leaf";
+export type MemoryDomain =
+  | "daily_chat"
+  | "task"
+  | "code"
+  | "environment"
+  | "creative"
+  | "knowledge";
+export type MemoryCategory =
+  | "general"
+  | "fact"
+  | "decision"
+  | "preference"
+  | "summary"
+  | "technical"
+  | "task_state"
+  | "tool_result";
+
+export interface MemoryNode {
+  id: string;
+  parentId: string | null;
+  nodeType: MemoryNodeType;
+  domain: string;
+  label: string;
+  path: string;
+  depth: number;
+  summary: string;
+  fullContent: string;
+  category: MemoryCategory;
+  keywords: string[];
+  projectId: string | null;
+  conversationId: string | null;
+  sourceMessageIds: string[];
+  sourceSummary: string;
+  importance: number;
+  confidence: number;
+  accessCount: number;
+  leafCount: number;
+  lastAccessedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+  expiresAt: string | null;
+  isActive: boolean;
+  children?: MemoryNode[];
+}
+
+export interface MemoryTreeResponse {
+  tree: MemoryNode[];
+  nodes: MemoryNode[];
+}
+
+export interface MemorySearchResult {
+  selectedPaths: MemoryNode[][];
+  topicNodes: MemoryNode[];
+  leafNodes: MemoryNode[];
+  contextText: string;
+}
+
+export interface MemoryIngestRequest {
+  text: string;
+  domain: MemoryDomain;
+  title?: string;
+  projectId?: string | null;
+  conversationId?: string | null;
+}
+
+export interface MemoryProject {
+  id: string;
+  name: string;
+  description: string;
+  workspacePath: string;
+  color: string;
+  createdAt: string;
+  updatedAt: string;
+}

@@ -2,20 +2,21 @@ import { PointerEvent as ReactPointerEvent, useEffect, useMemo, useRef, useState
 import type { ChangeEvent, CSSProperties, DragEvent as ReactDragEvent, FormEvent } from "react";
 import {
   Bell,
+  Boxes,
   Camera,
-  ChevronLeft,
   ChevronRight,
   CircleStop,
+  Database,
   FolderOpen,
   KeyRound,
-  Menu,
   MessageCircle,
   Mic,
   Mic2,
+  Package,
   PanelRightClose,
   PanelRightOpen,
   Plus,
-  Play,
+  Plug,
   Send,
   SlidersHorizontal,
   RotateCcw,
@@ -29,15 +30,14 @@ import {
   createConversation,
   deleteConversation,
   fetchConversation,
+  fetchMcpServers,
   fetchProviders,
   fetchSettings,
+  fetchSkills,
   listConversations,
   observeDesktop,
-  publishCodeTaskMobileView,
   replyCodeTaskQuestion,
   saveSettings,
-  subscribeAllCodeTaskEvents,
-  subscribeCodeTaskEvents,
   streamCodeTask,
   streamChat,
   streamTaskSummaryVoice,
@@ -58,27 +58,32 @@ import {
   type Live2DModelRecord,
   type Live2DModelTransform
 } from "./agents/live2dImportAgent";
+import { normalizeAgentSettings } from "./agentDefaults";
 import { BootLoader } from "./components/BootLoader";
 import { ChatMessageBubble } from "./components/ChatMessageBubble";
-import { ConfigGroup } from "./components/ConfigGroup";
+import { AgentSettingsPanel } from "./components/AgentSettingsPanel";
+import { AgentTaskPanel } from "./components/AgentTaskPanel";
 import { LeftDock } from "./components/LeftDock";
 import { Live2DStage, type Live2DStageHandle } from "./components/Live2DStage";
 import { Live2DModelHistory, Live2DQuickControls } from "./components/Live2DControls";
+import { MemoryPanel } from "./components/MemoryPanel";
+import { SettingsPage, type SettingsPageSection, type SettingsSectionKey } from "./components/SettingsPage";
 import { TaskPanel } from "./components/TaskPanel";
 import { TopBar } from "./components/TopBar";
 import { UploadAttachmentTray, UploadPopover } from "./components/UploadControls";
 import type {
-  ApiChatMessage,
+  AgentSettings,
   ChatMessage,
   ChatMode,
   CodeTaskEvent,
   ConversationDetail,
   ConversationSummary,
   DesktopAssistantSettings,
+  McpServerConfig,
   ModelSettings,
   ProviderPreset,
+  SkillPackageInfo,
   SpeechInputSettings,
-  StoredSettings,
   StreamEvent,
   ChatAttachment,
   ToolTraceEvent,
@@ -96,18 +101,14 @@ import {
   CODE_TASK_MAX_DETAIL_TEXT,
   CODE_TASK_MAX_HISTORY,
   DEFAULT_CODE_TASK_WORKSPACE,
-  DEFAULT_DESKTOP_ASSISTANT_SETTINGS,
   DEFAULT_MODEL_SETTINGS,
   DEFAULT_SPEECH_INPUT_SETTINGS,
   DEFAULT_VISION_SETTINGS,
-  DEFAULT_VOICE_SETTINGS,
   EDGE_MARGIN,
   LIVE2D_ACTIVE_STORAGE_KEY,
   LIVE2D_IMPORT_INPUT_ID,
   LIVE2D_LOCK_STORAGE_KEY,
-  LEFT_SIDEBAR_WIDTH,
   MIN_BOOT_DURATION_MS,
-  PANEL_GAP,
   PERSONA_ID,
   STORAGE_KEY,
   appendLimitedCodeTaskText,
@@ -122,7 +123,6 @@ import {
   conversationToMarkdown,
   createId,
   downloadText,
-  formatMessageTime,
   getChatMaxWidth,
   limitCodeTaskText,
   loadStoredCodeTasks,
@@ -132,19 +132,16 @@ import {
   normalizeDesktopAssistantSettings,
   normalizeLive2dEmotion,
   normalizeMessageContent,
+  normalizeMcpServersForStorage,
   normalizeSpeechInputSettings,
-  normalizeThinkingText,
   sanitizeFilename,
   toApiMessages,
   toChatMessages,
   trimCodeTaskMessages,
   type AudioQueueItem,
   type CodeTaskMessage,
-  type CodeTaskMessageKind,
   type CodeTaskRecord,
-  type ConfigSection,
-  type RightPanelTab,
-  type ToolResultLink
+  type RightPanelTab
 } from "./app/appSupport";
 export default function App() {
   const stored = useMemo(loadStoredSettings, []);
@@ -154,7 +151,7 @@ export default function App() {
   }, []);
   const [providers, setProviders] = useState<ProviderPreset[]>([]);
   const [storageOnline, setStorageOnline] = useState(false);
-  const [storageError, setStorageError] = useState("");
+  const [, setStorageError] = useState("");
   const [conversations, setConversations] = useState<ConversationSummary[]>([]);
   const [currentConversationId, setCurrentConversationId] = useState<string | null>(null);
   const [modelSettings, setModelSettings] = useState<ModelSettings>(stored.model);
@@ -170,6 +167,7 @@ export default function App() {
   const [uploadPanelOpen, setUploadPanelOpen] = useState(false);
   const [menuOpen, setMenuOpen] = useState(false);
   const [configOpen, setConfigOpen] = useState(false);
+  const [settingsSection, setSettingsSection] = useState<SettingsSectionKey>("profile");
   const [chatOpen, setChatOpen] = useState(false);
   const [chatWidth, setChatWidth] = useState(430);
   const [rightPanelTab, setRightPanelTab] = useState<RightPanelTab>("chat");
@@ -182,15 +180,6 @@ export default function App() {
   const [codeTaskStatus, setCodeTaskStatus] = useState(storedCodeTasks[0]?.status ?? "idle");
   const [codeTaskMessages, setCodeTaskMessages] = useState<CodeTaskMessage[]>(storedCodeTasks[0]?.messages ?? []);
   const [codeTaskQuestionBusyIds, setCodeTaskQuestionBusyIds] = useState<string[]>([]);
-  const [openSections, setOpenSections] = useState<Record<ConfigSection, boolean>>({
-    profile: false,
-    model: false,
-    vision: false,
-    speechInput: false,
-    voice: false,
-    live2d: false,
-    interface: false
-  });
   const [status, setStatus] = useState("idle");
   const [currentEmotion, setCurrentEmotion] = useState("neutral");
   const [live2dModels, setLive2dModels] = useState<Live2DModelRecord[]>([DEFAULT_LIVE2D_MODEL]);
@@ -211,9 +200,18 @@ export default function App() {
   const [voiceRecording, setVoiceRecording] = useState(false);
   const [voiceRecordingSeconds, setVoiceRecordingSeconds] = useState(0);
   const [voiceInputLevels, setVoiceInputLevels] = useState<number[]>(Array.from({ length: 18 }, () => 0.24));
+  const [agentSettings, setAgentSettings] = useState<AgentSettings>(() => normalizeAgentSettings(stored.agent));
+  const [mcpServers, setMcpServers] = useState<McpServerConfig[]>(() =>
+    normalizeMcpServersForStorage(stored.mcpServers)
+  );
+  const [skills, setSkills] = useState<SkillPackageInfo[]>([]);
+  const [agentTaskId, setAgentTaskId] = useState<string | null>(null);
+  const [complexTaskByMessage, setComplexTaskByMessage] = useState<
+    Record<string, { taskId: string; title: string; reason: string; skillIds: string[] }>
+  >({});
   const [desktopAssistantMode, setDesktopAssistantMode] = useState(launchedAsDesktopAssistant);
   const [desktopAssistantExiting, setDesktopAssistantExiting] = useState(false);
-  const [desktopAssistantStatus, setDesktopAssistantStatus] = useState("待机");
+  const [, setDesktopAssistantStatus] = useState("待机");
   const [desktopSubtitleVisibleUntil, setDesktopSubtitleVisibleUntil] = useState(0);
   const [desktopCameraAvailable, setDesktopCameraAvailable] = useState(false);
   const [desktopCameraReason, setDesktopCameraReason] = useState("尚未检测摄像头");
@@ -298,6 +296,15 @@ export default function App() {
   const desktopMousePassthroughRef = useRef<boolean | null>(null);
   const desktopObservationBusyRef = useRef(false);
   const desktopAssistantLaunchInitializedRef = useRef(false);
+  const cleanupDesktopAssistantRuntimeRef = useRef<() => void>(() => undefined);
+  const createDesktopAssistantConversationRef = useRef<() => Promise<string | null>>(async () => null);
+  const ensureIncomingCodeTaskVisibleRef = useRef<(taskId: string, event: CodeTaskEvent) => boolean>(() => false);
+  const handleCodeTaskEventOnceRef = useRef<(event: CodeTaskEvent, taskId?: string | null) => void>(() => undefined);
+  const runDesktopAutoObservationRef = useRef<() => Promise<void>>(async () => undefined);
+  const scheduleMobileTaskViewPublishRef = useRef<(delayMs: number) => void>(() => undefined);
+  const startDesktopAssistantListeningRef = useRef<() => Promise<void>>(async () => undefined);
+  const stopAudioPlaybackRef = useRef<() => void>(() => undefined);
+  const stopDesktopAssistantListeningRef = useRef<() => void>(() => undefined);
 
   const selectedProvider = providers.find((provider) => provider.name === modelSettings.providerName);
   const desktopAssistantAvailable = Boolean(window.amadeusDesktop?.setDesktopAssistantMode);
@@ -328,20 +335,21 @@ export default function App() {
   const live2dLoadResolved = live2dReady || Boolean(live2dError);
   const loadingReady = minimumBootElapsed && live2dLoadResolved;
 
-  function speechInputSettingsForPersistence(): SpeechInputSettings {
+  const speechInputSettingsForPersistence = useMemo<SpeechInputSettings>(() => {
     if (speechInputSettings.providerName === DEFAULT_SPEECH_INPUT_SETTINGS.providerName && modelSettings.apiKey) {
       return { ...speechInputSettings, apiKey: "" };
     }
     return speechInputSettings;
-  }
+  }, [modelSettings.apiKey, speechInputSettings]);
 
-  function speechInputSettingsForRequest(): SpeechInputSettings {
-    const settings = normalizeSpeechInputSettings(speechInputSettingsForPersistence());
+  const speechInputSettingsForRequest = useMemo<SpeechInputSettings>(() => {
+    const settings = normalizeSpeechInputSettings(speechInputSettingsForPersistence);
     if (settings.providerName === DEFAULT_SPEECH_INPUT_SETTINGS.providerName) {
       return { ...settings, apiKey: modelSettings.apiKey || settings.apiKey };
     }
     return settings;
-  }
+  }, [modelSettings.apiKey, speechInputSettingsForPersistence]);
+  const persistedMcpServers = useMemo(() => normalizeMcpServersForStorage(mcpServers), [mcpServers]);
 
   function resizeComposerTextarea(element: HTMLTextAreaElement | null) {
     if (!element) {
@@ -360,6 +368,16 @@ export default function App() {
     setInput(event.target.value);
     resizeComposerTextarea(event.currentTarget);
   }
+
+  cleanupDesktopAssistantRuntimeRef.current = cleanupDesktopAssistantRuntime;
+  createDesktopAssistantConversationRef.current = createDesktopAssistantConversation;
+  ensureIncomingCodeTaskVisibleRef.current = ensureIncomingCodeTaskVisible;
+  handleCodeTaskEventOnceRef.current = handleCodeTaskEventOnce;
+  runDesktopAutoObservationRef.current = runDesktopAutoObservation;
+  scheduleMobileTaskViewPublishRef.current = scheduleMobileTaskViewPublish;
+  startDesktopAssistantListeningRef.current = startDesktopAssistantListening;
+  stopAudioPlaybackRef.current = stopAudioPlayback;
+  stopDesktopAssistantListeningRef.current = stopDesktopAssistantListening;
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -402,14 +420,17 @@ export default function App() {
     fetchProviders()
       .then((items) => {
         setProviders(items);
-        const current = items.find((provider) => provider.name === modelSettings.providerName);
-        if (current && (!modelSettings.baseUrl || !modelSettings.model)) {
-          setModelSettings((prev) => ({
+        setModelSettings((prev) => {
+          const current = items.find((provider) => provider.name === prev.providerName);
+          if (!current || prev.baseUrl || prev.model) {
+            return prev;
+          }
+          return {
             ...prev,
-            baseUrl: prev.baseUrl || current.baseUrl,
-            model: prev.model || current.defaultModel
-          }));
-        }
+            baseUrl: current.baseUrl,
+            model: current.defaultModel
+          };
+        });
       })
       .catch(() => setStatus("api offline"));
   }, []);
@@ -445,6 +466,22 @@ export default function App() {
             normalizeDesktopAssistantSettings({ ...prev, ...(remoteSettings.desktopAssistant ?? {}) })
           );
           setMode(remoteSettings.mode);
+          if (remoteSettings.agent) {
+            setAgentSettings((prev) => normalizeAgentSettings({ ...prev, ...remoteSettings.agent }));
+          }
+          if (remoteSettings.mcpServers) {
+            setMcpServers(normalizeMcpServersForStorage(remoteSettings.mcpServers));
+          }
+        }
+        // Load MCP servers and skills (live state includes connection status)
+        try {
+          const [servers, skillList] = await Promise.all([fetchMcpServers(), fetchSkills()]);
+          if (!cancelled) {
+            setMcpServers(normalizeMcpServersForStorage(servers));
+            setSkills(skillList);
+          }
+        } catch {
+          // non-fatal: agent subsystem may be offline
         }
         setConversations(conversationItems);
         if (conversationItems.length > 0) {
@@ -474,10 +511,12 @@ export default function App() {
       JSON.stringify({
         model: modelSettings,
         vision: visionSettings,
-        speechInput: speechInputSettingsForPersistence(),
+        speechInput: speechInputSettingsForPersistence,
         voice: voiceSettings,
         desktopAssistant: desktopAssistantSettings,
-        mode
+        mode,
+        agent: agentSettings,
+        mcpServers: persistedMcpServers
       })
     );
 
@@ -491,15 +530,17 @@ export default function App() {
       saveSettings({
         model: modelSettings,
         vision: visionSettings,
-        speechInput: speechInputSettingsForPersistence(),
+        speechInput: speechInputSettingsForPersistence,
         voice: voiceSettings,
         desktopAssistant: desktopAssistantSettings,
-        mode
+        mode,
+        agent: agentSettings,
+        mcpServers: persistedMcpServers
       }).catch((error) => {
         setStorageError(error instanceof Error ? error.message : "settings save failed");
       });
     }, 350);
-  }, [modelSettings, visionSettings, speechInputSettings, voiceSettings, desktopAssistantSettings, mode, storageOnline]);
+  }, [modelSettings, visionSettings, speechInputSettingsForPersistence, voiceSettings, desktopAssistantSettings, mode, agentSettings, persistedMcpServers, storageOnline]);
 
   useEffect(() => {
     const payload = codeTasks.slice(0, CODE_TASK_MAX_HISTORY);
@@ -540,7 +581,7 @@ export default function App() {
       }
       setDesktopAssistantExiting(false);
       setDesktopAssistantMode(false);
-      cleanupDesktopAssistantRuntime();
+      cleanupDesktopAssistantRuntimeRef.current();
     });
     return () => {
       unsubscribe?.();
@@ -552,7 +593,7 @@ export default function App() {
       return;
     }
     desktopAssistantLaunchInitializedRef.current = true;
-    stopAudioPlayback();
+    stopAudioPlaybackRef.current();
     abortRef.current?.abort();
     setMenuOpen(false);
     setConfigOpen(false);
@@ -565,21 +606,21 @@ export default function App() {
     }));
     setDesktopAssistantMode(true);
     setDesktopAssistantStatus("监听中");
-    void createDesktopAssistantConversation();
+    void createDesktopAssistantConversationRef.current();
     void refreshDesktopCameraAvailability();
   }, [launchedAsDesktopAssistant, storageOnline, voiceSettings.autoPlay]);
 
   useEffect(() => {
     if (!desktopAssistantMode || !desktopAssistantSettings.autoVoiceInputEnabled) {
-      stopDesktopAssistantListening();
+      stopDesktopAssistantListeningRef.current();
       if (desktopAssistantMode && !desktopAssistantSettings.autoVoiceInputEnabled && !voiceRecording && !voiceInputBusy) {
         setDesktopAssistantStatus("手动语音");
       }
       return;
     }
-    void startDesktopAssistantListening();
+    void startDesktopAssistantListeningRef.current();
     return () => {
-      stopDesktopAssistantListening();
+      stopDesktopAssistantListeningRef.current();
     };
   }, [
     desktopAssistantMode,
@@ -639,7 +680,7 @@ export default function App() {
     }
     const intervalMs = clamp(desktopAssistantSettings.screenshotIntervalSeconds, 5, 120) * 1000;
     desktopAutoScreenshotTimerRef.current = window.setInterval(() => {
-      void runDesktopAutoObservation();
+      void runDesktopAutoObservationRef.current();
     }, intervalMs);
     return () => {
       if (desktopAutoScreenshotTimerRef.current !== null) {
@@ -708,43 +749,8 @@ export default function App() {
   }, [codeTaskRunning]);
 
   useEffect(() => {
-    return subscribeAllCodeTaskEvents({
-      replay: false,
-      onEvent: (event) => {
-        const taskId = getCodeTaskEventTaskId(event);
-        if (!taskId) {
-          return;
-        }
-        if (!ensureIncomingCodeTaskVisible(taskId, event)) {
-          return;
-        }
-        handleCodeTaskEventOnce(event, taskId);
-      },
-      onError: (message) => {
-        if (rightPanelTab === "tasks") {
-          setCodeTaskStatus(message);
-        }
-      }
-    });
-  }, [activeCodeTaskId, rightPanelTab, activeCodeTask?.sessionId]);
-
-  useEffect(() => {
-    if (!activeCodeTaskId) {
-      return;
-    }
-    const taskId = activeCodeTaskId;
     handledCodeTaskEventKeysRef.current.clear();
-    return subscribeCodeTaskEvents({
-      taskId,
-      replay: false,
-      onEvent: (event) => handleCodeTaskEventOnce(event, taskId),
-      onError: (message) => {
-        if (rightPanelTab === "tasks") {
-          setCodeTaskStatus(message);
-        }
-      }
-    });
-  }, [activeCodeTaskId, rightPanelTab]);
+  }, [activeCodeTaskId]);
 
   useEffect(() => {
     if (!activeCodeTaskId) {
@@ -788,7 +794,7 @@ export default function App() {
     }
     pendingMobileTaskViewPublishRef.current = true;
     if (!codeTaskRunning || codeTaskStatus === "waiting_input" || codeTaskStatus === "error") {
-      scheduleMobileTaskViewPublish(120);
+      scheduleMobileTaskViewPublishRef.current(120);
     }
   }, [activeCodeTaskId, codeTaskMessages, codeTaskStatus, codeTaskWorkspace, codeTaskRunning]);
 
@@ -827,20 +833,20 @@ export default function App() {
       if (desktopDragFrameRef.current !== null) {
         window.cancelAnimationFrame(desktopDragFrameRef.current);
       }
-      stopAudioPlayback();
+      stopAudioPlaybackRef.current();
       cleanupVoiceRecordingResources();
-      stopDesktopAssistantListening();
+      stopDesktopAssistantListeningRef.current();
     };
   }, []);
 
   useEffect(() => {
     const clampChatWidth = () => {
-      setChatWidth((width) => clamp(width, CHAT_MIN_WIDTH, getChatMaxWidth(menuOpen, configOpen)));
+      setChatWidth((width) => clamp(width, CHAT_MIN_WIDTH, getChatMaxWidth(menuOpen)));
     };
     clampChatWidth();
     window.addEventListener("resize", clampChatWidth);
     return () => window.removeEventListener("resize", clampChatWidth);
-  }, [menuOpen, configOpen]);
+  }, [menuOpen]);
 
   useEffect(() => {
     floatingMessageRef.current?.scrollTo({ top: floatingMessageRef.current.scrollHeight, behavior: "smooth" });
@@ -886,10 +892,6 @@ export default function App() {
   function openConfigPanel() {
     setMenuOpen(true);
     setConfigOpen(true);
-  }
-
-  function toggleSection(section: ConfigSection) {
-    setOpenSections((prev) => ({ ...prev, [section]: !prev[section] }));
   }
 
   function toggleLive2DTransformLock() {
@@ -2280,7 +2282,7 @@ export default function App() {
         file,
         durationSeconds,
         model: modelSettings,
-        speechInput: speechInputSettingsForRequest()
+        speechInput: speechInputSettingsForRequest
       });
       const transcript = result.text.trim();
       const voiceInput: VoiceInputInfo = {
@@ -2620,6 +2622,17 @@ export default function App() {
       setStatus(`voice: ${event.payload.message}`);
       return;
     }
+    if (event.event === "complex_task") {
+      const { taskId, title, reason, skillIds } = event.payload;
+      setComplexTaskByMessage((prev) => ({
+        ...prev,
+        [assistantId]: { taskId, title, reason, skillIds }
+      }));
+      setAgentTaskId(taskId);
+      setRightPanelTab("agent");
+      setStatus(`agent: ${title}`);
+      return;
+    }
     if (event.event === "error") {
       appendAssistantDelta(assistantId, { content: `请求失败：${event.payload.message}` });
       finalizeAssistant(assistantId);
@@ -2907,11 +2920,8 @@ export default function App() {
     pendingMobileTaskViewPublishRef.current = false;
     if (mobileTaskViewFrameRef.current !== null) {
       window.cancelAnimationFrame(mobileTaskViewFrameRef.current);
-    }
-    mobileTaskViewFrameRef.current = window.requestAnimationFrame(() => {
       mobileTaskViewFrameRef.current = null;
-      publishCodeTaskMobileView(snapshot).catch(() => undefined);
-    });
+    }
   }
 
   function updateCodeTaskRecord(taskId: string, updater: (task: CodeTaskRecord) => CodeTaskRecord) {
@@ -3600,7 +3610,7 @@ export default function App() {
     document.documentElement.classList.add("is-chat-resizing");
 
     const move = (moveEvent: PointerEvent) => {
-      const maxWidth = getChatMaxWidth(menuOpen, configOpen);
+      const maxWidth = getChatMaxWidth(menuOpen);
       const nextWidth = window.innerWidth - moveEvent.clientX - EDGE_MARGIN;
       setChatWidth(clamp(nextWidth, CHAT_MIN_WIDTH, maxWidth));
     };
@@ -3620,21 +3630,487 @@ export default function App() {
     window.addEventListener("pointercancel", up);
   }
 
-  const settingsOffset = menuOpen ? EDGE_MARGIN + LEFT_SIDEBAR_WIDTH + PANEL_GAP : EDGE_MARGIN;
-  const chatMaxWidth = getChatMaxWidth(menuOpen, configOpen);
+  const chatMaxWidth = getChatMaxWidth(menuOpen);
   const clampedChatWidth = clamp(chatWidth, CHAT_MIN_WIDTH, chatMaxWidth);
   const currentConversation = conversations.find((conversation) => conversation.id === currentConversationId);
+  const settingsSections: SettingsPageSection[] = [
+    {
+      key: "profile",
+      label: "个人信息",
+      icon: <UserRound size={16} />,
+      content: (
+        <>
+          <label className="field">
+            <span>用户昵称</span>
+            <input value="用户" readOnly />
+          </label>
+          <label className="field">
+            <span>人格预设</span>
+            <input value="Amadeus 牧濑红莉栖" readOnly />
+          </label>
+        </>
+      )
+    },
+    {
+      key: "model",
+      label: "基础模型",
+      icon: <SlidersHorizontal size={16} />,
+      content: (
+        <>
+          <label className="field">
+            <span>Provider</span>
+            <select value={modelSettings.providerName} onChange={(event) => applyProvider(event.target.value)}>
+              {providers.map((provider) => (
+                <option key={provider.name} value={provider.name}>
+                  {provider.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="field">
+            <span>Base URL</span>
+            <input
+              value={modelSettings.baseUrl}
+              onChange={(event) => setModelSettings((prev) => ({ ...prev, baseUrl: event.target.value }))}
+            />
+          </label>
+          <label className="field">
+            <span>Model</span>
+            <input
+              value={modelSettings.model}
+              onChange={(event) => setModelSettings((prev) => ({ ...prev, model: event.target.value }))}
+            />
+          </label>
+          <label className="field">
+            <span>API Key</span>
+            <input
+              value={modelSettings.apiKey}
+              onChange={(event) => setModelSettings((prev) => ({ ...prev, apiKey: event.target.value }))}
+              type="password"
+              autoComplete="off"
+            />
+          </label>
+        </>
+      )
+    },
+    {
+      key: "vision",
+      label: "视觉",
+      icon: <Camera size={16} />,
+      content: (
+        <>
+          <label className="switch-row">
+            <span>视觉理解</span>
+            <input
+              checked={visionSettings.enabled}
+              onChange={(event) => setVisionSettings((prev) => ({ ...prev, enabled: event.target.checked }))}
+              type="checkbox"
+            />
+          </label>
+          <label className="switch-row">
+            <span>截图入口</span>
+            <input
+              checked={visionSettings.screenCaptureEnabled}
+              onChange={(event) =>
+                setVisionSettings((prev) => ({ ...prev, screenCaptureEnabled: event.target.checked }))
+              }
+              type="checkbox"
+            />
+          </label>
+          <label className="switch-row">
+            <span>远程视觉 API</span>
+            <input
+              checked={visionSettings.useRemote}
+              onChange={(event) => setVisionSettings((prev) => ({ ...prev, useRemote: event.target.checked }))}
+              type="checkbox"
+            />
+          </label>
+          <label className="field">
+            <span>Provider</span>
+            <select
+              value={visionSettings.providerName}
+              onChange={(event) => {
+                const provider = providers.find((item) => item.name === event.target.value);
+                setVisionSettings((prev) => ({
+                  ...prev,
+                  providerName: event.target.value,
+                  baseUrl: event.target.value ? provider?.baseUrl ?? prev.baseUrl : "",
+                  useRemote: event.target.value ? event.target.value !== "演示模型" : prev.useRemote
+                }));
+              }}
+            >
+              <option value="">继承基础模型</option>
+              {providers.map((provider) => (
+                <option key={provider.name} value={provider.name}>
+                  {provider.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="field">
+            <span>Base URL</span>
+            <input
+              value={visionSettings.baseUrl}
+              onChange={(event) => setVisionSettings((prev) => ({ ...prev, baseUrl: event.target.value }))}
+              placeholder={modelSettings.baseUrl || DEFAULT_MODEL_SETTINGS.baseUrl}
+            />
+          </label>
+          <label className="field">
+            <span>Vision Model</span>
+            <input
+              value={visionSettings.model}
+              onChange={(event) => setVisionSettings((prev) => ({ ...prev, model: event.target.value }))}
+              placeholder={DEFAULT_VISION_SETTINGS.model}
+            />
+          </label>
+          <label className="field">
+            <span>API Key</span>
+            <input
+              value={visionSettings.apiKey}
+              onChange={(event) => setVisionSettings((prev) => ({ ...prev, apiKey: event.target.value }))}
+              placeholder={modelSettings.apiKey ? "继承基础模型 Key" : ""}
+              type="password"
+              autoComplete="off"
+            />
+          </label>
+        </>
+      )
+    },
+    {
+      key: "speechInput",
+      label: "语音输入",
+      icon: <Mic size={16} />,
+      content: (
+        <>
+          <label className="switch-row">
+            <span>语音输入</span>
+            <input
+              checked={speechInputSettings.enabled}
+              onChange={(event) => setSpeechInputSettings((prev) => ({ ...prev, enabled: event.target.checked }))}
+              type="checkbox"
+            />
+          </label>
+          <label className="switch-row">
+            <span>远程转写 API</span>
+            <input
+              checked={speechInputSettings.useRemote}
+              onChange={(event) => setSpeechInputSettings((prev) => ({ ...prev, useRemote: event.target.checked }))}
+              type="checkbox"
+            />
+          </label>
+          <label className="field">
+            <span>Provider</span>
+            <select
+              value={speechInputSettings.providerName}
+              onChange={(event) => {
+                const provider = providers.find((item) => item.name === event.target.value);
+                if (event.target.value === DEFAULT_SPEECH_INPUT_SETTINGS.providerName) {
+                  setSpeechInputSettings((prev) => ({
+                    ...prev,
+                    providerName: DEFAULT_SPEECH_INPUT_SETTINGS.providerName,
+                    baseUrl: DEFAULT_SPEECH_INPUT_SETTINGS.baseUrl,
+                    model: DEFAULT_SPEECH_INPUT_SETTINGS.model,
+                    language: DEFAULT_SPEECH_INPUT_SETTINGS.language,
+                    useRemote: true
+                  }));
+                  return;
+                }
+                setSpeechInputSettings((prev) => ({
+                  ...prev,
+                  providerName: event.target.value,
+                  baseUrl: event.target.value ? provider?.baseUrl ?? prev.baseUrl : DEFAULT_SPEECH_INPUT_SETTINGS.baseUrl,
+                  useRemote: event.target.value ? event.target.value !== "演示模型" : prev.useRemote
+                }));
+              }}
+            >
+              <option value={DEFAULT_SPEECH_INPUT_SETTINGS.providerName}>小米 MiMo ASR</option>
+              {providers.map((provider) => (
+                <option key={provider.name} value={provider.name}>
+                  {provider.name}
+                </option>
+              ))}
+            </select>
+          </label>
+          <label className="field">
+            <span>Base URL</span>
+            <input
+              value={speechInputSettings.baseUrl}
+              onChange={(event) => setSpeechInputSettings((prev) => ({ ...prev, baseUrl: event.target.value }))}
+              placeholder={DEFAULT_SPEECH_INPUT_SETTINGS.baseUrl}
+            />
+          </label>
+          <label className="field">
+            <span>ASR Model</span>
+            <input
+              value={speechInputSettings.model}
+              onChange={(event) => setSpeechInputSettings((prev) => ({ ...prev, model: event.target.value }))}
+              placeholder={DEFAULT_SPEECH_INPUT_SETTINGS.model}
+            />
+          </label>
+          <div className="inline-fields">
+            <label className="field">
+              <span>Language</span>
+              <input
+                value={speechInputSettings.language}
+                onChange={(event) => setSpeechInputSettings((prev) => ({ ...prev, language: event.target.value }))}
+                placeholder="auto / zh / en"
+              />
+            </label>
+            <label className="field">
+              <span>API Key</span>
+              <input
+                value={
+                  speechInputSettings.providerName === DEFAULT_SPEECH_INPUT_SETTINGS.providerName &&
+                  modelSettings.apiKey
+                    ? ""
+                    : speechInputSettings.apiKey
+                }
+                onChange={(event) => setSpeechInputSettings((prev) => ({ ...prev, apiKey: event.target.value }))}
+                placeholder={modelSettings.apiKey ? "默认复用基础模型 Key" : "填写 MiMo API Key"}
+                type="password"
+                autoComplete="off"
+              />
+            </label>
+          </div>
+        </>
+      )
+    },
+    {
+      key: "voice",
+      label: "语音",
+      icon: <Mic2 size={16} />,
+      content: (
+        <>
+          <label className="field">
+            <span>语音模型</span>
+            <select
+              value={voiceSettings.ttsBackend}
+              onChange={(event) =>
+                setVoiceSettings((prev) => ({
+                  ...prev,
+                  ttsBackend: event.target.value === "cloud" ? "cloud" : "local"
+                }))
+              }
+            >
+              <option value="local">本地 CosyVoice2</option>
+              <option value="cloud">云端 SiliconFlow</option>
+            </select>
+          </label>
+          <label className="field">
+            <span>Cloud Key</span>
+            <input
+              value={voiceSettings.siliconFlowApiKey}
+              onChange={(event) => setVoiceSettings((prev) => ({ ...prev, siliconFlowApiKey: event.target.value }))}
+              type="password"
+              autoComplete="off"
+            />
+          </label>
+          <label className="field">
+            <span>Cloud Voice URI</span>
+            <input
+              value={voiceSettings.clonedVoiceUri}
+              onChange={(event) => setVoiceSettings((prev) => ({ ...prev, clonedVoiceUri: event.target.value }))}
+              placeholder="speech:..."
+            />
+          </label>
+          <div className="inline-fields">
+            <label className="field">
+              <span>Speed</span>
+              <input
+                value={voiceSettings.speed}
+                min="0.75"
+                max="1.25"
+                step="0.05"
+                type="number"
+                onChange={(event) => setVoiceSettings((prev) => ({ ...prev, speed: Number(event.target.value) }))}
+              />
+            </label>
+            <label className="field">
+              <span>Gain</span>
+              <input
+                value={voiceSettings.gain}
+                min="-6"
+                max="6"
+                step="0.5"
+                type="number"
+                onChange={(event) => setVoiceSettings((prev) => ({ ...prev, gain: Number(event.target.value) }))}
+              />
+            </label>
+          </div>
+          <div className="config-actions">
+            <button className="text-icon-button" onClick={testVoice} disabled={voiceBusy} type="button">
+              <Mic2 size={16} />
+              试听
+            </button>
+            <button className="text-icon-button" onClick={cloneKurisuVoice} disabled={voiceBusy} type="button">
+              <KeyRound size={16} />
+              云端克隆
+            </button>
+          </div>
+        </>
+      )
+    },
+    {
+      key: "live2d",
+      label: "Live2D",
+      icon: <FolderOpen size={16} />,
+      content: (
+        <>
+          <div className="live2d-current">
+            <strong title={activeLive2DModel.name}>{activeLive2DModel.name}</strong>
+            <span>
+              {live2DRuntimeLabel(activeLive2DModel)} · {activeLive2DModel.expressions.length} 表情 · {activeLive2DModel.motions.length} 动作
+            </span>
+          </div>
+          <input
+            className="live2d-folder-input"
+            id={LIVE2D_IMPORT_INPUT_ID}
+            ref={attachLive2DFolderInput}
+            type="file"
+            multiple
+            disabled={live2dImportBusy}
+            onChange={handleLive2DFolderSelection}
+          />
+          <div className="config-actions live2d-import-actions">
+            <label
+              className={`text-icon-button live2d-import-label ${live2dImportBusy ? "is-disabled" : ""}`}
+              htmlFor={LIVE2D_IMPORT_INPUT_ID}
+            >
+              <FolderOpen size={16} />
+              导入模型
+            </label>
+            <button
+              className="text-icon-button"
+              disabled={live2dImportBusy || activeLive2DModel.source === "default"}
+              onClick={() => void switchLive2DModel(DEFAULT_LIVE2D_MODEL)}
+              type="button"
+            >
+              <RotateCcw size={16} />
+              默认
+            </button>
+          </div>
+          {live2dImportStatus && <div className="live2d-import-status">{live2dImportStatus}</div>}
+          {renderLive2DHistory()}
+        </>
+      )
+    },
+    {
+      key: "interface",
+      label: "界面",
+      icon: <Sparkles size={16} />,
+      content: (
+        <>
+          <label className="switch-row">
+            <span>自动语音</span>
+            <input
+              checked={voiceSettings.autoPlay}
+              onChange={(event) => setVoiceSettings((prev) => ({ ...prev, autoPlay: event.target.checked }))}
+              type="checkbox"
+            />
+          </label>
+          <label className="switch-row">
+            <span>字幕同步</span>
+            <input
+              checked={voiceSettings.syncTextOutput}
+              onChange={(event) => setVoiceSettings((prev) => ({ ...prev, syncTextOutput: event.target.checked }))}
+              type="checkbox"
+            />
+          </label>
+        </>
+      )
+    },
+    {
+      key: "agent",
+      label: "Agent",
+      icon: <Boxes size={16} />,
+      content: (
+        <AgentSettingsPanel
+          agent={agentSettings}
+          onAgentChange={setAgentSettings}
+          mcpServers={mcpServers}
+          onMcpServersChange={setMcpServers}
+          skills={skills}
+          onSkillsChange={setSkills}
+          section="agent"
+        />
+      )
+    },
+    {
+      key: "memory",
+      label: "Memory",
+      icon: <Database size={16} />,
+      content: <MemoryPanel currentConversationId={currentConversationId} />
+    },
+    {
+      key: "mcp",
+      label: "MCP 服务器",
+      icon: <Plug size={16} />,
+      content: (
+        <AgentSettingsPanel
+          agent={agentSettings}
+          onAgentChange={setAgentSettings}
+          mcpServers={mcpServers}
+          onMcpServersChange={setMcpServers}
+          skills={skills}
+          onSkillsChange={setSkills}
+          section="mcp"
+        />
+      )
+    },
+    {
+      key: "skills",
+      label: "技能包",
+      icon: <Package size={16} />,
+      content: (
+        <AgentSettingsPanel
+          agent={agentSettings}
+          onAgentChange={setAgentSettings}
+          mcpServers={mcpServers}
+          onMcpServersChange={setMcpServers}
+          skills={skills}
+          onSkillsChange={setSkills}
+          section="skills"
+        />
+      )
+    }
+  ];
 
   function renderMessageBubble(message: ChatMessage, surface: "floating" | "panel") {
+    const complexTask = complexTaskByMessage[message.id];
     return (
-      <ChatMessageBubble
-        key={message.id}
-        message={message}
-        surface={surface}
-        voiceBusy={voiceBusy}
-        onCopy={copyMessageText}
-        onPlay={playAssistantMessage}
-      />
+      <div key={message.id} className={`message-wrapper ${surface === "floating" ? "is-floating" : "is-panel"}`}>
+        <ChatMessageBubble
+          message={message}
+          surface={surface}
+          voiceBusy={voiceBusy}
+          onCopy={copyMessageText}
+          onPlay={playAssistantMessage}
+        />
+        {complexTask && (
+          <div className="complex-task-card">
+            <div className="complex-task-card-head">
+              <Boxes size={15} />
+              <span>{complexTask.title}</span>
+            </div>
+            {complexTask.reason && <p className="complex-task-card-reason">{complexTask.reason}</p>}
+            <div className="complex-task-card-actions">
+              <button
+                className="text-icon-button"
+                onClick={() => {
+                  setAgentTaskId(complexTask.taskId);
+                  setRightPanelTab("agent");
+                  if (!chatOpen) {
+                    setChatOpen(true);
+                  }
+                }}
+                type="button"
+              >
+                查看任务
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
     );
   }
 
@@ -3825,8 +4301,7 @@ export default function App() {
       ].join(" ")}
       style={
         {
-          "--chat-panel-width": `${clampedChatWidth}px`,
-          "--settings-left": `${settingsOffset}px`
+          "--chat-panel-width": `${clampedChatWidth}px`
         } as CSSProperties
       }
     >
@@ -3903,401 +4378,13 @@ export default function App() {
         onDeleteCodeTask={deleteCodeTaskRecord}
       />
 
-      <aside
-        className={`config-dock glass-panel ${configOpen ? "is-open" : ""}`}
-        style={{ left: "var(--settings-left)" }}
-        aria-hidden={!configOpen}
-      >
-        <div className="dock-head">
-          <div>
-            <span className="eyebrow">Control</span>
-            <h2>设置</h2>
-          </div>
-          <button className="icon-button" onClick={() => setConfigOpen(false)} type="button" aria-label="收起设置">
-            <ChevronLeft size={18} />
-          </button>
-        </div>
-
-        <div className="config-list">
-          <ConfigGroup
-            title="个人信息"
-            icon={<UserRound size={16} />}
-            open={openSections.profile}
-            onToggle={() => toggleSection("profile")}
-          >
-            <label className="field">
-              <span>用户昵称</span>
-              <input value="用户" readOnly />
-            </label>
-            <label className="field">
-              <span>人格预设</span>
-              <input value="Amadeus 牧濑红莉栖" readOnly />
-            </label>
-          </ConfigGroup>
-
-          <ConfigGroup
-            title="基础模型"
-            icon={<SlidersHorizontal size={16} />}
-            open={openSections.model}
-            onToggle={() => toggleSection("model")}
-          >
-            <label className="field">
-              <span>Provider</span>
-              <select value={modelSettings.providerName} onChange={(event) => applyProvider(event.target.value)}>
-                {providers.map((provider) => (
-                  <option key={provider.name} value={provider.name}>
-                    {provider.name}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label className="field">
-              <span>Base URL</span>
-              <input
-                value={modelSettings.baseUrl}
-                onChange={(event) => setModelSettings((prev) => ({ ...prev, baseUrl: event.target.value }))}
-              />
-            </label>
-            <label className="field">
-              <span>Model</span>
-              <input
-                value={modelSettings.model}
-                onChange={(event) => setModelSettings((prev) => ({ ...prev, model: event.target.value }))}
-              />
-            </label>
-            <label className="field">
-              <span>API Key</span>
-              <input
-                value={modelSettings.apiKey}
-                onChange={(event) => setModelSettings((prev) => ({ ...prev, apiKey: event.target.value }))}
-                type="password"
-                autoComplete="off"
-              />
-            </label>
-          </ConfigGroup>
-
-          <ConfigGroup
-            title="视觉"
-            icon={<Camera size={16} />}
-            open={openSections.vision}
-            onToggle={() => toggleSection("vision")}
-          >
-            <label className="switch-row">
-              <span>视觉理解</span>
-              <input
-                checked={visionSettings.enabled}
-                onChange={(event) => setVisionSettings((prev) => ({ ...prev, enabled: event.target.checked }))}
-                type="checkbox"
-              />
-            </label>
-            <label className="switch-row">
-              <span>截图入口</span>
-              <input
-                checked={visionSettings.screenCaptureEnabled}
-                onChange={(event) =>
-                  setVisionSettings((prev) => ({ ...prev, screenCaptureEnabled: event.target.checked }))
-                }
-                type="checkbox"
-              />
-            </label>
-            <label className="switch-row">
-              <span>远程视觉 API</span>
-              <input
-                checked={visionSettings.useRemote}
-                onChange={(event) => setVisionSettings((prev) => ({ ...prev, useRemote: event.target.checked }))}
-                type="checkbox"
-              />
-            </label>
-            <label className="field">
-              <span>Provider</span>
-              <select
-                value={visionSettings.providerName}
-                onChange={(event) => {
-                  const provider = providers.find((item) => item.name === event.target.value);
-                  setVisionSettings((prev) => ({
-                    ...prev,
-                    providerName: event.target.value,
-                    baseUrl: event.target.value ? provider?.baseUrl ?? prev.baseUrl : "",
-                    useRemote: event.target.value ? event.target.value !== "演示模型" : prev.useRemote
-                  }));
-                }}
-              >
-                <option value="">继承基础模型</option>
-                {providers.map((provider) => (
-                  <option key={provider.name} value={provider.name}>
-                    {provider.name}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label className="field">
-              <span>Base URL</span>
-              <input
-                value={visionSettings.baseUrl}
-                onChange={(event) => setVisionSettings((prev) => ({ ...prev, baseUrl: event.target.value }))}
-                placeholder={modelSettings.baseUrl || DEFAULT_MODEL_SETTINGS.baseUrl}
-              />
-            </label>
-            <label className="field">
-              <span>Vision Model</span>
-              <input
-                value={visionSettings.model}
-                onChange={(event) => setVisionSettings((prev) => ({ ...prev, model: event.target.value }))}
-                placeholder={DEFAULT_VISION_SETTINGS.model}
-              />
-            </label>
-            <label className="field">
-              <span>API Key</span>
-              <input
-                value={visionSettings.apiKey}
-                onChange={(event) => setVisionSettings((prev) => ({ ...prev, apiKey: event.target.value }))}
-                placeholder={modelSettings.apiKey ? "继承基础模型 Key" : ""}
-                type="password"
-                autoComplete="off"
-              />
-            </label>
-          </ConfigGroup>
-
-          <ConfigGroup
-            title="语音输入"
-            icon={<Mic size={16} />}
-            open={openSections.speechInput}
-            onToggle={() => toggleSection("speechInput")}
-          >
-            <label className="switch-row">
-              <span>语音输入</span>
-              <input
-                checked={speechInputSettings.enabled}
-                onChange={(event) => setSpeechInputSettings((prev) => ({ ...prev, enabled: event.target.checked }))}
-                type="checkbox"
-              />
-            </label>
-            <label className="switch-row">
-              <span>远程转写 API</span>
-              <input
-                checked={speechInputSettings.useRemote}
-                onChange={(event) => setSpeechInputSettings((prev) => ({ ...prev, useRemote: event.target.checked }))}
-                type="checkbox"
-              />
-            </label>
-            <label className="field">
-              <span>Provider</span>
-              <select
-                value={speechInputSettings.providerName}
-                onChange={(event) => {
-                  const provider = providers.find((item) => item.name === event.target.value);
-                  if (event.target.value === DEFAULT_SPEECH_INPUT_SETTINGS.providerName) {
-                    setSpeechInputSettings((prev) => ({
-                      ...prev,
-                      providerName: DEFAULT_SPEECH_INPUT_SETTINGS.providerName,
-                      baseUrl: DEFAULT_SPEECH_INPUT_SETTINGS.baseUrl,
-                      model: DEFAULT_SPEECH_INPUT_SETTINGS.model,
-                      language: DEFAULT_SPEECH_INPUT_SETTINGS.language,
-                      useRemote: true
-                    }));
-                    return;
-                  }
-                  setSpeechInputSettings((prev) => ({
-                    ...prev,
-                    providerName: event.target.value,
-                    baseUrl: event.target.value ? provider?.baseUrl ?? prev.baseUrl : DEFAULT_SPEECH_INPUT_SETTINGS.baseUrl,
-                    useRemote: event.target.value ? event.target.value !== "演示模型" : prev.useRemote
-                  }));
-                }}
-              >
-                <option value={DEFAULT_SPEECH_INPUT_SETTINGS.providerName}>小米 MiMo ASR</option>
-                {providers.map((provider) => (
-                  <option key={provider.name} value={provider.name}>
-                    {provider.name}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label className="field">
-              <span>Base URL</span>
-              <input
-                value={speechInputSettings.baseUrl}
-                onChange={(event) => setSpeechInputSettings((prev) => ({ ...prev, baseUrl: event.target.value }))}
-                placeholder={DEFAULT_SPEECH_INPUT_SETTINGS.baseUrl}
-              />
-            </label>
-            <label className="field">
-              <span>ASR Model</span>
-              <input
-                value={speechInputSettings.model}
-                onChange={(event) => setSpeechInputSettings((prev) => ({ ...prev, model: event.target.value }))}
-                placeholder={DEFAULT_SPEECH_INPUT_SETTINGS.model}
-              />
-            </label>
-            <div className="inline-fields">
-              <label className="field">
-                <span>Language</span>
-                <input
-                  value={speechInputSettings.language}
-                  onChange={(event) => setSpeechInputSettings((prev) => ({ ...prev, language: event.target.value }))}
-                  placeholder="auto / zh / en"
-                />
-              </label>
-              <label className="field">
-                <span>API Key</span>
-                <input
-                  value={
-                    speechInputSettings.providerName === DEFAULT_SPEECH_INPUT_SETTINGS.providerName &&
-                    modelSettings.apiKey
-                      ? ""
-                      : speechInputSettings.apiKey
-                  }
-                  onChange={(event) => setSpeechInputSettings((prev) => ({ ...prev, apiKey: event.target.value }))}
-                  placeholder={modelSettings.apiKey ? "默认复用基础模型 Key" : "填写 MiMo API Key"}
-                  type="password"
-                  autoComplete="off"
-                />
-              </label>
-            </div>
-          </ConfigGroup>
-
-          <ConfigGroup
-            title="语音"
-            icon={<Mic2 size={16} />}
-            open={openSections.voice}
-            onToggle={() => toggleSection("voice")}
-          >
-            <label className="field">
-              <span>语音模型</span>
-              <select
-                value={voiceSettings.ttsBackend}
-                onChange={(event) =>
-                  setVoiceSettings((prev) => ({
-                    ...prev,
-                    ttsBackend: event.target.value === "cloud" ? "cloud" : "local"
-                  }))
-                }
-              >
-                <option value="local">本地 CosyVoice2</option>
-                <option value="cloud">云端 SiliconFlow</option>
-              </select>
-            </label>
-            <label className="field">
-              <span>Cloud Key</span>
-              <input
-                value={voiceSettings.siliconFlowApiKey}
-                onChange={(event) => setVoiceSettings((prev) => ({ ...prev, siliconFlowApiKey: event.target.value }))}
-                type="password"
-                autoComplete="off"
-              />
-            </label>
-            <label className="field">
-              <span>Cloud Voice URI</span>
-              <input
-                value={voiceSettings.clonedVoiceUri}
-                onChange={(event) => setVoiceSettings((prev) => ({ ...prev, clonedVoiceUri: event.target.value }))}
-                placeholder="speech:..."
-              />
-            </label>
-            <div className="inline-fields">
-              <label className="field">
-                <span>Speed</span>
-                <input
-                  value={voiceSettings.speed}
-                  min="0.75"
-                  max="1.25"
-                  step="0.05"
-                  type="number"
-                  onChange={(event) => setVoiceSettings((prev) => ({ ...prev, speed: Number(event.target.value) }))}
-                />
-              </label>
-              <label className="field">
-                <span>Gain</span>
-                <input
-                  value={voiceSettings.gain}
-                  min="-6"
-                  max="6"
-                  step="0.5"
-                  type="number"
-                  onChange={(event) => setVoiceSettings((prev) => ({ ...prev, gain: Number(event.target.value) }))}
-                />
-              </label>
-            </div>
-            <div className="config-actions">
-              <button className="text-icon-button" onClick={testVoice} disabled={voiceBusy} type="button">
-                <Mic2 size={16} />
-                试听
-              </button>
-              <button className="text-icon-button" onClick={cloneKurisuVoice} disabled={voiceBusy} type="button">
-                <KeyRound size={16} />
-                云端克隆
-              </button>
-            </div>
-          </ConfigGroup>
-
-          <ConfigGroup
-            title="Live2D"
-            icon={<FolderOpen size={16} />}
-            open={openSections.live2d}
-            onToggle={() => toggleSection("live2d")}
-          >
-            <div className="live2d-current">
-              <strong title={activeLive2DModel.name}>{activeLive2DModel.name}</strong>
-              <span>
-                {live2DRuntimeLabel(activeLive2DModel)} · {activeLive2DModel.expressions.length} 表情 · {activeLive2DModel.motions.length} 动作
-              </span>
-            </div>
-            <input
-              className="live2d-folder-input"
-              id={LIVE2D_IMPORT_INPUT_ID}
-              ref={attachLive2DFolderInput}
-              type="file"
-              multiple
-              disabled={live2dImportBusy}
-              onChange={handleLive2DFolderSelection}
-            />
-            <div className="config-actions live2d-import-actions">
-              <label
-                className={`text-icon-button live2d-import-label ${live2dImportBusy ? "is-disabled" : ""}`}
-                htmlFor={LIVE2D_IMPORT_INPUT_ID}
-              >
-                <FolderOpen size={16} />
-                导入模型
-              </label>
-              <button
-                className="text-icon-button"
-                disabled={live2dImportBusy || activeLive2DModel.source === "default"}
-                onClick={() => void switchLive2DModel(DEFAULT_LIVE2D_MODEL)}
-                type="button"
-              >
-                <RotateCcw size={16} />
-                默认
-              </button>
-            </div>
-            {live2dImportStatus && <div className="live2d-import-status">{live2dImportStatus}</div>}
-            {renderLive2DHistory()}
-          </ConfigGroup>
-
-          <ConfigGroup
-            title="界面"
-            icon={<Sparkles size={16} />}
-            open={openSections.interface}
-            onToggle={() => toggleSection("interface")}
-          >
-            <label className="switch-row">
-              <span>自动语音</span>
-              <input
-                checked={voiceSettings.autoPlay}
-                onChange={(event) => setVoiceSettings((prev) => ({ ...prev, autoPlay: event.target.checked }))}
-                type="checkbox"
-              />
-            </label>
-            <label className="switch-row">
-              <span>字幕同步</span>
-              <input
-                checked={voiceSettings.syncTextOutput}
-                onChange={(event) => setVoiceSettings((prev) => ({ ...prev, syncTextOutput: event.target.checked }))}
-                type="checkbox"
-              />
-            </label>
-          </ConfigGroup>
-        </div>
-      </aside>
+      <SettingsPage
+        open={configOpen}
+        activeSection={settingsSection}
+        sections={settingsSections}
+        onSectionChange={setSettingsSection}
+        onClose={() => setConfigOpen(false)}
+      />
 
       <section className="floating-conversation" aria-hidden={chatOpen}>
         <div className="floating-messages" ref={floatingMessageRef}>
@@ -4401,8 +4488,16 @@ export default function App() {
         />
         <div className="chat-head">
           <div>
-            <span className="eyebrow">{rightPanelTab === "chat" ? "Session" : "Task"}</span>
-            <h2>{rightPanelTab === "chat" ? currentConversation?.title ?? "Kurisu" : "OpenCode 任务"}</h2>
+            <span className="eyebrow">
+              {rightPanelTab === "chat" ? "Session" : rightPanelTab === "agent" ? "Agent" : "Task"}
+            </span>
+            <h2>
+              {rightPanelTab === "chat"
+                ? currentConversation?.title ?? "Kurisu"
+                : rightPanelTab === "agent"
+                  ? "Agent 任务"
+                  : "OpenCode 任务"}
+            </h2>
           </div>
           <div className="right-panel-tabs" aria-label="右侧面板">
             <button
@@ -4421,9 +4516,17 @@ export default function App() {
               <Bell size={14} />
               任务
             </button>
+            <button
+              className={rightPanelTab === "agent" ? "is-active" : ""}
+              onClick={() => setRightPanelTab("agent")}
+              type="button"
+            >
+              <Boxes size={14} />
+              Agent
+            </button>
           </div>
-          <div className={`status-pill ${rightPanelTab === "chat" ? (isStreaming ? "is-live" : "") : codeTaskRunning ? "is-live" : ""}`}>
-            {rightPanelTab === "chat" ? status : codeTaskStatus}
+          <div className={`status-pill ${rightPanelTab === "chat" ? (isStreaming ? "is-live" : "") : rightPanelTab === "agent" ? (agentTaskId ? "is-live" : "") : codeTaskRunning ? "is-live" : ""}`}>
+            {rightPanelTab === "chat" ? status : rightPanelTab === "agent" ? (agentTaskId ? "agent" : "idle") : codeTaskStatus}
           </div>
           <button className="icon-button" onClick={() => setChatOpen(false)} type="button" aria-label="收起对话栏">
             <ChevronRight size={18} />
@@ -4517,6 +4620,12 @@ export default function App() {
               </div>
             </form>
           </>
+        ) : rightPanelTab === "agent" ? (
+          <AgentTaskPanel
+            conversationId={currentConversationId}
+            selectedTaskId={agentTaskId}
+            onSelectTask={setAgentTaskId}
+          />
         ) : (
           renderTaskPanel()
         )}

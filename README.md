@@ -1,53 +1,25 @@
-# Amadeus Web
+# Amadeus
 
-Python + React web version of the current Amadeus mobile prototype.
+Desktop/web runtime migrated from `E:\Amadeus\Amadeus_web` and refactored back into a full backend capability set.
+
+The current backend keeps normal streaming chat, persona prompts, Live2D emotion feedback, segmented voice output, visual attachments, desktop assistant APIs, complex Agent tasks, Tools, MCP, Skills, OpenCode delegation, and Memory. The mobile bridge remains intentionally excluded.
 
 ## Run
 
 ```powershell
+npm install
 python -m venv .venv
 .\.venv\Scripts\python -m pip install -r requirements.txt
-npm install
-```
-
-Create `.env` from the example:
-
-```powershell
 Copy-Item .env.example .env
 ```
 
-By default the API stores chat conversations, messages, and user settings in SQLite:
-
-```text
-agent_state/amadeus_web.sqlite3
-```
-
-You can override the SQLite database location in `.env`:
-
-```text
-AMADEUS_SQLITE_PATH=agent_state/amadeus_web.sqlite3
-```
-
-The API creates the required SQLite tables on startup. Generated voice files remain under `backend/runtime/audio` and are served through `/audio/...`.
-
-Start the local CosyVoice2 engine before enabling voice:
+Start the FastAPI backend:
 
 ```powershell
-cd E:\Amadeus\AmadeusVoiceEngine
-.\start_engine.ps1
+.\.venv\Scripts\python -m uvicorn backend.amadeus_app.main:app --reload --host 127.0.0.1 --port 8000
 ```
 
-The web backend uses `AMADEUS_LOCAL_TTS_URL=http://127.0.0.1:8011` by default and requests CosyVoice2 with `stream=True`. The existing chat voice path still splits long model replies into sentence-sized chunks before sending them to the voice engine.
-
-Start the API:
-
-```powershell
-New-NetFirewallRule -DisplayName "Amadeus Backend 8000" -Direction Inbound -Action Allow -Protocol TCP -LocalPort 8000 -Profile Private
-.\.venv\Scripts\python -m uvicorn backend.amadeus_app.main:app --reload --host 0.0.0.0 --port 8000
-uvicorn main:app --host 0.0.0.0 --port 8000
-```
-
-Start the web app:
+Start the Vite frontend:
 
 ```powershell
 npm run dev
@@ -55,332 +27,85 @@ npm run dev
 
 Open <http://127.0.0.1:5173>.
 
-## Windows Desktop Build
+## Backend Architecture
 
-The desktop build uses Electron for the Windows window and a bundled PyInstaller FastAPI backend.
+- `chat_service` handles OpenAI-compatible streaming chat, persona prompts, emotion tags, vision enrichment, tool calling, Memory injection, conversation persistence, and segmented TTS.
+- `complex_agent` provides the Agent task runtime. Callers use the `AgentRunner` interface; the default runner is LangGraph-based.
+- `agent_registry` and `complex_agent/tool_registry.py` expose builtin tools, task-scoped tools, MCP tools, Memory tools, and OpenCode delegation through one OpenAI-compatible tool schema.
+- `memory` keeps the legacy tree + FTS5 design with optional sqlite-vec acceleration. If sqlite-vec is unavailable, Memory falls back to FTS.
+- `code_tasks` keeps OpenCode isolated as an optional adapter and as the `opencode_delegate` tool.
+
+Mounted API groups include chat, settings, conversations, files, voice, Agent tasks, MCP, Skills, artifacts, permissions, Memory, projects, and code tasks. `/api/mobile/*` is not mounted.
+
+## Legacy Migration
+
+Dry-run counts from the legacy project:
 
 ```powershell
-npm run desktop:build
+npm run migrate:legacy:dry
 ```
 
-Output:
+Run the explicit migration:
 
-```text
-release/electron/Amadeus-0.1.0-win-x64.exe
+```powershell
+npm run migrate:legacy
 ```
 
-In the packaged app, SQLite and agent runtime files are stored under the current Windows user's app data directory, for example:
+The migration backs up the target SQLite files, copies `agent_state/skills`, migrates settings, conversations, messages, Memory, MCP, Skills, Agent task tables, permissions, and artifacts, then rewrites skill paths to the new project and rebuilds Memory FTS. Secrets in the legacy database are migrated as-is.
 
-```text
-C:\Users\<user>\AppData\Roaming\amadeus-web\data\amadeus_web.sqlite3
+## Memory Embedding
+
+The migrated local embedding model is stored at:
+
+```powershell
+models\embedding\Qwen3-Embedding-0.6B-Q8_0.gguf
 ```
 
-Rebuild the desktop exe after frontend changes. Existing SQLite data in AppData is preserved when replacing the exe.
+Default desktop configuration uses Ollama's OpenAI-compatible embedding endpoint:
 
-## Notes
-
-- The backend accepts OpenAI-compatible `/chat/completions` providers and applies the same fast/thinking mode parameters used by the Android version.
-- Voice uses SiliconFlow `FunAudioLLM/CosyVoice2-0.5B`; the bundled Kurisu reference audio can be used for cloning.
-- Live2D assets are served from `public/live2dmodels/steinsGateKurisuNew`.
-- Future tools and agent execution can be registered through `backend/amadeus_app/agent_registry.py`.
-
-## Agent Bridge
-
-The backend exposes a simple Agent bridge for Web and HarmonyOS clients:
-
-```http
-POST /api/agent/invoke
+```powershell
+npm run memory:embedding:ollama
 ```
 
-Uploaded text files can be stored before invoking `file_reader`:
+Then restart the backend. `.env` defaults:
 
-```http
-POST /api/files/upload
-Content-Type: multipart/form-data
+```powershell
+AMADEUS_MEMORY_EMBEDDING_BACKEND=ollama
+AMADEUS_MEMORY_EMBEDDING_BASE_URL=http://127.0.0.1:11434/v1
+AMADEUS_MEMORY_EMBEDDING_MODEL=amadeus-qwen3-embedding:latest
+AMADEUS_MEMORY_EMBEDDING_DIM=1024
 ```
 
-Form fields:
+The vector tables are dimension-aware. If `AMADEUS_MEMORY_EMBEDDING_DIM` changes, the local sqlite-vec tables are recreated and should be rebuilt from the Memory panel.
 
-- `file`: required text-like file.
-- `device`: `host` or `mobile`, defaults to `host`.
-- `overwrite`: optional boolean, defaults to `false`.
+For direct GGUF loading without Ollama, set `AMADEUS_MEMORY_EMBEDDING_BACKEND=local_gguf` and install the optional dependency:
 
-Files are stored as:
-
-```text
-agent_uploads/{host|mobile}/{YYYY-MM-DD}/{textType}/{originalFilename}
+```powershell
+python -m pip install ".[local-embedding]"
 ```
 
-The upload endpoint preserves the uploaded basename for normal filenames. If the client sends a path-like or filesystem-invalid name, the backend strips path segments and replaces invalid characters. Duplicate filenames return `409` unless `overwrite=true`.
+On NVIDIA GPUs, install a CUDA llama-cpp-python wheel and offload layers:
 
-Example response:
-
-```json
-{
-  "ok": true,
-  "summary": "已上传 notes.md 到 agent_uploads/mobile/2026-06-04/markdown/notes.md，可交给 file_reader 读取。",
-  "file": {
-    "device": "mobile",
-    "date": "2026-06-04",
-    "textType": "markdown",
-    "originalFilename": "notes.md",
-    "filename": "notes.md",
-    "path": "agent_uploads/mobile/2026-06-04/markdown/notes.md",
-    "contentType": "text/markdown",
-    "sizeBytes": 128,
-    "uploadedAt": "2026-06-04T10:00:00+08:00",
-    "readableByFileReader": true
-  }
-}
+```powershell
+python -m pip install --prefer-binary --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cu130 "llama-cpp-python>=0.3.0"
+AMADEUS_MEMORY_LLAMA_N_GPU_LAYERS=-1
 ```
 
-Request:
+Use a CUDA wheel matching the local driver/runtime capability (`cu121`, `cu122`, `cu123`, `cu124`, `cu125`, `cu130`, or `cu132`). CPU-only mode uses `AMADEUS_MEMORY_LLAMA_N_GPU_LAYERS=0`.
 
-```json
-{
-  "action": "call_tool | call_agent | query_capabilities",
-  "targetType": "tool | agent | auto",
-  "target": "tool or agent name",
-  "intent": "user task",
-  "payload": {},
-  "rawArguments": {},
-  "client": "Amaduse HarmonyOS",
-  "requestedAt": "2026-06-03T18:30:00+08:00"
-}
+## Checks
+
+```powershell
+npm run build
+python -m compileall backend backend_launcher.py scripts\migrate_legacy_state.py
+python -c "import backend_launcher; import backend.amadeus_app.main as m; print(m.app.title)"
 ```
 
-Response:
+For offline smoke tests without connecting migrated MCP servers:
 
-```json
-{
-  "ok": true,
-  "summary": "execution summary",
-  "data": {}
-}
+```powershell
+$env:AMADEUS_MCP_AUTO_CONNECT = "0"
+python -m uvicorn backend.amadeus_app.main:app --host 127.0.0.1 --port 8876
 ```
 
-Current safe tools are `get_current_time`, `calculate`, `echo`, `describe_capabilities`, `web_search`, `doc_writer`, `file_reader`, and `todo_task`. High-risk local tools such as shell, browser automation, and unrestricted file writes are intentionally disabled in the simple agent.
-
-## Mobile Code Task Bridge
-
-The host backend keeps an in-memory OpenCode task hub so a mobile client can monitor and advance code tasks started on the host.
-
-Desktop/web tasks are registered automatically when `/api/code-tasks/stream` is called with `taskId`. The web app also syncs stored local task history once on startup:
-
-```http
-POST /api/code-tasks/sync
-```
-
-Mobile discovery:
-
-```http
-GET /api/mobile/connect-info
-GET /api/mobile/code-tasks
-GET /api/mobile/code-tasks/{taskId}
-```
-
-Realtime subscription options:
-
-```http
-GET /api/mobile/code-tasks/{taskId}/events?replay=true
-WebSocket /api/mobile/code-tasks/{taskId}/ws
-```
-
-The SSE stream emits the same OpenCode event names used by the host UI: `input`, `session`, `status`, `output`, `tool`, `command`, `file`, `diff`, `permission`, `question`, `question_result`, `error`, and `done`. Each payload includes `taskId`, `eventId`, and `emittedAt`.
-
-To advance an existing task from mobile:
-
-```http
-POST /api/mobile/code-tasks/{taskId}/messages
-Content-Type: application/json
-```
-
-```json
-{
-  "prompt": "继续修复刚才的 TypeScript 报错",
-  "autoApprove": false,
-  "timeoutSeconds": 1800
-}
-```
-
-If the OpenCode session is still running, the host sends the prompt to that live session. If the task is idle but has a saved `sessionId`, the host starts OpenCode again in the background and resumes that session.
-
-When OpenCode emits a `question` event, mobile can submit an existing option or custom text:
-
-```http
-POST /api/mobile/code-tasks/{taskId}/question/reply
-Content-Type: application/json
-```
-
-```json
-{
-  "requestId": "question-request-id",
-  "answers": [["Use existing option or custom answer"]],
-  "v2": true,
-  "reject": false
-}
-```
-
-The WebSocket accepts the same commands:
-
-```json
-{ "type": "message", "prompt": "继续推进这个任务" }
-{ "type": "question_reply", "requestId": "question-request-id", "answers": [["自定义选项"]] }
-```
-
-`web_search` is backed by a LangGraph search workflow:
-
-```text
-search_agent -> reader_agent -> critic_agent -> writer_agent
-```
-
-Example:
-
-```json
-{
-  "action": "call_tool",
-  "targetType": "tool",
-  "target": "web_search",
-  "intent": "查询 LangGraph Python checkpoint 持久化方案",
-  "payload": {
-    "query": "LangGraph Python checkpoint persistence",
-    "domains": ["docs.langchain.com"],
-    "maxResults": 5,
-    "fetchContent": true
-  },
-  "rawArguments": {},
-  "client": "Amaduse HarmonyOS",
-  "requestedAt": "2026-06-03T18:30:00+08:00"
-}
-```
-
-For stable production search, run a SearXNG instance and set `AMADEUS_SEARXNG_URL`. If it is empty, the simple agent falls back to DuckDuckGo HTML search.
-
-`doc_writer` is backed by a LangGraph document workflow:
-
-```text
-planner_agent -> research_agent -> outline_agent -> markdown_writer_agent -> file_writer_agent
-```
-
-The writer keeps Markdown as the canonical draft and can export `md`, `txt`, `docx`, `csv`, and `xlsx`.
-Output is restricted to the workspace and defaults to `generated_docs`.
-For `csv` and `xlsx`, pass `rows` as an array of objects or `table` as a two-dimensional array when you need structured tabular output; otherwise the agent exports the generated outline, sources, and warnings as rows.
-
-Example:
-
-```json
-{
-  "action": "call_agent",
-  "targetType": "agent",
-  "target": "doc_writer_agent",
-  "intent": "写一份 Amadeus Agent 系统设计 Markdown 文档",
-  "payload": {
-    "title": "Amadeus Agent 系统设计",
-    "format": "md",
-    "audience": "开发者",
-    "sections": ["目标", "架构", "接口", "安全边界", "后续工作"],
-    "keyPoints": ["区分 local_agent 与 mobile_agent", "工具写入必须限制在工作区", "需要可追踪来源"],
-    "useWebSearch": false,
-    "outputPath": "generated_docs",
-    "fileName": "amadeus-agent-system-design.md",
-    "save": true
-  },
-  "rawArguments": {},
-  "client": "Amaduse HarmonyOS",
-  "requestedAt": "2026-06-04T10:00:00+08:00"
-}
-```
-
-Structured CSV/XLSX example:
-
-```json
-{
-  "action": "call_tool",
-  "targetType": "tool",
-  "target": "doc_writer",
-  "intent": "生成任务清单表格",
-  "payload": {
-    "title": "Agent 任务清单",
-    "format": "xlsx",
-    "rows": [
-      {"task": "接入 web_search_agent", "owner": "backend", "status": "done"},
-      {"task": "补充 doc_writer 多格式导出", "owner": "backend", "status": "in_progress"}
-    ],
-    "outputPath": "generated_docs",
-    "fileName": "agent-task-list.xlsx",
-    "save": true
-  }
-}
-```
-
-`file_reader` is a safe read-only workspace tool. It supports:
-
-- `read`: read a text-like file with optional `startLine`, `endLine`, `maxBytes`, and `includeLineNumbers`.
-- `list`: list a workspace directory with optional `recursive`, `includeHidden`, and `maxEntries`.
-- `stat`: return file or directory metadata.
-
-It blocks path traversal and restricted paths such as `.env`, `.git`, `.venv`, `node_modules`, `dist`, key/certificate files, local databases, and Python bytecode.
-
-Example:
-
-```json
-{
-  "action": "call_tool",
-  "targetType": "tool",
-  "target": "file_reader",
-  "intent": "读取 README 的 Agent Bridge 部分",
-  "payload": {
-    "action": "read",
-    "path": "README.md",
-    "startLine": 64,
-    "endLine": 160,
-    "includeLineNumbers": true
-  },
-  "rawArguments": {},
-  "client": "Amaduse HarmonyOS",
-  "requestedAt": "2026-06-04T10:00:00+08:00"
-}
-```
-
-`todo_task` is backed by a LangGraph task workflow:
-
-```text
-planner_agent -> task_store_agent -> writer_agent
-```
-
-It persists task state to `agent_state/todo_tasks.json` by default. The store path can be changed with `AMADEUS_TODO_TASK_STORE`, but it must remain a non-secret `.json` file inside the workspace. Supported actions are:
-
-- `create`: create one or multiple tasks.
-- `plan`: create a parent task and child subtasks from `steps`, `tasks`, bullet lines, or a default execution checklist.
-- `list`, `get`, `summary`: inspect current tasks.
-- `update`, `start`, `complete`, `block`, `archive`, `add_note`: mutate task state.
-- `delete`: hard delete only when `confirmDelete=true`.
-
-Example:
-
-```json
-{
-  "action": "call_agent",
-  "targetType": "agent",
-  "target": "todo_task_agent",
-  "intent": "拆解并记录 todo task agent 的实现任务",
-  "payload": {
-    "action": "plan",
-    "title": "完成 todo task agent",
-    "project": "Amadeus Agent",
-    "priority": "high",
-    "steps": [
-      "设计任务数据结构和状态流转",
-      "实现 LangGraph todo_task_agent",
-      "注册后端工具和移动端桥接能力",
-      "补充 README 和环境变量说明",
-      "运行后端编译和接口验证"
-    ]
-  },
-  "rawArguments": {},
-  "client": "Amaduse HarmonyOS",
-  "requestedAt": "2026-06-04T10:00:00+08:00"
-}
-```
-
-See `docs/web_search_design.md` for the planned self-hosted Agent web search design.
+Then request `/api/health`, `/api/storage`, `/api/mcp/servers`, `/api/skills`, and `/api/memory/tree`.

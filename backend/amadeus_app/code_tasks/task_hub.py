@@ -9,6 +9,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from ..logging_config import get_logger
+
+_log = get_logger(__name__)
+
 
 MAX_TASK_EVENTS = int(os.getenv("AMADEUS_CODE_TASK_EVENT_HISTORY", "500"))
 MAX_TASKS = int(os.getenv("AMADEUS_CODE_TASK_HISTORY", "80"))
@@ -342,9 +346,9 @@ class CodeTaskHub:
             if snapshots or removed_ids:
                 self._save_locked()
         for record in deleted_view_records:
-            print(
-                f"[mobile-view] deleted seq={record.seq} taskId={record.task_id} subscribers={len(view_subscribers)}",
-                flush=True,
+            _log.debug(
+                "[mobile-view] deleted seq=%s taskId=%s subscribers=%s",
+                record.seq, record.task_id, len(view_subscribers),
             )
             for queue in view_subscribers:
                 self._offer(queue, record)
@@ -386,12 +390,10 @@ class CodeTaskHub:
             global_subscribers = list(self._global_subscribers)
             should_push_view = self._should_push_view_locked(task_id, event)
             view_subscribers = list(self._view_subscribers) if should_push_view else []
-            print(
-                "[mobile-view] auto "
-                f"seq={view_record.seq} taskId={task_id} "
-                f"event={event} status={task.status} running={task.running} "
-                f"pushed={str(should_push_view).lower()} subscribers={len(view_subscribers)}",
-                flush=True,
+            _log.debug(
+                "[mobile-view] auto seq=%s taskId=%s event=%s status=%s running=%s pushed=%s subscribers=%s",
+                view_record.seq, task_id, event, task.status, task.running,
+                str(should_push_view).lower(), len(view_subscribers),
             )
 
         for queue in subscribers:
@@ -420,16 +422,15 @@ class CodeTaskHub:
             subscribers = list(self._view_subscribers)
             view = normalized_snapshot.get("view")
             task = normalized_snapshot.get("task")
-            print(
-                "[mobile-view] snapshot "
-                f"seq={record.seq} taskId={task_id} "
-                f"kind={normalized_snapshot.get('kind') or 'unknown'} "
-                f"status={normalized_snapshot.get('status') or (task.get('status') if isinstance(task, dict) else '-') } "
-                f"running={normalized_snapshot.get('running')} "
-                f"turns={(view.get('turnCount') if isinstance(view, dict) else 0)} "
-                f"events={(view.get('eventCount') if isinstance(view, dict) else 0)} "
-                f"subscribers={len(subscribers)}",
-                flush=True,
+            _log.debug(
+                "[mobile-view] snapshot seq=%s taskId=%s kind=%s status=%s running=%s turns=%s events=%s subscribers=%s",
+                record.seq, task_id,
+                normalized_snapshot.get('kind') or 'unknown',
+                normalized_snapshot.get('status') or (task.get('status') if isinstance(task, dict) else '-'),
+                normalized_snapshot.get('running'),
+                (view.get('turnCount') if isinstance(view, dict) else 0),
+                (view.get('eventCount') if isinstance(view, dict) else 0),
+                len(subscribers),
             )
 
         for queue in subscribers:
@@ -468,11 +469,9 @@ class CodeTaskHub:
             view_subscribers = list(self._view_subscribers)
             self._save_locked()
         if view_record is not None:
-            print(
-                "[mobile-view] finish "
-                f"seq={view_record.seq} taskId={task_id} status={status or '-'} "
-                f"subscribers={len(view_subscribers)}",
-                flush=True,
+            _log.debug(
+                "[mobile-view] finish seq=%s taskId=%s status=%s subscribers=%s",
+                view_record.seq, task_id, status or '-', len(view_subscribers),
             )
             for queue in view_subscribers:
                 self._offer(queue, view_record)

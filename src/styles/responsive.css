@@ -6,6 +6,10 @@
   .config-dock {
     width: min(var(--config-width), calc(100vw - var(--left-width) - 54px));
   }
+
+  .settings-page-layout {
+    grid-template-columns: 224px minmax(0, 1fr);
+  }
 }
 
 @media (max-width: 760px) {
@@ -47,6 +51,53 @@
 
   .config-dock.is-open {
     transform: translateY(0) scale(1);
+  }
+
+  .settings-page-overlay {
+    align-items: stretch;
+    justify-content: stretch;
+    padding: 14px;
+  }
+
+  .settings-page-shell {
+    width: calc(100vw - 28px);
+    height: calc(100vh - 28px);
+    border-radius: 28px;
+  }
+
+  .settings-page-layout {
+    grid-template-columns: 150px minmax(0, 1fr);
+  }
+
+  .settings-page-head,
+  .settings-content-head {
+    padding: 14px 14px 10px;
+  }
+
+  .settings-nav {
+    gap: 8px;
+    padding: 12px 10px;
+  }
+
+  .settings-nav-item {
+    min-height: 48px;
+    padding: 8px 10px;
+    border-radius: 18px;
+  }
+
+  .settings-nav-item span {
+    gap: 7px;
+    font-size: 0.8rem;
+    line-height: 1.2;
+    white-space: normal;
+  }
+
+  .settings-nav-item > svg {
+    display: none;
+  }
+
+  .settings-content-scroll {
+    padding: 14px 14px 24px;
   }
 
   .chat-panel {

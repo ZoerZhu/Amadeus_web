@@ -10,8 +10,14 @@ from pathlib import Path
 from typing import Any, Literal, TypedDict
 from zoneinfo import ZoneInfo
 
+import httpx
 from langgraph.graph import END, START, StateGraph
 
+from .._common import get_saved_settings_payload
+from ..domain import ModelSettings
+from ..model_adapter import build_chat_payload
+from ..providers import get_provider
+from ..runtime_config import effective_model_settings
 from ..search.web_search_agent import run_web_search_agent
 
 
@@ -20,6 +26,7 @@ WORKSPACE_PATH_VALUE = os.getenv("AMADEUS_WORKSPACE_PATH", "").strip()
 WorkspacePath = Path(WORKSPACE_PATH_VALUE).expanduser().resolve() if WORKSPACE_PATH_VALUE else Path(__file__).resolve().parents[3]
 DEFAULT_OUTPUT_DIR = Path("generated_docs")
 DEFAULT_SECTIONS = ["背景与目标", "核心内容", "实施步骤", "注意事项", "后续工作"]
+RESEARCH_DEFAULT_SECTIONS = ["核心结论", "事实梳理", "规格与能力", "定价与可用性", "事件时间线", "行业影响", "信息来源与不确定性"]
 DOC_FORMAT_LABELS: dict[str, str] = {
     "md": "Markdown",
     "txt": "TXT",
@@ -43,6 +50,9 @@ SUPPORTED_SUFFIX_FORMATS: dict[str, DocFormat] = {
     ".xlsx": "xlsx",
 }
 TEXT_OUTPUT_FORMATS = {"md", "txt", "csv"}
+LLM_WRITABLE_FORMATS = {"md", "txt", "docx"}
+DOC_WRITER_LLM_MAX_CHARS = int(os.getenv("AMADEUS_DOC_WRITER_LLM_MAX_CHARS", "18000"))
+DOC_WRITER_LLM_MAX_TOKENS = int(os.getenv("AMADEUS_DOC_WRITER_LLM_MAX_TOKENS", "6144"))
 SEARCH_HINTS = (
     "最新",
     "当前",
@@ -173,7 +183,9 @@ async def planner_agent(state: DocWriterState) -> dict[str, Any]:
         doc_format = normalize_requested_doc_format(explicit_format, warnings)
     else:
         doc_format = infer_doc_format_from_path(raw_file_name) or infer_doc_format_from_path(raw_output_path) or "md"
-    sections = normalize_sections(payload.get("sections")) or DEFAULT_SECTIONS
+    explicit_sections = normalize_sections(payload.get("sections")) or infer_sections_from_instruction(intent)
+    llm_write = should_use_llm_writer(payload)
+    sections = explicit_sections or ([] if llm_write else (RESEARCH_DEFAULT_SECTIONS if is_research_document(intent, payload) else DEFAULT_SECTIONS))
     use_web_search = decide_web_search(payload, intent)
     search_query = str(payload.get("searchQuery") or payload.get("search_query") or payload.get("query") or title).strip()
     save = bool(payload.get("save", True))
@@ -279,6 +291,24 @@ async def markdown_writer_agent(state: DocWriterState) -> dict[str, Any]:
     body = str(payload.get("content") or payload.get("body") or payload.get("draft") or "").strip()
     sources = research.get("results", [])
     source_refs = build_source_refs(sources)
+
+    if should_use_llm_writer(payload) and str(plan.get("format") or "md") in LLM_WRITABLE_FORMATS:
+        try:
+            llm_markdown = await generate_llm_markdown(state, source_refs)
+            if llm_markdown.strip():
+                return {"markdown": llm_markdown}
+        except Exception as error:  # noqa: BLE001
+            warnings = [
+                *warnings,
+                {
+                    "type": "llm_writer_failed",
+                    "message": f"LLM 写作失败，已回退到结构化规则写作：{error}",
+                },
+            ]
+            if not outline:
+                fallback_sections = RESEARCH_DEFAULT_SECTIONS if is_research_document(state.get("intent", ""), payload) else DEFAULT_SECTIONS
+                outline = [{"heading": section, "points": section_points(section, [])} for section in fallback_sections]
+
     lines: list[str] = []
 
     if plan.get("front_matter"):
@@ -323,12 +353,16 @@ async def markdown_writer_agent(state: DocWriterState) -> dict[str, Any]:
     for item in outline:
         heading = item.get("heading", "")
         lines.extend([f"## {heading}", ""])
-        for point in item.get("points", []):
-            lines.append(f"- {point}")
-        if heading == "核心内容" and source_refs:
-            lines.append(f"- 已参考 {len(source_refs)} 个来源，关键事实应优先以来源列表为准。")
-        if heading == "注意事项" and (warnings or research.get("warnings")):
-            lines.append("- 检索和生成过程中存在风险提示，见文末“风险提示”。")
+        section_lines = research_section_lines(heading, state, source_refs)
+        if section_lines:
+            lines.extend(section_lines)
+        else:
+            for point in item.get("points", []):
+                lines.append(f"- {point}")
+            if heading == "核心内容" and source_refs:
+                lines.append(f"- 已参考 {len(source_refs)} 个来源，关键事实应优先以来源列表为准。")
+            if heading == "注意事项" and (warnings or research.get("warnings")):
+                lines.append("- 检索和生成过程中存在风险提示，见文末“风险提示”。")
         lines.append("")
 
     if source_refs:
@@ -352,7 +386,8 @@ async def markdown_writer_agent(state: DocWriterState) -> dict[str, Any]:
             lines.append(f"- {warning.get('message') or warning.get('type')}")
         lines.append("")
 
-    lines.extend(["## 后续可扩展", "", "- 接入 LLM 写作节点，支持更自然的段落生成。", "- 增加 HTML/PDF 等更多导出格式。", "- 增加人工确认后写入任意项目路径。", ""])
+    if not source_refs:
+        lines.extend(["## 后续可扩展", "", "- 接入 Web Search 或手动来源后，可生成带引用的实质调研正文。", "- 增加 HTML/PDF 等更多导出格式。", "- 增加人工确认后写入任意项目路径。", ""])
     return {"markdown": "\n".join(lines)}
 
 
@@ -434,6 +469,8 @@ def doc_format_from_value(value: Any) -> DocFormat | None:
     normalized = str(value or "").lower().strip().lstrip(".")
     if normalized == "markdown":
         return "md"
+    if normalized in DOC_FORMAT_LABELS:
+        return normalized  # type: ignore[return-value]
     if normalized in DOC_FORMAT_EXTENSIONS:
         return normalized  # type: ignore[return-value]
     return None
@@ -772,6 +809,181 @@ def normalize_sources(value: Any) -> list[dict[str, Any]]:
     return sources
 
 
+def should_use_llm_writer(payload: dict[str, Any]) -> bool:
+    mode = str(payload.get("writingMode") or payload.get("writing_mode") or "").strip().lower()
+    if mode in {"rule", "rules", "structured", "template", "deterministic"}:
+        return False
+    if mode in {"llm", "advanced", "natural", "free", "pro"}:
+        return True
+    value = payload.get("llmWrite", payload.get("llm_write", os.getenv("AMADEUS_DOC_WRITER_LLM_ENABLED", "1")))
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() not in {"0", "false", "no", "off", "disabled"}
+
+
+async def generate_llm_markdown(state: DocWriterState, source_refs: list[dict[str, Any]]) -> str:
+    plan = state.get("plan", {})
+    payload = state.get("payload", {})
+    research = state.get("research", {})
+    title = str(plan.get("title") or "未命名文档").strip()
+    intent = str(state.get("intent") or payload.get("instruction") or payload.get("topic") or "").strip()
+    sections = [str(item).strip() for item in plan.get("sections", []) if str(item).strip()]
+    evidence_pack = build_llm_evidence_pack(state, source_refs)
+    if not evidence_pack.strip() and not intent:
+        return ""
+
+    settings_payload = await get_saved_settings_payload()
+    model_settings = ModelSettings.model_validate(settings_payload.get("model") or {})
+    provider = get_provider(model_settings.provider_name)
+    settings = effective_model_settings(model_settings, provider)
+    provider = get_provider(settings.provider_name)
+    settings = effective_model_settings(settings, provider)
+    if not settings.use_remote:
+        raise RuntimeError("remote model is disabled")
+    if not provider.compatible:
+        raise RuntimeError(f"provider {provider.name} is not compatible")
+    if not settings.api_key and provider.name.lower() != "ollama":
+        raise RuntimeError("model api key is not configured")
+
+    section_instruction = (
+        "用户指定了必须覆盖的主题，请以这些主题为主线组织二级标题，但可以合并、改名或补充必要章节：\n"
+        + "\n".join(f"- {section}" for section in sections)
+        if sections
+        else "用户没有要求固定章节。请根据资料自行设计最适合的 Markdown 结构，不要套用固定模板。"
+    )
+    body_hint = str(payload.get("content") or payload.get("body") or payload.get("draft") or "").strip()
+    prompt = f"""\
+请根据给定资料写一份完整的中文 Markdown 文档。
+
+写作目标：
+- 标题：{title}
+- 原始需求：{intent or "未提供"}
+- 目标读者：{plan.get("audience", "通用读者")}
+- 语气：{plan.get("tone", "清晰、结构化")}
+- {section_instruction}
+
+硬性要求：
+1. 输出完整 Markdown 正文，从 `# {title}` 开始，不要包裹在代码块中。
+2. 使用自然段写作，不要只罗列来源摘要；每个重要结论后用 [S1]、[S2] 这样的来源编号标注。
+3. 严格基于资料写作。资料不足时明确写“不确定/未确认/需要官方核验”，不要编造具体数值。
+4. 如果资料之间冲突，单独写“信息冲突与不确定性”。
+5. 结尾保留“参考来源”，列出来源编号、标题和 URL。
+6. 不要写“后续可扩展”“接入 LLM 写作节点”这类系统实现说明。
+
+已有草稿或补充材料：
+{truncate_for_prompt(body_hint, 3000) if body_hint else "无"}
+
+检索摘要：
+{truncate_for_prompt(str(research.get("answer") or ""), 4000) or "无"}
+
+证据包：
+{evidence_pack}
+"""
+
+    messages = [
+        {
+            "role": "system",
+            "content": "你是严谨的研究报告作者，擅长把检索材料转成自然、完整、带来源和不确定性标注的中文 Markdown 报告。",
+        },
+        {"role": "user", "content": prompt},
+    ]
+    payload_body = build_chat_payload(settings, provider, "fast", messages, stream=False)
+    if "max_completion_tokens" in payload_body:
+        payload_body["max_completion_tokens"] = DOC_WRITER_LLM_MAX_TOKENS
+    elif "max_tokens" in payload_body:
+        payload_body["max_tokens"] = DOC_WRITER_LLM_MAX_TOKENS
+    else:
+        payload_body["max_tokens"] = DOC_WRITER_LLM_MAX_TOKENS
+    if "temperature" in payload_body:
+        payload_body["temperature"] = float(os.getenv("AMADEUS_DOC_WRITER_LLM_TEMPERATURE", "0.45"))
+
+    endpoint = f"{settings.base_url.rstrip('/')}/chat/completions"
+    headers = {"Content-Type": "application/json"}
+    if settings.api_key:
+        headers["Authorization"] = f"Bearer {settings.api_key}"
+    timeout = float(os.getenv("AMADEUS_DOC_WRITER_LLM_TIMEOUT", "120"))
+    async with httpx.AsyncClient(timeout=httpx.Timeout(timeout, connect=20.0)) as client:
+        response = await client.post(endpoint, headers=headers, json=payload_body)
+    if response.status_code < 200 or response.status_code >= 300:
+        raise RuntimeError(f"LLM HTTP {response.status_code}: {response.text[:500]}")
+    data = response.json()
+    content = extract_chat_content(data)
+    markdown = clean_llm_markdown(content, title)
+    if len(markdown.strip()) < 200:
+        raise RuntimeError("LLM returned too little content")
+    return markdown
+
+
+def build_llm_evidence_pack(state: DocWriterState, source_refs: list[dict[str, Any]]) -> str:
+    research = state.get("research", {})
+    warnings = [*state.get("warnings", []), *research.get("warnings", [])]
+    lines: list[str] = []
+    for index, source in enumerate(source_refs[:12], start=1):
+        title = str(source.get("title") or f"来源 {index}").strip()
+        url = str(source.get("url") or "").strip()
+        snippet = str(source.get("snippet") or "").strip()
+        lines.append(f"[S{index}] {title}")
+        if url:
+            lines.append(f"URL: {url}")
+        if snippet:
+            lines.append(f"摘要: {truncate_for_prompt(snippet, 900)}")
+        lines.append("")
+    if warnings:
+        lines.append("检索风险提示：")
+        for warning in warnings[:8]:
+            message = str(warning.get("message") or warning.get("type") or "").strip()
+            if message:
+                lines.append(f"- {message}")
+    return truncate_for_prompt("\n".join(lines).strip(), DOC_WRITER_LLM_MAX_CHARS)
+
+
+def extract_chat_content(data: dict[str, Any]) -> str:
+    choices = data.get("choices") or []
+    if not choices:
+        return ""
+    message = choices[0].get("message") or {}
+    return str(message.get("content") or "")
+
+
+def clean_llm_markdown(content: str, title: str) -> str:
+    text = str(content or "").strip()
+    fence_match = re.match(r"^```(?:markdown|md)?\s*(.*?)\s*```$", text, flags=re.IGNORECASE | re.DOTALL)
+    if fence_match:
+        text = fence_match.group(1).strip()
+    if not text.startswith("# "):
+        text = f"# {title}\n\n{text}"
+    return text.strip() + "\n"
+
+
+def truncate_for_prompt(text: str, limit: int) -> str:
+    value = str(text or "").strip()
+    if len(value) <= limit:
+        return value
+    return value[: max(0, limit - 80)].rstrip() + "\n...[内容过长，已截断]"
+
+
+def is_research_document(intent: str, payload: dict[str, Any]) -> bool:
+    text = " ".join(
+        [
+            intent,
+            str(payload.get("title", "")),
+            str(payload.get("topic", "")),
+            str(payload.get("instruction", "")),
+        ]
+    ).lower()
+    return any(keyword in text for keyword in ("调研", "研究", "报告", "research", "report", "latest", "最新"))
+
+
+def infer_sections_from_instruction(intent: str) -> list[str]:
+    text = str(intent or "")
+    match = re.search(r"(?:涵盖|包括|包含|覆盖)[:：]\s*([^。.\n]+)", text)
+    if not match:
+        return []
+    candidates = re.split(r"[、,，;；/]+", match.group(1))
+    sections = [clean_title(item) for item in candidates if clean_title(item)]
+    return sections[:12]
+
+
 def section_points(section: str, user_points: list[str]) -> list[str]:
     if user_points and section == "核心内容":
         return user_points
@@ -785,12 +997,175 @@ def section_points(section: str, user_points: list[str]) -> list[str]:
     return mapping.get(section, [f"围绕“{section}”补充结构化内容。", "后续可接入 LLM 写作节点生成更丰富段落。"])
 
 
+def research_section_lines(section: str, state: DocWriterState, source_refs: list[dict[str, Any]]) -> list[str]:
+    research = state.get("research", {})
+    warnings = [*state.get("warnings", []), *research.get("warnings", [])]
+    answer = str(research.get("answer") or "").strip()
+    if not source_refs and not answer:
+        return []
+
+    title = str(state.get("plan", {}).get("title") or "调研对象")
+    section_key = normalize_section_key(section)
+    source_claims = source_claim_lines(source_refs)
+    warning_messages = [str(item.get("message") or item.get("type") or "").strip() for item in warnings]
+    has_weak_primary = any("官方" in item or "primary" in item.lower() for item in warning_messages)
+    content_not_fetched = any("网页正文" in item or "content" in item.lower() for item in warning_messages)
+
+    if section_key in {"核心结论", "摘要结论", "结论"}:
+        lines = [
+            f"- 本报告检索到 {len(source_refs)} 个候选来源；当前材料主要能支撑“第三方资料正在讨论 {title}”这一事实。",
+        ]
+        if has_weak_primary:
+            lines.append("- 未检索到明显的 Anthropic 官方文档、官方公告、论文或代码仓库来源，因此不能把第三方博客中的型号、价格、发布时间等信息视为已确认事实。")
+        if content_not_fetched:
+            lines.append("- 部分来源无法读取正文，本报告对这些来源只采用标题与摘要级信息。")
+        if source_claims:
+            lines.append("- 多个第三方来源声称该主题涉及发布时间、定价、基准、可用性或安全事件，但这些说法需要官方来源进一步核验。")
+        return lines
+
+    if section_key in {"模型概述", "事实梳理", "背景与目标", "核心内容"}:
+        lines = [
+            f"围绕“{title}”，检索结果呈现的是一个由第三方站点传播的模型叙事，而不是官方可核验发布页。",
+            "",
+        ]
+        for index, claim in enumerate(source_claims[:6], start=1):
+            lines.append(f"- 来源 {index} 提到：{claim}")
+        if answer:
+            lines.extend(["", "检索摘要：", ""])
+            lines.extend([f"- {line}" for line in split_answer_lines(answer)[:8]])
+        return lines
+
+    if section_key in {"技术架构与规格", "规格与能力", "技术规格", "上下文", "架构"}:
+        return build_keyword_section(
+            source_refs,
+            keywords=("architecture", "context", "benchmark", "api", "model", "capacity", "上下文", "架构", "规格", "能力"),
+            fallback=[
+                "- 现有可读材料没有给出可验证的技术白皮书、模型卡或官方 API 规格。",
+                "- 第三方来源提及 architecture、context window、API/model string 等信息，但应在官方文档出现前标为未确认。",
+            ],
+        )
+
+    if section_key in {"基准测试表现", "性能", "benchmark", "benchmarks"}:
+        return build_keyword_section(
+            source_refs,
+            keywords=("benchmark", "score", "performance", "bench", "swe", "基准", "性能", "测试"),
+            fallback=[
+                "- 未找到官方 benchmark 表或独立评测数据。",
+                "- 第三方来源标题/摘要中出现 benchmarks、performance 等描述，但当前证据不足以比较其真实能力。",
+            ],
+        )
+
+    if section_key in {"定价策略", "定价与可用性", "价格", "pricing"}:
+        return build_keyword_section(
+            source_refs,
+            keywords=("pricing", "price", "$", "api", "tier", "availability", "access", "定价", "价格", "可用"),
+            fallback=[
+                "- 未找到官方价格页或 API 计费页。",
+                "- 若第三方来源提到价格，需要与 Anthropic Console/API pricing 页面交叉验证后再用于决策。",
+            ],
+        )
+
+    if section_key in {"fable 5 与 mythos 5 的关系", "mythos", "关系"}:
+        return build_keyword_section(
+            source_refs,
+            keywords=("mythos", "fable", "class", "relationship", "关系"),
+            fallback=[
+                "- 现有来源多把 Fable 5 与 Mythos 5 放在同一叙事中，但缺少官方体系说明。",
+                "- 建议把“Fable 5 属于 Mythos-class”这类说法标注为第三方声称。",
+            ],
+        )
+
+    if section_key in {"出口管制事件时间线", "事件时间线", "当前状态", "时间线", "安全事件"}:
+        lines = build_keyword_section(
+            source_refs,
+            keywords=("suspended", "ban", "restored", "export", "control", "safety", "government", "June", "暂停", "恢复", "出口", "管制", "安全"),
+            fallback=[
+                "- 未找到官方安全公告或政府文件。",
+                "- 第三方来源提及 suspended/restored/export control 等事件线索，但需要官方公告或监管文件确认。",
+            ],
+        )
+        lines.extend(["", "当前状态判断："])
+        lines.append("- 在缺少官方确认的情况下，当前状态应写为“未确认”，不应写为正式发布、暂停或恢复。")
+        return lines
+
+    if section_key in {"行业影响分析", "影响分析", "行业影响"}:
+        return [
+            "- 如果 Fable 5/Mythos 5 相关说法属实，其影响主要会落在高端模型竞争、企业 API 成本、代码/Agent 场景能力和安全合规审查上。",
+            "- 但目前来源可信度不足，不能据此做采购、迁移或架构选型决策。",
+            "- 更稳妥的动作是持续监测 Anthropic 官方模型列表、价格页、API 文档、系统卡/安全说明，以及主流独立评测机构的数据。",
+        ]
+
+    if section_key in {"信息来源与不确定性", "注意事项", "风险提示", "不确定性"}:
+        lines = []
+        if warning_messages:
+            lines.extend([f"- {message}" for message in warning_messages if message])
+        else:
+            lines.append("- 当前材料未产生自动风险提示，但仍建议优先核验官方来源。")
+        lines.append("- 报告中的第三方陈述应作为线索，而非最终事实。")
+        lines.append("- 若用于正式决策，需补充 Anthropic 官方页面、模型卡、价格页或可信新闻源。")
+        return lines
+
+    if section_key in {"实施步骤", "后续工作"}:
+        return [
+            "- 到 Anthropic 官方 News、Docs、API pricing、model list 页面核验模型是否存在。",
+            "- 检索可信新闻源、监管机构公告和独立评测报告，补足官方/第三方交叉验证。",
+            "- 将第三方来源中的发布时间、价格、benchmark、上下文长度等字段整理成证据表，并标记可信等级。",
+        ]
+
+    return []
+
+
+def normalize_section_key(value: str) -> str:
+    text = re.sub(r"\s+", " ", str(value or "").strip().lower())
+    text = text.replace("：", ":")
+    return text
+
+
+def source_claim_lines(source_refs: list[dict[str, Any]]) -> list[str]:
+    claims: list[str] = []
+    for source in source_refs:
+        title = str(source.get("title") or "").strip()
+        snippet = str(source.get("snippet") or "").strip()
+        text = truncate("：".join(item for item in (title, snippet) if item), 260)
+        if text:
+            claims.append(text)
+    return claims
+
+
+def split_answer_lines(answer: str) -> list[str]:
+    lines: list[str] = []
+    for raw_line in answer.splitlines():
+        line = re.sub(r"^\s*\d+\.\s*", "", raw_line).strip()
+        if line:
+            lines.append(truncate(line, 220))
+    return lines
+
+
+def build_keyword_section(source_refs: list[dict[str, Any]], *, keywords: tuple[str, ...], fallback: list[str]) -> list[str]:
+    hits: list[str] = []
+    lowered_keywords = tuple(item.lower() for item in keywords)
+    for source in source_refs:
+        title = str(source.get("title") or "").strip()
+        snippet = str(source.get("snippet") or "").strip()
+        combined = f"{title} {snippet}".lower()
+        if any(keyword in combined for keyword in lowered_keywords):
+            hits.append(f"- {truncate('：'.join(item for item in (title, snippet) if item), 260)}")
+    if hits:
+        hits.append("")
+        hits.append("- 上述内容来自搜索摘要/标题层级，未必代表官方确认；关键参数应继续回查原文和官方文档。")
+        return hits[:8]
+    return fallback
+
+
 def build_summary(state: DocWriterState, sources: list[dict[str, Any]]) -> str:
     plan = state.get("plan", {})
     intent = state.get("intent", "")
     title = plan.get("title", "未命名文档")
+    research = state.get("research", {})
+    warnings = [*state.get("warnings", []), *research.get("warnings", [])]
     if sources:
-        return f"本文围绕“{title}”整理基础文档草稿，并结合 {len(sources)} 个来源形成可追溯内容。原始需求：{intent or '未提供'}。"
+        risk_note = "；但当前来源存在可信度或正文读取限制，结论需保留不确定性" if warnings else ""
+        return f"本文围绕“{title}”整理调研报告，结合 {len(sources)} 个来源提炼主要线索、可核验事实和风险判断{risk_note}。原始需求：{intent or '未提供'}。"
     return f"本文围绕“{title}”整理基础文档草稿。当前草稿主要依据用户输入生成，未使用外部检索。原始需求：{intent or '未提供'}。"
 
 

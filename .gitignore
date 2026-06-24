@@ -8,6 +8,7 @@ dist/
 build/
 release/
 coverage/
+out/
 *.tsbuildinfo
 vite.config.js
 vite.config.d.ts
@@ -16,6 +17,7 @@ vite.config.d.ts
 .env
 .env.*
 !.env.example
+*.local
 
 # Python
 .venv/
@@ -30,12 +32,32 @@ __pycache__/
 
 # Runtime data
 backend/runtime/
+*.db
+*.sqlite
+*.sqlite3
+*.db-shm
+*.db-wal
+*.sqlite-shm
+*.sqlite-wal
 generated_docs/*
 !generated_docs/.gitkeep
 agent_state/*
 !agent_state/.gitkeep
 agent_uploads/*
 !agent_uploads/.gitkeep
+uploads/
+output/
+logs/
+user_voice/
+
+# Local model weights and large binary assets
+models/
+*.gguf
+*.safetensors
+*.bin
+*.onnx
+*.pt
+*.pth
 
 # Browser and test artifacts
 .playwright-mcp/
@@ -54,7 +76,7 @@ yarn-debug.log*
 .DS_Store
 Thumbs.db
 
-user_voice/
 docs/
 .trae/
 .amadeus/
+.superpowers/

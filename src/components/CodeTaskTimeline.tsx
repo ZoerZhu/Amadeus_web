@@ -439,9 +439,6 @@ function CodeTaskProcessedBlock({
   running: boolean;
 }) {
   const processPhases = taskProcessPhases(phases);
-  if (processPhases.length === 0) {
-    return null;
-  }
   const pendingQuestion = messages.some(isPendingQuestionMessage);
   const hasError = processPhases.some((phase) => phase.status === "error");
   const shouldDefaultOpen = running || pendingQuestion || hasError;
@@ -449,6 +446,9 @@ function CodeTaskProcessedBlock({
   useEffect(() => {
     setOpen(shouldDefaultOpen);
   }, [shouldDefaultOpen]);
+  if (processPhases.length === 0) {
+    return null;
+  }
   const duration = formatTaskDuration(messages);
   const eventCount = processPhases.reduce((total, phase) => total + phase.messages.length, 0);
   return (

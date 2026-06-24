@@ -810,6 +810,138 @@ def latest_user_message_text(messages: list[Any]) -> str:
     return ""
 
 
+def build_forced_chat_tool_calls(user_request: str) -> list[ModelToolCall]:
+    """Create deterministic tool calls when the user explicitly asks for tools.
+
+    Normal chat still lets the model decide tool use with tool_choice=auto. This
+    path only handles clear user directives such as "使用 websearch" or requests
+    to generate/save a markdown/docx report.
+    """
+    text = user_request.strip()
+    if not text:
+        return []
+
+    calls: list[ModelToolCall] = []
+    if should_force_web_search(text):
+        calls.append(
+            make_forced_tool_call(
+                "web_search",
+                {
+                    "query": infer_forced_search_query(text),
+                    "freshness": infer_forced_freshness(text),
+                    "maxResults": 10,
+                    "fetchContent": True,
+                },
+                len(calls),
+            )
+        )
+    if should_force_doc_writer(text):
+        doc_args = build_doc_writer_fallback_arguments(raw_arguments="", user_request=text)
+        doc_args.setdefault("writingMode", "advanced")
+        doc_args.setdefault("llmWrite", True)
+        if should_force_web_search(text):
+            doc_args["useWebSearch"] = True
+        calls.append(make_forced_tool_call("doc_writer", doc_args, len(calls)))
+    return calls
+
+
+def make_forced_tool_call(name: str, arguments: dict[str, Any], index: int) -> ModelToolCall:
+    return ModelToolCall(
+        id=f"forced_{name}_{uuid4().hex[:8]}",
+        name=name,
+        arguments=json.dumps(arguments, ensure_ascii=False),
+        index=index,
+    )
+
+
+def should_force_web_search(text: str) -> bool:
+    lowered = normalize_tool_directive_text(text)
+    if re.search(r"(不用|不要用|不使用|禁止使用|禁用|without|do not use|don't use)\s*(web\s*search|web[-_]?search|websearch|网页搜索|网络搜索)", lowered):
+        return False
+    return has_explicit_tool_directive(
+        lowered,
+        aliases=("websearch", "web_search", "web search", "web-search", "网页搜索", "网络搜索", "web 搜索"),
+    )
+
+
+def should_force_doc_writer(text: str) -> bool:
+    lowered = normalize_tool_directive_text(text)
+    if has_explicit_tool_directive(
+        lowered,
+        aliases=("doc_writer", "docwriter", "doc writer", "文档写作", "写作工具", "报告工具"),
+    ):
+        return True
+    if re.search(r"(写成|生成|保存|导出|输出|写一份|编写|起草).{0,50}(md|markdown|docx|xlsx|csv|txt|报告|文档)", lowered):
+        return bool(re.search(r"(文件|保存|放在|目录|文件夹|output|generated_docs|[a-z]:\\)", lowered))
+    if re.search(r"(md|markdown|docx|xlsx|csv|txt).{0,20}(报告|文档)", lowered):
+        return bool(re.search(r"(文件|保存|放在|目录|文件夹|output|generated_docs|[a-z]:\\)", lowered))
+    return False
+
+
+def has_explicit_tool_directive(text: str, *, aliases: tuple[str, ...]) -> bool:
+    verbs = r"(使用|调用|启用|走|用|强制使用|必须使用|use|call|invoke|run)"
+    suffix = r"(工具|tool)?"
+    for alias in aliases:
+        pattern = re.escape(alias).replace(r"\ ", r"\s*").replace("_", r"[-_\s]*")
+        if re.search(rf"{verbs}\s*{pattern}\s*{suffix}", text):
+            return True
+    return False
+
+
+def normalize_tool_directive_text(text: str) -> str:
+    return unicodedata.normalize("NFKC", text).lower()
+
+
+def infer_forced_search_query(text: str) -> str:
+    query = normalize_tool_directive_text(text)
+    query = re.sub(r"(使用|调用|启用|走|用|强制使用|必须使用|use|call|invoke|run)\s*(web\s*search|web[-_]?search|websearch|网页搜索|网络搜索|web\s*搜索)\s*[，,：:\s]*", "", query)
+    query = re.sub(r"(写成|生成|保存|导出|输出|文件放在|保存到|输出到).*$", "", query).strip()
+    query = re.sub(r"^(完成|帮我|请|请帮我)\s*", "", query)
+    query = re.sub(r"^(查一下|查询|搜索|检索)\s*", "", query)
+    query = query.strip(" ，,。；;：:")
+    return query or text.strip()
+
+
+def infer_forced_freshness(text: str) -> str:
+    lowered = normalize_tool_directive_text(text)
+    if any(keyword in lowered for keyword in ("现在", "当前", "今天", "最新", "today", "current", "latest", "now")):
+        return "day"
+    if any(keyword in lowered for keyword in ("本周", "最近一周", "week")):
+        return "week"
+    if any(keyword in lowered for keyword in ("本月", "最近一个月", "month")):
+        return "month"
+    return "any"
+
+
+def extract_search_sources_for_doc_writer(executed: ExecutedToolCall) -> list[dict[str, Any]]:
+    if executed.call.name != "web_search" or not executed.ok or not executed.result_payload:
+        return []
+    data = executed.result_payload.get("data")
+    if not isinstance(data, dict):
+        return []
+    results = data.get("results")
+    if not isinstance(results, list):
+        return []
+    return [dict(item) for item in results if isinstance(item, dict)]
+
+
+def enrich_doc_writer_call_with_sources(call: ModelToolCall, sources: list[dict[str, Any]]) -> ModelToolCall:
+    if call.name != "doc_writer" or not sources:
+        return call
+    try:
+        args = parse_tool_arguments(call.arguments)
+    except Exception:
+        args = {}
+    args["sources"] = sources
+    args["useWebSearch"] = False
+    return ModelToolCall(
+        id=call.id,
+        name=call.name,
+        arguments=json.dumps(args, ensure_ascii=False),
+        index=call.index,
+    )
+
+
 async def execute_model_tool_call(call: ModelToolCall, *, fallback_user_request: str = "") -> ExecutedToolCall:
     try:
         arguments = parse_tool_arguments(call.arguments)
@@ -975,10 +1107,13 @@ def infer_doc_format_from_text(text: str, output_path: str = "", file_name: str 
 
 
 def infer_report_topic(text: str) -> str:
+    if re.search(r"(现在|当前|今天).{0,12}(几点|时间)|time|current time|what time", text, re.IGNORECASE):
+        return "当前时间"
     match = re.search(r"关于\s*([^，。,.；;\n]+?)(?:最新|调研|报告|md|markdown|文档|$)", text, re.IGNORECASE)
     if match and match.group(1).strip():
         return match.group(1).strip()
-    cleaned = re.sub(r"(完成|生成|写|编写|起草|一份|报告|文档|给我|文件放在.+$)", " ", text, flags=re.IGNORECASE)
+    cleaned = re.sub(r"(使用|调用|启用|走|用|强制使用|必须使用)?\s*(web\s*search|web[-_]?search|websearch|网页搜索|网络搜索|web\s*搜索)", " ", text, flags=re.IGNORECASE)
+    cleaned = re.sub(r"(查一下|查询|搜索|检索|完成|生成|写成\s*(md|markdown|docx|xlsx|csv|txt)?|写|编写|起草|一份|报告|文档|给我|文件放在.+$)", " ", cleaned, flags=re.IGNORECASE)
     cleaned = re.sub(r"\s+", " ", cleaned).strip(" ：:，,。.；;")
     return truncate_text(cleaned, 80) if cleaned else "调研报告"
 
@@ -1577,6 +1712,46 @@ async def stream_chat(
     for voice_event in voice_stream.startup_events():
         yield voice_event
     executed_tool_history: list[ExecutedToolCall] = []
+    forced_tool_calls = build_forced_chat_tool_calls(last_user_request)
+    if forced_tool_calls:
+        thinking_log.append("检测到用户显式要求使用工具，已由后端强制执行对应工具。")
+        yield sse("thinking", {"text": "检测到用户显式要求使用工具，正在先执行指定工具。\n"})
+        forced_executed: list[ExecutedToolCall] = []
+        forced_search_sources: list[dict[str, Any]] = []
+        yield sse("status", {"phase": "tools", "forced": True})
+        for raw_call in forced_tool_calls:
+            call = enrich_doc_writer_call_with_sources(raw_call, forced_search_sources)
+            started_payload = tool_event_payload(
+                call,
+                status="started",
+                arguments=safe_parse_tool_arguments(call.arguments),
+            )
+            thinking_log.append(tool_thinking_line(started_payload))
+            thinking_log.append(tool_event_log_line(started_payload))
+            yield sse("tool", started_payload)
+
+            executed = await execute_model_tool_call(call, fallback_user_request=last_user_request)
+            forced_executed.append(executed)
+            forced_search_sources.extend(extract_search_sources_for_doc_writer(executed))
+            completed_payload = tool_event_payload(
+                call,
+                status="completed" if executed.ok else "failed",
+                arguments=executed.arguments,
+                summary=executed.summary,
+                result=executed.content,
+                result_payload=executed.result_payload,
+                error=executed.error,
+            )
+            thinking_log.append(tool_thinking_line(completed_payload))
+            thinking_log.append(tool_event_log_line(completed_payload))
+            yield sse("tool", completed_payload)
+
+        executed_tool_history.extend(forced_executed)
+        append_tool_messages(
+            payload_messages,
+            ModelTurn(content="已按用户显式要求先执行指定工具。", tool_calls=[item.call for item in forced_executed]),
+            forced_executed,
+        )
     try:
         async with httpx.AsyncClient(timeout=httpx.Timeout(None, connect=20.0, read=None)) as client:
             final_turn: ModelTurn | None = None

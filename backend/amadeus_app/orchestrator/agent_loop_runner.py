@@ -26,7 +26,7 @@ from .capabilities import CapabilityGateway
 from .domain import OrchestratorSettings, OrchestratorTaskCreateRequest
 from . import storage as orchestrator_storage
 from .context_window import estimate_token_count, trim_context
-from .model_retry import ModelRetryConfig, retry_model_call, classify_error
+from .model_retry import ModelRetryConfig, retry_model_call
 from .shell_exec_policy import classify_shell_command
 from ..orchestrator_integrations.mcp_client import mcp_manager
 

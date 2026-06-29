@@ -6,6 +6,7 @@ import os
 import tempfile
 
 import pytest
+import pytest_asyncio
 
 from backend.amadeus_app.orchestrator.capabilities import (
     CapabilityGateway,
@@ -276,3 +277,358 @@ def test_orchestrator_runner_falls_back_to_planner_when_disabled():
     runner = OrchestratorRunner()
     settings = OrchestratorSettings(agent_loop_enabled=False)
     assert runner._should_use_agent_loop(settings) is False
+
+
+# ---------------------------------------------------------------------------
+# Task 12: Agent loop integration tests
+# ---------------------------------------------------------------------------
+
+from backend.amadeus_app.orchestrator import storage as orch_storage
+from backend.amadeus_app.orchestrator.domain import ChatAttachment
+from backend.amadeus_app.storage import SQLiteStorage
+
+
+@pytest_asyncio.fixture
+async def agent_storage():
+    with tempfile.TemporaryDirectory() as tmp:
+        store = SQLiteStorage(os.path.join(tmp, "test_agent.db"))
+        await store.connect()
+        await store.init_schema()
+        yield store
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_writes_events_for_multi_round(agent_storage):
+    """Test that the agent loop writes plan, tool_call, tool_result, and done events."""
+    from unittest.mock import AsyncMock, patch
+
+    call_count = [0]
+
+    async def mock_call_model(*, loop_ctx, task_model, mode, emit):
+        call_count[0] += 1
+        if call_count[0] == 1:
+            return {
+                "content": "I'll search for files first.",
+                "tool_calls": [{
+                    "id": "call_1",
+                    "name": "file_read",
+                    "arguments": {"action": "list", "path": "."},
+                }],
+                "tool_calls_raw": [],
+                "finish_reason": "tool_calls",
+            }
+        else:
+            return {
+                "content": "",
+                "tool_calls": [{
+                    "id": "call_2",
+                    "name": "finish",
+                    "arguments": {"summary": "Done.", "completedItems": ["Listed files"]},
+                }],
+                "tool_calls_raw": [],
+                "finish_reason": "stop",
+            }
+
+    with tempfile.TemporaryDirectory() as tmp:
+        task = await orch_storage.create_task(
+            agent_storage,
+            user_id="test-user",
+            title="list files",
+            prompt="list files",
+            workspace_path=tmp,
+            conversation_id=None,
+            active_skill_ids=[],
+            settings=OrchestratorSettings(agent_loop_enabled=True, trust_mode=True).model_dump(by_alias=True),
+            context={},
+            budget={},
+        )
+        runner = OrchestratorRunner()
+        with patch.object(runner.agent_loop_runner, "_call_model", side_effect=mock_call_model):
+            request = OrchestratorTaskCreateRequest(
+                prompt="list files",
+                workspace_path=tmp,
+            )
+            settings = OrchestratorSettings(agent_loop_enabled=True, trust_mode=True)
+            await runner.run(storage=agent_storage, task_id=task["id"], request=request, settings=settings)
+
+    events = await orch_storage.list_events(agent_storage, task["id"])
+    kinds = [e["kind"] for e in events]
+    assert "agent_thought_summary" in kinds
+    assert "tool_call" in kinds
+    assert "tool_result" in kinds
+    assert "done" in kinds
+    assert call_count[0] == 2
+
+
+@pytest.mark.asyncio
+async def test_shell_exec_auto_approves_low_risk_in_trust_mode(agent_storage):
+    """Test that low-risk shell commands auto-approve in trust mode."""
+    from unittest.mock import patch
+
+    async def mock_call_model(*, loop_ctx, task_model, mode, emit):
+        return {
+            "content": "",
+            "tool_calls": [{
+                "id": "call_1",
+                "name": "shell_exec",
+                "arguments": {"command": "echo test"},
+            }],
+            "tool_calls_raw": [],
+            "finish_reason": "tool_calls",
+        }
+
+    with tempfile.TemporaryDirectory() as tmp:
+        task = await orch_storage.create_task(
+            agent_storage,
+            user_id="test-user",
+            title="run echo",
+            prompt="run echo",
+            workspace_path=tmp,
+            conversation_id=None,
+            active_skill_ids=[],
+            settings=OrchestratorSettings(agent_loop_enabled=True, trust_mode=True).model_dump(by_alias=True),
+            context={},
+            budget={},
+        )
+        runner = OrchestratorRunner()
+        call_count = [0]
+
+        async def mock_call_model_count(*, loop_ctx, task_model, mode, emit):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                return {
+                    "content": "",
+                    "tool_calls": [{
+                        "id": "call_1",
+                        "name": "shell_exec",
+                        "arguments": {"command": "echo test"},
+                    }],
+                    "tool_calls_raw": [],
+                    "finish_reason": "tool_calls",
+                }
+            return {
+                "content": "",
+                "tool_calls": [{"id": "call_2", "name": "finish", "arguments": {"summary": "Done"}}],
+                "tool_calls_raw": [],
+                "finish_reason": "stop",
+            }
+
+        with patch.object(runner.agent_loop_runner, "_call_model", side_effect=mock_call_model_count):
+            request = OrchestratorTaskCreateRequest(prompt="run echo", workspace_path=tmp)
+            settings = OrchestratorSettings(agent_loop_enabled=True, trust_mode=True)
+            await runner.run(storage=agent_storage, task_id=task["id"], request=request, settings=settings)
+
+    events = await orch_storage.list_events(agent_storage, task["id"])
+    kinds = [e["kind"] for e in events]
+    assert "command" in kinds
+    assert "question" not in kinds
+
+
+@pytest.mark.asyncio
+async def test_shell_exec_high_risk_generates_permission(agent_storage):
+    """Test that high-risk shell commands generate a permission request."""
+    from unittest.mock import patch
+
+    with tempfile.TemporaryDirectory() as tmp:
+        task = await orch_storage.create_task(
+            agent_storage,
+            user_id="test-user",
+            title="push code",
+            prompt="push code",
+            workspace_path=tmp,
+            conversation_id=None,
+            active_skill_ids=[],
+            settings=OrchestratorSettings(agent_loop_enabled=True, trust_mode=False).model_dump(by_alias=True),
+            context={},
+            budget={},
+        )
+        runner = OrchestratorRunner()
+
+        async def mock_call_model(*, loop_ctx, task_model, mode, emit):
+            return {
+                "content": "",
+                "tool_calls": [{
+                    "id": "call_1",
+                    "name": "shell_exec",
+                    "arguments": {"command": "git push origin main"},
+                }],
+                "tool_calls_raw": [],
+                "finish_reason": "tool_calls",
+            }
+
+        with patch.object(runner.agent_loop_runner, "_call_model", side_effect=mock_call_model):
+            request = OrchestratorTaskCreateRequest(prompt="push code", workspace_path=tmp)
+            settings = OrchestratorSettings(agent_loop_enabled=True, trust_mode=False)
+            await runner.run(storage=agent_storage, task_id=task["id"], request=request, settings=settings)
+
+    events = await orch_storage.list_events(agent_storage, task["id"])
+    kinds = [e["kind"] for e in events]
+    assert "question" in kinds
+    stored_task = await orch_storage.get_task(agent_storage, task["id"])
+    assert stored_task["status"] == "paused"
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_cancellation_between_rounds(agent_storage):
+    """Test that cancellation stops the loop between rounds."""
+    from unittest.mock import patch
+
+    call_count = [0]
+
+    async def mock_call_model(*, loop_ctx, task_model, mode, emit):
+        call_count[0] += 1
+        if call_count[0] == 1:
+            return {
+                "content": "Working...",
+                "tool_calls": [{
+                    "id": "call_1",
+                    "name": "file_read",
+                    "arguments": {"action": "list", "path": "."},
+                }],
+                "tool_calls_raw": [],
+                "finish_reason": "tool_calls",
+            }
+        await orch_storage.update_task_status(agent_storage, "test-cancel-task", status="cancelled")
+        return {
+            "content": "",
+            "tool_calls": [{"id": "call_2", "name": "finish", "arguments": {"summary": "Done"}}],
+            "tool_calls_raw": [],
+            "finish_reason": "stop",
+        }
+
+    with tempfile.TemporaryDirectory() as tmp:
+        task = await orch_storage.create_task(
+            agent_storage,
+            user_id="test-user",
+            title="test cancel",
+            prompt="test",
+            workspace_path=tmp,
+            conversation_id=None,
+            active_skill_ids=[],
+            settings=OrchestratorSettings(agent_loop_enabled=True).model_dump(by_alias=True),
+            context={},
+            budget={},
+        )
+        # Rename task to match the mock's hardcoded ID
+        # Actually, let's use the real task ID
+        task_id = task["id"]
+
+        # Override the mock to use the real task_id
+        async def mock_call_model_real(*, loop_ctx, task_model, mode, emit):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                return {
+                    "content": "Working...",
+                    "tool_calls": [{
+                        "id": "call_1",
+                        "name": "file_read",
+                        "arguments": {"action": "list", "path": "."},
+                    }],
+                    "tool_calls_raw": [],
+                    "finish_reason": "tool_calls",
+                }
+            await orch_storage.update_task_status(agent_storage, task_id, status="cancelled")
+            return {
+                "content": "",
+                "tool_calls": [{"id": "call_2", "name": "finish", "arguments": {"summary": "Done"}}],
+                "tool_calls_raw": [],
+                "finish_reason": "stop",
+            }
+
+        runner = OrchestratorRunner()
+        with patch.object(runner.agent_loop_runner, "_call_model", side_effect=mock_call_model_real):
+            request = OrchestratorTaskCreateRequest(prompt="test", workspace_path=tmp)
+            settings = OrchestratorSettings(agent_loop_enabled=True)
+            await runner.run(storage=agent_storage, task_id=task_id, request=request, settings=settings)
+
+    stored_task = await orch_storage.get_task(agent_storage, task_id)
+    assert stored_task["status"] == "cancelled"
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_stops_on_max_rounds(agent_storage):
+    """Test that the loop stops when max_rounds is reached."""
+    from unittest.mock import patch
+
+    async def mock_call_model(*, loop_ctx, task_model, mode, emit):
+        return {
+            "content": "Continuing...",
+            "tool_calls": [{
+                "id": f"call_{loop_ctx.rounds}",
+                "name": "file_read",
+                "arguments": {"action": "list", "path": "."},
+            }],
+            "tool_calls_raw": [],
+            "finish_reason": "tool_calls",
+        }
+
+    with tempfile.TemporaryDirectory() as tmp:
+        task = await orch_storage.create_task(
+            agent_storage,
+            user_id="test-user",
+            title="test budget",
+            prompt="test",
+            workspace_path=tmp,
+            conversation_id=None,
+            active_skill_ids=[],
+            settings=OrchestratorSettings(agent_loop_enabled=True, max_rounds=2).model_dump(by_alias=True),
+            context={},
+            budget={},
+        )
+        runner = OrchestratorRunner()
+        with patch.object(runner.agent_loop_runner, "_call_model", side_effect=mock_call_model):
+            request = OrchestratorTaskCreateRequest(prompt="test", workspace_path=tmp, max_rounds=2)
+            settings = OrchestratorSettings(agent_loop_enabled=True, max_rounds=2)
+            await runner.run(storage=agent_storage, task_id=task["id"], request=request, settings=settings)
+
+    stored_task = await orch_storage.get_task(agent_storage, task["id"])
+    assert stored_task["status"] == "done"
+    events = await orch_storage.list_events(agent_storage, task["id"])
+    status_events = [
+        e for e in events
+        if e["kind"] == "status" and "ended" in (e.get("summary") or "").lower()
+    ]
+    assert len(status_events) > 0
+
+
+@pytest.mark.asyncio
+async def test_permission_request_stores_extended_payload(agent_storage):
+    """Test that extended payload fields are stored and retrieved."""
+    task = await orch_storage.create_task(
+        agent_storage,
+        user_id="test-user",
+        title="test",
+        prompt="test",
+        workspace_path="/tmp",
+        conversation_id=None,
+        active_skill_ids=[],
+        settings=OrchestratorSettings(agent_loop_enabled=False).model_dump(by_alias=True),
+        context={},
+        budget={},
+    )
+    perm = await orch_storage.create_permission_request(
+        agent_storage,
+        task_id=task["id"],
+        tool_name="shell_exec",
+        arguments_preview='{"command": "rm -rf /"}',
+        risk_level="dangerous",
+        payload={
+            "toolName": "shell_exec",
+            "toolArguments": {"command": "rm -rf /"},
+            "toolArgumentsPreview": '{"command": "rm -rf /"}',
+            "riskLevel": "dangerous",
+            "autoApproved": False,
+            "reason": "dangerous pattern matched: rm -rf",
+            "commandPreview": "rm -rf /",
+            "workspacePath": "/tmp",
+            "round": 3,
+        },
+    )
+    assert perm["id"]
+    fetched = await orch_storage.get_permission_request(agent_storage, perm["id"])
+    payload = fetched.get("payload") if isinstance(fetched.get("payload"), dict) else {}
+    assert payload.get("riskLevel") == "dangerous"
+    assert payload.get("autoApproved") is False
+    assert payload.get("commandPreview") == "rm -rf /"
+    assert payload.get("workspacePath") == "/tmp"

@@ -325,6 +325,11 @@ class AgentLoopRunner:
                 emit=emit,
             )
 
+            # Re-check cancellation after model call (model call may take time)
+            task = await orchestrator_storage.get_task(storage, task_id)
+            if task is None or task.get("status") in {"paused", "cancelled", "rolled_back"}:
+                return False
+
             if turn is None:
                 await emit(
                     kind="error",

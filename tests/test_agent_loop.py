@@ -194,3 +194,85 @@ def test_desktop_screenshot_returns_error_when_not_electron():
         result = asyncio.run(registry.execute("desktop_screenshot", {}, ctx))
         assert result["ok"] is False
         assert "not available" in result["summary"].lower() or "electron" in result["summary"].lower()
+
+
+# ---------------------------------------------------------------------------
+# Task 6: Agent loop context builder tests
+# ---------------------------------------------------------------------------
+
+from backend.amadeus_app.orchestrator.agent_loop_context import (
+    build_agent_loop_system_prompt,
+    build_tool_schemas,
+    AgentLoopContext,
+)
+
+
+def test_system_prompt_contains_role_and_instructions():
+    prompt = build_agent_loop_system_prompt(workspace_path="/tmp/test")
+    assert "agent" in prompt.lower()
+    assert "tool" in prompt.lower()
+    assert "/tmp/test" in prompt
+
+
+def test_tool_schemas_include_core_capabilities():
+    schemas = build_tool_schemas(enabled_capabilities=None)
+    names = {s["function"]["name"] for s in schemas}
+    assert "web_search" in names
+    assert "file_read" in names
+    assert "shell_exec" in names
+    assert "desktop_screenshot" in names
+
+
+def test_tool_schemas_include_finish():
+    schemas = build_tool_schemas(enabled_capabilities=None)
+    names = {s["function"]["name"] for s in schemas}
+    assert "finish" in names
+
+
+def test_tool_schemas_respect_enabled_capabilities():
+    schemas = build_tool_schemas(enabled_capabilities={"web_search", "file_read"})
+    names = {s["function"]["name"] for s in schemas}
+    assert "web_search" in names
+    assert "file_read" in names
+    assert "shell_exec" not in names
+
+
+# ---------------------------------------------------------------------------
+# Task 7-8: Agent loop runner and wire-up tests
+# ---------------------------------------------------------------------------
+
+from backend.amadeus_app.orchestrator.agent_loop_runner import AgentLoopRunner
+from backend.amadeus_app.orchestrator.runner import OrchestratorRunner
+
+
+def test_agent_loop_runner_exists():
+    runner = AgentLoopRunner()
+    assert runner is not None
+
+
+def test_agent_loop_runner_has_run_method():
+    runner = AgentLoopRunner()
+    assert hasattr(runner, "run")
+
+
+def test_agent_loop_runner_has_resume_method():
+    runner = AgentLoopRunner()
+    assert hasattr(runner, "resume_from_permission")
+
+
+def test_orchestrator_runner_has_agent_loop_runner():
+    runner = OrchestratorRunner()
+    assert hasattr(runner, "agent_loop_runner")
+
+
+def test_orchestrator_runner_dispatches_to_agent_loop_when_enabled():
+    runner = OrchestratorRunner()
+    assert hasattr(runner, "_should_use_agent_loop")
+    settings = OrchestratorSettings(agent_loop_enabled=True)
+    assert runner._should_use_agent_loop(settings) is True
+
+
+def test_orchestrator_runner_falls_back_to_planner_when_disabled():
+    runner = OrchestratorRunner()
+    settings = OrchestratorSettings(agent_loop_enabled=False)
+    assert runner._should_use_agent_loop(settings) is False

@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import asyncio
 import json
@@ -166,7 +166,7 @@ async def test_orchestrator_runner_writes_v2_ledger(memory_storage: SQLiteStorag
         prompt="请修改 backend 代码并运行测试",
         workspacePath="E:/Amadeus/Amadeus_web",
     )
-    settings = OrchestratorSettings(defaultWorkspace="E:/Amadeus/Amadeus_web", trustMode=True)
+    settings = OrchestratorSettings(defaultWorkspace="E:/Amadeus/Amadeus_web", trustMode=True, agentLoopEnabled=False)
     task = await orchestrator_storage.create_task(
         memory_storage,
         user_id=DEFAULT_USER_ID,
@@ -230,7 +230,7 @@ async def test_orchestrator_runner_stops_when_task_is_cancelled(memory_storage: 
     registry.register("todo_task", fake_second)
     runner = OrchestratorRunner(capability_registry=registry, planner=FakePlanner())
     request = OrchestratorTaskCreateRequest(prompt="执行两步任务", workspacePath="E:/Amadeus/Amadeus_web")
-    settings = OrchestratorSettings(defaultWorkspace="E:/Amadeus/Amadeus_web", trustMode=True)
+    settings = OrchestratorSettings(defaultWorkspace="E:/Amadeus/Amadeus_web", trustMode=True, agentLoopEnabled=False)
     task = await orchestrator_storage.create_task(
         memory_storage,
         user_id=DEFAULT_USER_ID,
@@ -299,7 +299,7 @@ def test_orchestrator_planner_respects_browser_enabled_toggle():
 def test_orchestrator_chat_routing_and_legacy_wrapper_match():
     from backend.amadeus_app.complex_agent import chat_router as legacy_chat_router
 
-    settings = OrchestratorSettings(enabled=True)
+    settings = OrchestratorSettings(enabled=True, agentLoopEnabled=False)
     routing = chat_routing.detect_orchestrator_task_intent(
         "请交给复杂 agent 执行，查代码然后写文档",
         enabled_skills=[],
@@ -349,7 +349,7 @@ async def test_chat_stream_emits_orchestrator_task_event(monkeypatch, memory_sto
         voice={},
         desktop_assistant={},
         mode="fast",
-        orchestrator=OrchestratorSettings(enabled=True, defaultWorkspace=".").model_dump(by_alias=True),
+        orchestrator=OrchestratorSettings(enabled=True, agentLoopEnabled=False, defaultWorkspace=".").model_dump(by_alias=True),
     )
 
     request = ChatStreamRequest.model_validate(
@@ -386,6 +386,7 @@ async def test_chat_stream_reads_orchestrator_settings_without_legacy_agent_alia
         return {
             "orchestrator": OrchestratorSettings(
                 enabled=True,
+                agentLoopEnabled=False,
                 defaultWorkspace=".",
             ).model_dump(by_alias=True)
         }
@@ -596,7 +597,7 @@ async def test_web_search_capability_executes_through_adapter(monkeypatch, memor
 
     monkeypatch.setattr(capability_adapters, "run_web_search_agent", fake_web_search)
     request = OrchestratorTaskCreateRequest(prompt="上网搜索 Amadeus 项目资料", workspacePath="E:/Amadeus/Amadeus_web")
-    settings = OrchestratorSettings(defaultWorkspace="E:/Amadeus/Amadeus_web", trustMode=True)
+    settings = OrchestratorSettings(defaultWorkspace="E:/Amadeus/Amadeus_web", trustMode=True, agentLoopEnabled=False)
     task = await orchestrator_storage.create_task(
         memory_storage,
         user_id=DEFAULT_USER_ID,
@@ -658,7 +659,7 @@ async def test_web_search_prefers_connected_mcp_tool(monkeypatch, memory_storage
     monkeypatch.setattr(capability_adapters, "mcp_manager", FakeMcpManager(fake_client))
     monkeypatch.setattr(capability_adapters, "run_web_search_agent", unexpected_builtin_search)
     request = OrchestratorTaskCreateRequest(prompt="上网搜索 Amadeus 项目资料", workspacePath="E:/Amadeus/Amadeus_web")
-    settings = OrchestratorSettings(defaultWorkspace="E:/Amadeus/Amadeus_web", trustMode=True)
+    settings = OrchestratorSettings(defaultWorkspace="E:/Amadeus/Amadeus_web", trustMode=True, agentLoopEnabled=False)
     task = await orchestrator_storage.create_task(
         memory_storage,
         user_id=DEFAULT_USER_ID,
@@ -703,7 +704,7 @@ async def test_code_search_prefers_connected_mcp_tool(tmp_path: Path, monkeypatc
         workspace_path=str(tmp_path),
         conversation_id=None,
         active_skill_ids=[],
-        settings=OrchestratorSettings(defaultWorkspace=str(tmp_path)).model_dump(by_alias=True),
+        settings=OrchestratorSettings(defaultWorkspace=str(tmp_path), agentLoopEnabled=False).model_dump(by_alias=True),
         budget={},
     )
 
@@ -749,7 +750,7 @@ async def test_code_search_prefers_connected_mcp_tool(tmp_path: Path, monkeypatc
         task_id=task["id"],
         prompt="查找 `target_func` 的定义",
         workspace_path=str(tmp_path),
-        settings=OrchestratorSettings(defaultWorkspace=str(tmp_path), trustMode=True),
+        settings=OrchestratorSettings(defaultWorkspace=str(tmp_path), trustMode=True, agentLoopEnabled=False),
         storage=memory_storage,
         emit_event=emit_event,
     )
@@ -780,7 +781,7 @@ async def test_code_search_falls_back_to_local_workspace(tmp_path: Path, monkeyp
         workspace_path=str(tmp_path),
         conversation_id=None,
         active_skill_ids=[],
-        settings=OrchestratorSettings(defaultWorkspace=str(tmp_path)).model_dump(by_alias=True),
+        settings=OrchestratorSettings(defaultWorkspace=str(tmp_path), agentLoopEnabled=False).model_dump(by_alias=True),
         budget={},
     )
 
@@ -793,7 +794,7 @@ async def test_code_search_falls_back_to_local_workspace(tmp_path: Path, monkeyp
         task_id=task["id"],
         prompt="查找 target_func",
         workspace_path=str(tmp_path),
-        settings=OrchestratorSettings(defaultWorkspace=str(tmp_path), trustMode=True),
+        settings=OrchestratorSettings(defaultWorkspace=str(tmp_path), trustMode=True, agentLoopEnabled=False),
         storage=memory_storage,
     )
     result = await capability_adapters.default_capability_registry.execute(
@@ -810,11 +811,7 @@ async def test_code_search_falls_back_to_local_workspace(tmp_path: Path, monkeyp
 @pytest.mark.asyncio
 async def test_opencode_disabled_prevents_code_agent_planning(memory_storage: SQLiteStorage):
     request = OrchestratorTaskCreateRequest(prompt="请修改 backend 代码", workspacePath="E:/Amadeus/Amadeus_web")
-    settings = OrchestratorSettings(
-        defaultWorkspace="E:/Amadeus/Amadeus_web",
-        trustMode=True,
-        opencodeEnabled=False,
-    )
+    settings = OrchestratorSettings(defaultWorkspace="E:/Amadeus/Amadeus_web", trustMode=True, opencodeEnabled=False, agentLoopEnabled=False)
     task = await orchestrator_storage.create_task(
         memory_storage,
         user_id=DEFAULT_USER_ID,
@@ -863,7 +860,7 @@ async def test_orchestrator_permission_queue_blocks_and_approves(monkeypatch, me
         workspacePath="E:/Amadeus/Amadeus_web",
         trustMode=False,
     )
-    settings = OrchestratorSettings(defaultWorkspace="E:/Amadeus/Amadeus_web", trustMode=False)
+    settings = OrchestratorSettings(defaultWorkspace="E:/Amadeus/Amadeus_web", trustMode=False, agentLoopEnabled=False)
     task = await orchestrator_storage.create_task(
         memory_storage,
         user_id=DEFAULT_USER_ID,
@@ -989,7 +986,7 @@ async def test_orchestrator_task_message_endpoint_appends_user_message(monkeypat
         await orchestrator_storage.update_task_status(memory_storage, task_id, status="done", finished=True)
 
     monkeypatch.setattr(orchestrator, "_run_task", fake_run_task)
-    settings_payload = OrchestratorSettings(defaultWorkspace=str(tmp_path), trustMode=True).model_dump(by_alias=True)
+    settings_payload = OrchestratorSettings(defaultWorkspace=str(tmp_path), trustMode=True, agentLoopEnabled=False).model_dump(by_alias=True)
     task = await orchestrator_storage.create_task(
         memory_storage,
         user_id=DEFAULT_USER_ID,
@@ -1043,6 +1040,16 @@ def test_orchestrator_api_and_deprecated_agent_api(monkeypatch):
     monkeypatch.setattr(orchestrator_integrations, "require_storage", lambda: memory_storage)
     monkeypatch.setattr(legacy_agent, "require_storage", lambda: memory_storage)
     monkeypatch.setattr(settings, "require_storage", lambda: memory_storage)
+    asyncio.run(memory_storage.save_settings(
+        user_id=DEFAULT_USER_ID,
+        model={},
+        vision={},
+        speech_input={},
+        voice={},
+        desktop_assistant={},
+        mode="fast",
+        orchestrator=OrchestratorSettings(enabled=True, agentLoopEnabled=False, defaultWorkspace="E:/Amadeus/Amadeus_web").model_dump(by_alias=True),
+    ))
 
     app = FastAPI()
     app.include_router(orchestrator.router)
@@ -1184,7 +1191,7 @@ def test_orchestrator_artifact_metadata_and_download(monkeypatch, tmp_path: Path
             workspace_path=str(tmp_path),
             conversation_id=None,
             active_skill_ids=[],
-            settings=OrchestratorSettings(defaultWorkspace=str(tmp_path)).model_dump(by_alias=True),
+            settings=OrchestratorSettings(defaultWorkspace=str(tmp_path), agentLoopEnabled=False).model_dump(by_alias=True),
             budget={},
         )
     )
@@ -1319,7 +1326,7 @@ async def test_code_agent_maps_opencode_events_to_v2_ledger(monkeypatch, memory_
     registry.register("code_agent", capability_adapters._code_agent)
     runner = OrchestratorRunner(capability_registry=registry)
     request = OrchestratorTaskCreateRequest(prompt="请修改 backend 代码", workspacePath="E:/Amadeus/Amadeus_web")
-    settings = OrchestratorSettings(defaultWorkspace="E:/Amadeus/Amadeus_web", trustMode=True, opencodeEnabled=True)
+    settings = OrchestratorSettings(defaultWorkspace="E:/Amadeus/Amadeus_web", trustMode=True, opencodeEnabled=True, agentLoopEnabled=False)
     task = await orchestrator_storage.create_task(
         memory_storage,
         user_id=DEFAULT_USER_ID,
@@ -1354,7 +1361,7 @@ async def test_file_write_adapter_records_v2_artifact(tmp_path: Path, memory_sto
         workspace_path=str(tmp_path),
         conversation_id=None,
         active_skill_ids=[],
-        settings=OrchestratorSettings(defaultWorkspace=str(tmp_path)).model_dump(by_alias=True),
+        settings=OrchestratorSettings(defaultWorkspace=str(tmp_path), agentLoopEnabled=False).model_dump(by_alias=True),
         budget={},
     )
 
@@ -1365,7 +1372,7 @@ async def test_file_write_adapter_records_v2_artifact(tmp_path: Path, memory_sto
         task_id=task["id"],
         prompt="写一份说明",
         workspace_path=str(tmp_path),
-        settings=OrchestratorSettings(defaultWorkspace=str(tmp_path), trustMode=True),
+        settings=OrchestratorSettings(defaultWorkspace=str(tmp_path), trustMode=True, agentLoopEnabled=False),
         storage=memory_storage,
         emit_event=emit_event,
     )
@@ -1396,7 +1403,7 @@ async def test_document_convert_prefers_markitdown_mcp(tmp_path: Path, monkeypat
         workspace_path=str(tmp_path),
         conversation_id=None,
         active_skill_ids=[],
-        settings=OrchestratorSettings(defaultWorkspace=str(tmp_path)).model_dump(by_alias=True),
+        settings=OrchestratorSettings(defaultWorkspace=str(tmp_path), agentLoopEnabled=False).model_dump(by_alias=True),
         budget={},
     )
 
@@ -1441,7 +1448,7 @@ async def test_document_convert_prefers_markitdown_mcp(tmp_path: Path, monkeypat
         task_id=task["id"],
         prompt="转换 brief.pdf",
         workspace_path=str(tmp_path),
-        settings=OrchestratorSettings(defaultWorkspace=str(tmp_path), trustMode=True),
+        settings=OrchestratorSettings(defaultWorkspace=str(tmp_path), trustMode=True, agentLoopEnabled=False),
         storage=memory_storage,
         emit_event=emit_event,
     )
@@ -1475,7 +1482,7 @@ async def test_document_convert_falls_back_to_builtin_reader(tmp_path: Path, mon
         workspace_path=str(tmp_path),
         conversation_id=None,
         active_skill_ids=[],
-        settings=OrchestratorSettings(defaultWorkspace=str(tmp_path)).model_dump(by_alias=True),
+        settings=OrchestratorSettings(defaultWorkspace=str(tmp_path), agentLoopEnabled=False).model_dump(by_alias=True),
         budget={},
     )
 
@@ -1492,7 +1499,7 @@ async def test_document_convert_falls_back_to_builtin_reader(tmp_path: Path, mon
         task_id=task["id"],
         prompt="转换 notes.md",
         workspace_path=str(tmp_path),
-        settings=OrchestratorSettings(defaultWorkspace=str(tmp_path), trustMode=True),
+        settings=OrchestratorSettings(defaultWorkspace=str(tmp_path), trustMode=True, agentLoopEnabled=False),
         storage=memory_storage,
         emit_event=emit_event,
     )
@@ -1646,3 +1653,4 @@ async def test_chat_tool_call_blocks_confirm_capabilities():
     assert result.result_payload["capability"] == "doc_writer"
     assert result.result_payload["risk"] == "confirm"
     assert "/api/orchestrator/tasks" in result.summary
+

@@ -312,7 +312,7 @@ class SQLiteStorage:
                 task_id         TEXT NOT NULL REFERENCES agent_tasks(id) ON DELETE CASCADE,
                 seq             INTEGER NOT NULL,
                 kind            TEXT NOT NULL
-                                CHECK (kind IN ('status','plan','step','tool','mcp','browser','artifact','question','sampling','opencode_routing','error','done')),
+                                CHECK (kind IN ('message','status','plan','step','tool','mcp','browser','artifact','question','sampling','opencode_routing','error','done','agent_thought_summary','tool_call','tool_result','command','working_set')),
                 role            TEXT NOT NULL DEFAULT '',
                 name            TEXT NOT NULL DEFAULT '',
                 status          TEXT NOT NULL DEFAULT '',
@@ -457,7 +457,7 @@ class SQLiteStorage:
                 task_id         TEXT NOT NULL REFERENCES orchestrator_tasks(id) ON DELETE CASCADE,
                 seq             INTEGER NOT NULL,
                 kind            TEXT NOT NULL
-                                CHECK (kind IN ('message','status','plan','step','tool','mcp','browser','artifact','question','sampling','opencode_routing','error','done')),
+                                CHECK (kind IN ('message','status','plan','step','tool','mcp','browser','artifact','question','sampling','opencode_routing','error','done','agent_thought_summary','tool_call','tool_result','command','working_set')),
                 role            TEXT NOT NULL DEFAULT '',
                 name            TEXT NOT NULL DEFAULT '',
                 status          TEXT NOT NULL DEFAULT '',
@@ -550,7 +550,7 @@ class SQLiteStorage:
                     task_id         TEXT NOT NULL REFERENCES orchestrator_tasks(id) ON DELETE CASCADE,
                     seq             INTEGER NOT NULL,
                     kind            TEXT NOT NULL
-                                    CHECK (kind IN ('message','status','plan','step','tool','mcp','browser','artifact','question','sampling','opencode_routing','error','done')),
+                                    CHECK (kind IN ('message','status','plan','step','tool','mcp','browser','artifact','question','sampling','opencode_routing','error','done','agent_thought_summary','tool_call','tool_result','command','working_set')),
                     role            TEXT NOT NULL DEFAULT '',
                     name            TEXT NOT NULL DEFAULT '',
                     status          TEXT NOT NULL DEFAULT '',

@@ -6,6 +6,7 @@ from typing import Any
 
 from ..storage import SQLiteStorage
 from . import storage as orchestrator_storage
+from .agent_loop_runner import AgentLoopRunner, default_agent_loop_runner
 from .capability_adapters import (
     CapabilityExecutionContext,
     CapabilityRegistry,
@@ -35,9 +36,14 @@ class OrchestratorRunner:
         self,
         capability_registry: CapabilityRegistry | None = None,
         planner: OrchestratorPlanner | None = None,
+        agent_loop_runner: AgentLoopRunner | None = None,
     ) -> None:
         self.capability_registry = capability_registry or default_capability_registry
         self.planner = planner or default_orchestrator_planner
+        self.agent_loop_runner = agent_loop_runner or default_agent_loop_runner
+
+    def _should_use_agent_loop(self, settings: OrchestratorSettings) -> bool:
+        return bool(settings.agent_loop_enabled)
 
     async def run(
         self,
@@ -47,6 +53,14 @@ class OrchestratorRunner:
         request: OrchestratorTaskCreateRequest,
         settings: OrchestratorSettings,
     ) -> None:
+        if self._should_use_agent_loop(settings):
+            await self.agent_loop_runner.run(
+                storage=storage,
+                task_id=task_id,
+                request=request,
+                settings=settings,
+            )
+            return
         started = time.monotonic()
         gateway = CapabilityGateway(trust_mode=settings.trust_mode if request.trust_mode is None else bool(request.trust_mode))
         async def _emit_capability_event(**event: Any) -> dict[str, Any]:
@@ -133,19 +147,25 @@ class OrchestratorRunner:
         if task.get("status") in {"done", "failed", "cancelled", "rolled_back"}:
             return
 
+        settings = OrchestratorSettings.model_validate(task.get("settings") or {})
+        if self._should_use_agent_loop(settings):
+            await self.agent_loop_runner.resume_from_permission(
+                storage=storage, permission_id=permission_id
+            )
+            return
+
         started = time.monotonic()
         payload = permission.get("payload") if isinstance(permission.get("payload"), dict) else {}
         plan = payload.get("plan")
         if not isinstance(plan, list):
             plan = self.planner.build_plan(
                 str(task.get("prompt") or ""),
-                settings=OrchestratorSettings.model_validate(task.get("settings") or {}),
+                settings=settings,
             ).steps
         try:
             start_index = int(payload.get("stepIndex", 0) or 0)
         except (TypeError, ValueError):
             start_index = 0
-        settings = OrchestratorSettings.model_validate(task.get("settings") or {})
         gateway = CapabilityGateway(trust_mode=settings.trust_mode)
 
         async def _emit_capability_event(**event: Any) -> dict[str, Any]:

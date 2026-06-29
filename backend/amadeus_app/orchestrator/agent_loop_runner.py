@@ -28,6 +28,7 @@ from . import storage as orchestrator_storage
 from .context_window import estimate_token_count, trim_context
 from .model_retry import ModelRetryConfig, retry_model_call
 from .shell_exec_policy import classify_shell_command
+from .tool_executor import ToolCache, ToolExecutor
 from ..orchestrator_integrations.mcp_client import mcp_manager
 
 
@@ -75,6 +76,7 @@ class AgentLoopRunner:
         capability_registry: CapabilityRegistry | None = None,
     ) -> None:
         self.capability_registry = capability_registry or default_capability_registry
+        self.tool_executor = ToolExecutor(runner=self, cache=ToolCache())
 
     async def run(
         self,
@@ -377,37 +379,39 @@ class AgentLoopRunner:
             if not tool_calls:
                 break
 
-            for tc in tool_calls:
-                budget.tool_calls += 1
-                if budget.is_exhausted():
-                    break
+            # Separate finish from other tools (finish runs after others)
+            finish_tc = next((tc for tc in tool_calls if tc["name"] == "finish"), None)
+            non_finish_calls = [tc for tc in tool_calls if tc["name"] != "finish"]
 
-                tool_name = tc["name"]
-                tool_args = tc.get("arguments", {})
+            budget.tool_calls += len(tool_calls)
+            if budget.is_exhausted():
+                break
 
-                if tool_name == "finish":
-                    await emit(
-                        kind="message",
-                        role="assistant",
-                        name="final_answer",
-                        status="done",
-                        summary=str(tool_args.get("summary") or "Task complete.")[:200],
-                        payload=tool_args,
-                    )
-                    return True
-
-                await self._execute_tool_call(
-                    storage=storage,
-                    task_id=task_id,
-                    tool_name=tool_name,
-                    tool_args=tool_args,
-                    tool_call_id=tc.get("id", ""),
+            # Batch-execute non-finish tools (reads parallel, writes serial, cache integrated)
+            if non_finish_calls:
+                await self.tool_executor.execute_batch(
+                    tool_calls=non_finish_calls,
                     gateway=gateway,
                     context=context,
                     loop_ctx=loop_ctx,
                     emit=emit,
                     approved_permission=approved_permission,
+                    storage=storage,
+                    task_id=task_id,
                 )
+
+            # finish runs after other tools
+            if finish_tc:
+                tool_args = finish_tc.get("arguments", {})
+                await emit(
+                    kind="message",
+                    role="assistant",
+                    name="final_answer",
+                    status="done",
+                    summary=str(tool_args.get("summary") or "Task complete.")[:200],
+                    payload=tool_args,
+                )
+                return True
 
         reason = budget.remaining_reason()
         await emit(
@@ -561,7 +565,7 @@ class AgentLoopRunner:
         loop_ctx: AgentLoopContext,
         emit,
         approved_permission: dict[str, Any] | None = None,
-    ) -> None:
+    ) -> dict[str, Any] | None:
         """Execute a single tool call within the loop."""
         await emit(
             kind="tool_call",
@@ -577,7 +581,7 @@ class AgentLoopRunner:
         )
 
         if tool_name.startswith("mcp__"):
-            await self._execute_raw_mcp(
+            result = await self._execute_raw_mcp(
                 storage=storage,
                 task_id=task_id,
                 tool_name=tool_name,
@@ -589,7 +593,7 @@ class AgentLoopRunner:
                 emit=emit,
                 approved_permission=approved_permission,
             )
-            return
+            return result
 
         if tool_name == "shell_exec":
             command = str(tool_args.get("command") or "")
@@ -601,7 +605,7 @@ class AgentLoopRunner:
                     emit=emit, tool_name=tool_name, tool_call_id=tool_call_id,
                     result=result, loop_ctx=loop_ctx,
                 )
-                return
+                return result
 
         decision = gateway.decide(tool_name)
         is_approved = (
@@ -652,6 +656,7 @@ class AgentLoopRunner:
             emit=emit, tool_name=tool_name, tool_call_id=tool_call_id,
             result=result, loop_ctx=loop_ctx,
         )
+        return result
 
     async def _execute_raw_mcp(
         self,
@@ -666,7 +671,7 @@ class AgentLoopRunner:
         loop_ctx: AgentLoopContext,
         emit,
         approved_permission: dict[str, Any] | None = None,
-    ) -> None:
+    ) -> dict[str, Any] | None:
         """Execute a raw MCP tool call (always requires confirmation)."""
         is_approved = (
             approved_permission is not None
@@ -739,6 +744,7 @@ class AgentLoopRunner:
             emit=emit, tool_name=tool_name, tool_call_id=tool_call_id,
             result=result, loop_ctx=loop_ctx,
         )
+        return result
 
     async def _emit_tool_result(
         self,
@@ -749,7 +755,7 @@ class AgentLoopRunner:
         result: dict[str, Any],
         loop_ctx: AgentLoopContext,
     ) -> None:
-        """Emit tool_result event and add observation to context."""
+        """Emit tool_result event. Message append is handled by ToolExecutor."""
         ok = bool(result.get("ok", True))
         summary = str(result.get("summary") or "")
         data = result.get("data", {})
@@ -765,10 +771,22 @@ class AgentLoopRunner:
                 "ok": ok,
                 "data": _truncate_payload(data),
                 "artifactIds": _string_list(result.get("artifactIds")),
+                "fromCache": bool(result.get("from_cache", False)),
             },
             artifact_ids=_string_list(result.get("artifactIds")),
         )
 
+    def _append_tool_message(
+        self,
+        loop_ctx: AgentLoopContext,
+        tool_call_id: str,
+        tool_name: str,
+        result: dict[str, Any],
+    ) -> None:
+        """Append tool observation to loop_ctx.messages in order."""
+        ok = bool(result.get("ok", True))
+        summary = str(result.get("summary") or "")
+        data = result.get("data", {})
         observation = self._compress_observation(tool_name, summary, data, ok)
         loop_ctx.messages.append({
             "role": "tool",
@@ -898,6 +916,7 @@ class AgentLoopRunner:
                 "elapsedSeconds": elapsed,
                 "rounds": budget.rounds,
                 "toolCalls": budget.tool_calls,
+                "cacheStats": self.tool_executor.cache.stats if self.tool_executor else {"hits": 0, "misses": 0},
             },
         )
         await orchestrator_storage.update_task_status(

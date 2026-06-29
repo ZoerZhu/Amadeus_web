@@ -1447,3 +1447,128 @@ async def test_execute_batch_permission_blocked_propagates(agent_storage):
             storage=None,
             task_id="test",
         )
+
+
+# ---------------------------------------------------------------------------
+# AgentLoopRunner integration tests
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_run_loop_finish_after_other_tools(agent_storage):
+    """finish tool runs after non-finish tools in the same batch."""
+    from unittest.mock import patch, AsyncMock
+
+    execution_order: list[str] = []
+
+    async def mock_call_model_with_retry(*, loop_ctx, task_model, fallback_model, mode, emit):
+        execution_order.append("model_call")
+        return {
+            "content": "I'll read a file then finish.",
+            "tool_calls": [
+                {"id": "tc_1", "name": "file_read", "arguments": {"path": "test.py"}},
+                {"id": "tc_2", "name": "finish", "arguments": {"summary": "Done"}},
+            ],
+            "tool_calls_raw": [],
+            "finish_reason": "stop",
+        }
+
+    async def mock_execute_tool_call(*, storage, task_id, tool_name, tool_args,
+                                      tool_call_id, gateway, context, loop_ctx,
+                                      emit, approved_permission=None):
+        execution_order.append(f"execute:{tool_name}")
+        return {"ok": True, "summary": f"{tool_name} done", "data": {}}
+
+    async def mock_emit(**kwargs):
+        return {"id": "evt_1"}
+
+    with tempfile.TemporaryDirectory() as tmp:
+        task = await orch_storage.create_task(
+            agent_storage,
+            user_id="test-user",
+            title="test finish order",
+            prompt="test",
+            workspace_path=tmp,
+            conversation_id=None,
+            active_skill_ids=[],
+            settings=OrchestratorSettings(agent_loop_enabled=True).model_dump(by_alias=True),
+            context={},
+            budget={},
+        )
+        runner = OrchestratorRunner()
+
+        with patch.object(runner.agent_loop_runner, "_call_model_with_retry", new=mock_call_model_with_retry):
+            with patch.object(runner.agent_loop_runner, "_execute_tool_call", new=mock_execute_tool_call):
+                request = OrchestratorTaskCreateRequest(prompt="test", workspace_path=tmp)
+                settings = OrchestratorSettings(agent_loop_enabled=True)
+                await runner.run(storage=agent_storage, task_id=task["id"], request=request, settings=settings)
+
+    # file_read executed before finish
+    assert "execute:file_read" in execution_order
+    assert execution_order.index("execute:file_read") < execution_order.index("model_call") if "model_call" in execution_order[1:] else True
+    # Task completed
+    stored_task = await orch_storage.get_task(agent_storage, task["id"])
+    assert stored_task["status"] == "done"
+
+
+@pytest.mark.asyncio
+async def test_run_loop_cache_hit_on_second_round(agent_storage):
+    """Second identical file_read call hits cache, not _execute_tool_call."""
+    from unittest.mock import patch
+
+    execute_count = [0]
+
+    async def mock_call_model_with_retry(*, loop_ctx, task_model, fallback_model, mode, emit):
+        if execute_count[0] == 0:
+            # Round 1: read file, then finish
+            return {
+                "content": "Reading file.",
+                "tool_calls": [
+                    {"id": "tc_1", "name": "file_read", "arguments": {"path": "app.py"}},
+                ],
+                "tool_calls_raw": [],
+                "finish_reason": "stop",
+            }
+        else:
+            # Round 2: read same file again, then finish
+            return {
+                "content": "Reading same file again.",
+                "tool_calls": [
+                    {"id": "tc_2", "name": "file_read", "arguments": {"path": "app.py"}},
+                    {"id": "tc_3", "name": "finish", "arguments": {"summary": "Done"}},
+                ],
+                "tool_calls_raw": [],
+                "finish_reason": "stop",
+            }
+
+    async def mock_execute_tool_call(*, storage, task_id, tool_name, tool_args,
+                                      tool_call_id, gateway, context, loop_ctx,
+                                      emit, approved_permission=None):
+        execute_count[0] += 1
+        return {"ok": True, "summary": f"read {tool_args['path']}", "data": {"content": "hello"}}
+
+    async def mock_emit(**kwargs):
+        return {"id": "evt_1"}
+
+    with tempfile.TemporaryDirectory() as tmp:
+        task = await orch_storage.create_task(
+            agent_storage,
+            user_id="test-user",
+            title="test cache",
+            prompt="test",
+            workspace_path=tmp,
+            conversation_id=None,
+            active_skill_ids=[],
+            settings=OrchestratorSettings(agent_loop_enabled=True).model_dump(by_alias=True),
+            context={},
+            budget={},
+        )
+        runner = OrchestratorRunner()
+
+        with patch.object(runner.agent_loop_runner, "_call_model_with_retry", new=mock_call_model_with_retry):
+            with patch.object(runner.agent_loop_runner, "_execute_tool_call", new=mock_execute_tool_call):
+                request = OrchestratorTaskCreateRequest(prompt="test", workspace_path=tmp)
+                settings = OrchestratorSettings(agent_loop_enabled=True)
+                await runner.run(storage=agent_storage, task_id=task["id"], request=request, settings=settings)
+
+    # file_read was executed only once (first round); second round hit cache
+    assert execute_count[0] == 1

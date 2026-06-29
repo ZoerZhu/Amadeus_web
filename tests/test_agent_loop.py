@@ -692,3 +692,65 @@ async def test_permission_request_stores_extended_payload(agent_storage):
     assert payload.get("autoApproved") is False
     assert payload.get("commandPreview") == "rm -rf /"
     assert payload.get("workspacePath") == "/tmp"
+
+
+# ---------------------------------------------------------------------------
+# Task 1 (reliability plan): Context window management tests
+# ---------------------------------------------------------------------------
+
+from backend.amadeus_app.orchestrator.context_window import (
+    estimate_token_count,
+    trim_context,
+    ContextSummary,
+)
+
+
+def test_estimate_token_count_empty():
+    assert estimate_token_count([]) == 0
+
+
+def test_estimate_token_count_single_message():
+    msgs = [{"role": "user", "content": "hello world"}]
+    count = estimate_token_count(msgs)
+    assert count > 0
+    assert count < 50
+
+
+def test_estimate_token_count_grows_with_content():
+    short = [{"role": "user", "content": "hi"}]
+    long_msg = [{"role": "user", "content": "x" * 4000}]
+    assert estimate_token_count(long_msg) > estimate_token_count(short)
+
+
+def test_trim_context_keeps_recent_messages():
+    msgs = [
+        {"role": "user", "content": "original task"},
+        {"role": "assistant", "content": "I will help.", "tool_calls": []},
+        {"role": "tool", "tool_call_id": "1", "name": "file_read", "content": "file contents here"},
+        {"role": "assistant", "content": "Found the file.", "tool_calls": []},
+        {"role": "tool", "tool_call_id": "2", "name": "web_search", "content": "search results"},
+        {"role": "assistant", "content": "Final analysis.", "tool_calls": []},
+    ]
+    trimmed = trim_context(msgs, max_tokens=50, system_prompt="system")
+    assert trimmed[0]["role"] == "user"
+    assert trimmed[-1]["role"] == "assistant"
+    assert len(trimmed) <= len(msgs)
+
+
+def test_trim_context_inserts_summary_when_trimming():
+    msgs = []
+    for i in range(20):
+        msgs.append({"role": "assistant", "content": f"Step {i} " * 200})
+        msgs.append({"role": "tool", "tool_call_id": str(i), "name": "file_read", "content": f"data {i} " * 200})
+    trimmed = trim_context(msgs, max_tokens=500, system_prompt="system")
+    has_summary = any("summary" in str(m.get("content", "")).lower()[:20] for m in trimmed[:3])
+    assert has_summary or len(trimmed) < len(msgs)
+
+
+def test_trim_context_no_trimming_needed():
+    msgs = [
+        {"role": "user", "content": "short task"},
+        {"role": "assistant", "content": "ok", "tool_calls": []},
+    ]
+    trimmed = trim_context(msgs, max_tokens=10000, system_prompt="system")
+    assert len(trimmed) == len(msgs)

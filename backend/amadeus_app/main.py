@@ -1,9 +1,7 @@
 """Amadeus backend application factory.
 
 The backend is intentionally split into independently replaceable subsystems:
-chat, memory, tool registry, MCP, skills, complex agent tasks, and the optional
-OpenCode adapter. Mobile bridge routes are not mounted in this desktop/web
-runtime.
+chat, memory, MCP, skills, orchestrator tasks, and the optional OpenCode adapter.
 """
 
 from __future__ import annotations
@@ -21,12 +19,22 @@ from fastapi.staticfiles import StaticFiles
 
 from .code_tasks.opencode_runner import stop_all_opencode_processes
 from .code_tasks.task_hub import code_task_hub
-from .complex_agent.mcp_client import mcp_manager
-from .complex_agent.tool_registry import sync_builtin_tools
+from .orchestrator_integrations.mcp_client import mcp_manager
 from .logging_config import configure_logging, get_logger
 from .memory.jobs import start_memory_worker
 from .memory.tree_store import MemoryTreeStore
-from .routers import chat, code_tasks, complex_agent, conversations, files, memories, settings, voice
+from .routers import (
+    orchestrator_integrations,
+    chat,
+    code_tasks,
+    conversations,
+    files,
+    legacy_agent,
+    memories,
+    orchestrator,
+    settings,
+    voice,
+)
 from .security import RateLimiterMiddleware, SecurityHeadersMiddleware
 from .storage import SQLiteStorage
 
@@ -106,23 +114,16 @@ async def startup() -> None:
     await _global_storage.connect()
     _log.info("SQLite storage connected at %s.", SQLITE_PATH)
 
-    # Sync builtin tools into the unified tool registry (complex agent)
-    try:
-        sync_builtin_tools()
-        _log.info("Unified tool registry synced with builtin tools.")
-    except Exception as error:
-        _log.warning("Failed to sync unified tool registry: %s", error)
-
     # Auto-connect enabled MCP servers. This is on by default to preserve the
     # legacy desktop behavior, but can be disabled for tests/offline startup.
     if os.getenv("AMADEUS_MCP_AUTO_CONNECT", "1").lower() not in ("0", "false", "no"):
         try:
-            from .complex_agent import agent_storage
-            from .complex_agent.domain import McpServerConfig
+            from .orchestrator_integrations import storage as integration_storage
+            from .orchestrator_integrations.domain import McpServerConfig
             from .storage import DEFAULT_USER_ID
 
             connect_timeout = max(1.0, _env_float("AMADEUS_MCP_CONNECT_TIMEOUT", 12.0))
-            servers = await agent_storage.list_mcp_servers(_global_storage, DEFAULT_USER_ID)
+            servers = await integration_storage.list_mcp_servers(_global_storage, DEFAULT_USER_ID)
             for server in servers:
                 if not server.get("enabled", True):
                     continue
@@ -144,21 +145,13 @@ async def startup() -> None:
         _memory_worker = await start_memory_worker(_global_storage, _global_memory_tree)
         _log.info("Memory system initialized.")
 
-        # 注册记忆工具到 LLM tool_registry
+        # Register memory tools into the builtin tool registry.
         try:
             from .memory.memory_tools import register_memory_tools
             register_memory_tools()
             _log.info("Memory tools registered.")
         except Exception as error:
             _log.warning("Failed to register memory tools: %s", error)
-
-        # Re-sync builtin tools into the unified registry so memory tools
-        # (registered above) are available to the complex agent.
-        try:
-            sync_builtin_tools()
-            _log.info("Unified tool registry re-synced after memory tools registration.")
-        except Exception as error:
-            _log.warning("Failed to re-sync unified tool registry: %s", error)
 
 
 @app.on_event("shutdown")
@@ -168,8 +161,6 @@ async def shutdown() -> None:
     if _memory_worker:
         await _memory_worker.stop()
     await code_task_hub.cancel_background_tasks()
-    from .complex_agent.task_hub import agent_task_hub
-    await agent_task_hub.cancel_all()
     await mcp_manager.disconnect_all()
     await stop_all_opencode_processes()
     await _global_storage.close()
@@ -209,10 +200,12 @@ async def storage_status() -> dict:
 
 app.include_router(chat.router)
 app.include_router(code_tasks.router)
-app.include_router(complex_agent.router)
+app.include_router(orchestrator_integrations.router)
+app.include_router(legacy_agent.router)
 app.include_router(conversations.router)
 app.include_router(files.router)
 app.include_router(memories.router)
+app.include_router(orchestrator.router)
 app.include_router(settings.router)
 app.include_router(voice.router)
 

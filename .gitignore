@@ -48,6 +48,7 @@ agent_uploads/*
 uploads/
 !backend/amadeus_app/uploads/
 !backend/amadeus_app/uploads/**
+backend/amadeus_app/uploads/__pycache__/
 output/
 logs/
 user_voice/

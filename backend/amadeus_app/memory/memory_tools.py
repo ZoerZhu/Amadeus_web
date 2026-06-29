@@ -1,7 +1,7 @@
 """记忆系统 LLM 工具注册模块。
 
 将 recall_memory、save_memory、browse_memory_tree 注册为 LLM function calling 工具，
-供 Agent 通过 tool_registry 调用记忆树的检索、保存与浏览能力。
+供 Orchestrator/工具调用层通过 tool_registry 调用记忆树的检索、保存与浏览能力。
 """
 
 from __future__ import annotations
@@ -9,7 +9,7 @@ from __future__ import annotations
 from typing import Any
 
 from .._common import get_memory_tree, get_saved_settings_payload
-from ..agent_registry import ToolDefinition, tool_registry
+from ..builtin_tool_registry import ToolDefinition, tool_registry
 from ..domain import ModelSettings
 from ..logging_config import get_logger
 from ..storage import DEFAULT_USER_ID

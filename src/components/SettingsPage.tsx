@@ -9,7 +9,7 @@ export type SettingsSectionKey =
   | "voice"
   | "live2d"
   | "interface"
-  | "agent"
+  | "orchestrator"
   | "memory"
   | "mcp"
   | "skills";

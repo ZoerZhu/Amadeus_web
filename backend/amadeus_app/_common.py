@@ -10,7 +10,7 @@ from typing import Any
 
 from fastapi import HTTPException, UploadFile
 
-from .domain import AgentInvokeRequest, ModelSettings, SpeechInputSettings
+from .domain import ModelSettings, OrchestratorInvokeRequest, SpeechInputSettings
 from .uploads.file_upload_service import (
     UploadConflictError,
     UploadTooLargeError,
@@ -113,8 +113,8 @@ async def save_upload_or_raise(file: object, *, device: str, overwrite: bool) ->
         raise HTTPException(status_code=415, detail=str(error)) from error
 
 
-async def enrich_agent_media_request(request: AgentInvokeRequest) -> AgentInvokeRequest:
-    if not _agent_request_uses_image_understand(request):
+async def enrich_orchestrator_media_request(request: OrchestratorInvokeRequest) -> OrchestratorInvokeRequest:
+    if not _orchestrator_request_uses_image_understand(request):
         return request
     stored_settings = await get_saved_settings_payload()
     payload = dict(request.payload)
@@ -127,13 +127,17 @@ async def enrich_agent_media_request(request: AgentInvokeRequest) -> AgentInvoke
     return request.model_copy(update={"payload": payload})
 
 
-def _agent_request_uses_image_understand(request: AgentInvokeRequest) -> bool:
+def _orchestrator_request_uses_image_understand(request: OrchestratorInvokeRequest) -> bool:
     target = request.target.strip().lower()
     if target in {"image_understand", "image_understand_agent"}:
         return True
     payload_text = json.dumps(request.payload, ensure_ascii=False).lower()
     raw_text = json.dumps(request.raw_arguments, ensure_ascii=False).lower()
     return "image_understand" in payload_text or "image_understand" in raw_text
+
+
+# Backward-compatible alias for older routers/imports.
+enrich_agent_media_request = enrich_orchestrator_media_request
 
 
 # ---------------- network helpers ----------------

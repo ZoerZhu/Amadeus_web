@@ -25,7 +25,7 @@ router = APIRouter(prefix="/api", tags=["files"])
 class FileUploadBase64Request:
     """Re-imported from main for router independence."""
 
-    def __init__(self, *, filename: str, data_base64: str, content_type: str = "", device: str = "mobile", overwrite: bool = False) -> None:
+    def __init__(self, *, filename: str, data_base64: str, content_type: str = "", device: str = "host", overwrite: bool = False) -> None:
         self.filename = filename
         self.data_base64 = data_base64
         self.content_type = content_type
@@ -71,7 +71,7 @@ async def upload_file_base64(
     filename: str = Form(...),
     data_base64: str = Form(..., alias="dataBase64"),
     content_type: str = Form("", alias="contentType"),
-    device: str = Form("mobile"),
+    device: str = Form("host"),
     overwrite: bool = Form(False),
 ) -> dict:
     try:

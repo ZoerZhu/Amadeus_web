@@ -81,7 +81,8 @@ export interface StoredSettings {
   voice: VoiceSettings;
   desktopAssistant: DesktopAssistantSettings;
   mode: ChatMode;
-  agent?: AgentSettings;
+  orchestrator?: OrchestratorSettings;
+  agent?: OrchestratorSettings;
   mcpServers?: McpServerConfig[];
   updatedAt?: string;
 }
@@ -108,12 +109,12 @@ export interface ConversationDetail extends ConversationSummary {
   messages: StoredConversationMessage[];
 }
 
-export type AgentAction = "call_tool" | "call_agent" | "query_capabilities";
-export type AgentTargetType = "tool" | "agent" | "auto";
+export type OrchestratorInvokeAction = "call_tool" | "call_agent" | "query_capabilities";
+export type OrchestratorInvokeTargetType = "tool" | "agent" | "auto";
 
-export interface AgentInvokeRequest {
-  action: AgentAction;
-  targetType: AgentTargetType;
+export interface OrchestratorInvokeRequest {
+  action: OrchestratorInvokeAction;
+  targetType: OrchestratorInvokeTargetType;
   target: string;
   intent: string;
   payload: Record<string, unknown>;
@@ -122,13 +123,13 @@ export interface AgentInvokeRequest {
   requestedAt: string;
 }
 
-export interface AgentInvokeResponse {
+export interface OrchestratorInvokeResponse {
   ok: boolean;
   summary: string;
   data: Record<string, unknown>;
 }
 
-export type UploadDevice = "host" | "mobile";
+export type UploadDevice = "host";
 export type UploadMediaType = "text" | "document" | "image" | "audio";
 
 export interface VoiceInputInfo {
@@ -240,7 +241,7 @@ export type StreamEvent =
   | { event: "audio"; payload: { url: string; index?: number; text?: string; syncText?: boolean } }
   | { event: "voice_error"; payload: { message: string; index?: number } }
   | { event: "error"; payload: { message: string } }
-  | { event: "complex_task"; payload: { taskId: string; title: string; reason: string; skillIds: string[] } }
+  | { event: "orchestrator_task"; payload: { taskId: string; title: string; reason: string; skillIds: string[] } }
   | { event: "done"; payload: { text: string; assistantVoice?: AssistantVoiceInfo } };
 
 export interface CodeTaskStreamRequest {
@@ -312,82 +313,6 @@ export type CodeTaskEvent =
   | { event: "error"; payload: { message: string; requestId?: string } }
   | { event: "done"; payload: { status?: string; message?: string; sessionId?: string; workspacePath?: string } };
 
-export interface CodeTaskViewQuestion {
-  requestId: string;
-  sessionId: string;
-  serverUrl?: string;
-  questions: CodeTaskQuestionItem[];
-  v2?: boolean;
-  answered?: boolean;
-  rejected?: boolean;
-  answers?: string[][];
-}
-
-export interface CodeTaskViewMessage {
-  id: string;
-  kind: string;
-  title?: string;
-  text: string;
-  detail?: string;
-  createdAt: string;
-  question?: CodeTaskViewQuestion;
-}
-
-export interface CodeTaskViewPhase {
-  id: string;
-  title: string;
-  status: "running" | "completed" | "error";
-  eventCount: number;
-  hiddenCount: number;
-  messages: CodeTaskViewMessage[];
-}
-
-export interface CodeTaskViewTurn {
-  id: string;
-  running: boolean;
-  request?: CodeTaskViewMessage;
-  processed: {
-    title: "处理中" | "已处理";
-    openByDefault: boolean;
-    duration: string;
-    phaseCount: number;
-    eventCount: number;
-    phases: CodeTaskViewPhase[];
-  };
-  responses: CodeTaskViewMessage[];
-}
-
-export interface CodeTaskMobileViewSnapshot {
-  version: 2;
-  kind: "code_task_view";
-  taskId: string;
-  status: string;
-  running: boolean;
-  renderedAt: string;
-  task: {
-    id: string;
-    title: string;
-    prompt: string;
-    workspacePath: string;
-    status: string;
-    sessionId?: string;
-    createdAt: string;
-    updatedAt: string;
-  };
-  view: {
-    source: "host";
-    refreshIntervalMs: number;
-    eventCount: number;
-    turnCount: number;
-  };
-  turns: CodeTaskViewTurn[];
-  pendingQuestion?: CodeTaskViewQuestion & {
-    turnId: string;
-    messageId: string;
-  };
-  summary?: string;
-}
-
 export type TaskSummaryVoiceEvent =
   | { event: "status"; payload: { phase: string } }
   | { event: "audio"; payload: { url: string; index?: number; text?: string; syncText?: boolean } }
@@ -396,7 +321,7 @@ export type TaskSummaryVoiceEvent =
   | { event: "done"; payload: { speechText: string } };
 
 // ---------------------------------------------------------------------------
-// Complex agent / MCP / skills subsystem
+// Orchestrator / MCP / skills subsystem
 // ---------------------------------------------------------------------------
 
 export type RoutingMatchType = "keyword" | "regex";
@@ -421,7 +346,7 @@ export interface OpencodeRoutingConfig {
   rules: OpencodeRoutingRule[];
 }
 
-export interface AgentSettings {
+export interface OrchestratorSettings {
   enabled: boolean;
   trustMode: boolean;
   defaultWorkspace: string;
@@ -434,6 +359,8 @@ export interface AgentSettings {
   browserEnabled: boolean;
   opencodeEnabled: boolean;
   opencodeRouting: OpencodeRoutingConfig;
+  roleModels: Record<string, Record<string, unknown>>;
+  enabledCapabilities: string[];
 }
 
 export type McpTransport = "stdio" | "http";
@@ -479,7 +406,7 @@ export interface SkillPackageInfo {
   updatedAt?: string;
 }
 
-export type AgentTaskStatus =
+export type OrchestratorTaskStatus =
   | "created"
   | "running"
   | "paused"
@@ -488,9 +415,9 @@ export type AgentTaskStatus =
   | "failed"
   | "rolled_back";
 
-export type AgentTaskControlAction = "pause" | "resume" | "cancel" | "rollback";
+export type OrchestratorTaskControlAction = "pause" | "resume" | "cancel" | "rollback";
 
-export type AgentEventKind =
+export type OrchestratorEventKind =
   | "status"
   | "plan"
   | "step"
@@ -504,7 +431,7 @@ export type AgentEventKind =
   | "error"
   | "done";
 
-export interface AgentTaskBudget {
+export interface OrchestratorTaskBudget {
   maxRounds: number;
   maxToolCalls: number;
   maxRuntimeSeconds: number;
@@ -518,12 +445,12 @@ export interface AgentTaskBudget {
   remainingSeconds: number;
 }
 
-export interface AgentTaskSummary {
+export interface OrchestratorTaskSummary {
   id: string;
   userId?: string;
   title: string;
   prompt: string;
-  status: AgentTaskStatus;
+  status: OrchestratorTaskStatus;
   workspacePath: string;
   conversationId: string | null;
   activeSkillIds: string[];
@@ -531,13 +458,13 @@ export interface AgentTaskSummary {
   updatedAt: string;
   finishedAt: string | null;
   error: string;
-  budget: AgentTaskBudget | Record<string, unknown>;
+  budget: OrchestratorTaskBudget | Record<string, unknown>;
   artifactCount?: number;
   eventCount?: number;
   settings?: Record<string, unknown>;
 }
 
-export type AgentArtifactKind =
+export type OrchestratorArtifactKind =
   | "file"
   | "screenshot"
   | "document"
@@ -545,10 +472,10 @@ export type AgentArtifactKind =
   | "diff"
   | "snapshot";
 
-export interface AgentArtifact {
+export interface OrchestratorArtifact {
   id: string;
   taskId: string;
-  kind: AgentArtifactKind;
+  kind: OrchestratorArtifactKind;
   name: string;
   path: string;
   mimeType: string;
@@ -558,10 +485,10 @@ export interface AgentArtifact {
   createdAt: string;
 }
 
-export interface AgentTaskEvent {
+export interface OrchestratorTaskEvent {
   taskId: string;
   seq: number;
-  kind: AgentEventKind;
+  kind: OrchestratorEventKind;
   role: string;
   name: string;
   status: string;
@@ -571,13 +498,13 @@ export interface AgentTaskEvent {
   timestamp: string;
 }
 
-export interface AgentTaskDetail {
-  task: AgentTaskSummary;
-  events: AgentTaskEvent[];
-  artifacts: AgentArtifact[];
+export interface OrchestratorTaskDetail {
+  task: OrchestratorTaskSummary;
+  events: OrchestratorTaskEvent[];
+  artifacts: OrchestratorArtifact[];
 }
 
-export interface AgentTaskCreateRequest {
+export interface OrchestratorTaskCreateRequest {
   title?: string;
   prompt: string;
   workspacePath?: string;
@@ -598,7 +525,7 @@ export type PermissionRequestStatus =
   | "rejected"
   | "timeout";
 
-export interface PermissionRequest {
+export interface OrchestratorPermissionRequest {
   id: string;
   taskId: string;
   toolName: string;
@@ -609,6 +536,8 @@ export interface PermissionRequest {
   createdAt: string;
   resolvedAt: string | null;
 }
+
+export type PermissionRequest = OrchestratorPermissionRequest;
 
 export interface McpPreset {
   id: string;

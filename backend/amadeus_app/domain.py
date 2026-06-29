@@ -9,8 +9,8 @@ from pydantic import BaseModel, ConfigDict, Field
 ChatMode = Literal["fast", "thinking"]
 ChatRole = Literal["system", "user", "assistant"]
 VoiceBackend = Literal["local", "cloud"]
-AgentAction = Literal["call_tool", "call_agent", "query_capabilities"]
-AgentTargetType = Literal["tool", "agent", "auto"]
+OrchestratorInvokeAction = Literal["call_tool", "call_agent", "query_capabilities"]
+OrchestratorInvokeTargetType = Literal["tool", "agent", "auto"]
 AttachmentMediaType = Literal["text", "document", "image", "audio"]
 
 # Centralized default — change here to switch the default persona project-wide
@@ -159,6 +159,7 @@ class SettingsSaveRequest(BaseModel):
     voice: VoiceSettings = Field(default_factory=VoiceSettings)
     desktop_assistant: DesktopAssistantSettings = Field(default_factory=DesktopAssistantSettings, alias="desktopAssistant")
     mode: ChatMode = "fast"
+    orchestrator: dict[str, Any] | None = None
     agent: dict[str, Any] | None = None
     mcp_servers: list[dict[str, Any]] | None = Field(default=None, alias="mcpServers")
 
@@ -184,11 +185,11 @@ class ConversationCreateRequest(BaseModel):
     mode: ChatMode = "fast"
 
 
-class AgentInvokeRequest(BaseModel):
+class OrchestratorInvokeRequest(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
-    action: AgentAction = "call_agent"
-    target_type: AgentTargetType = Field(default="auto", alias="targetType")
+    action: OrchestratorInvokeAction = "call_agent"
+    target_type: OrchestratorInvokeTargetType = Field(default="auto", alias="targetType")
     target: str = ""
     intent: str = ""
     payload: dict[str, Any] = Field(default_factory=dict)
@@ -222,30 +223,6 @@ class CodeTaskQuestionReplyRequest(BaseModel):
     answers: list[list[str]] = Field(default_factory=list)
     v2: bool = True
     reject: bool = False
-
-
-class CodeTaskRemoteMessageRequest(BaseModel):
-    model_config = ConfigDict(populate_by_name=True)
-
-    prompt: str
-    title: str = ""
-    agent: str = ""
-    provider_id: str = Field(default="", alias="providerId")
-    model_id: str = Field(default="", alias="modelId")
-    auto_approve: bool = Field(default=False, alias="autoApprove")
-    timeout_seconds: int = Field(default=1800, alias="timeoutSeconds")
-
-
-class CodeTaskMobileQuestionReplyRequest(BaseModel):
-    model_config = ConfigDict(populate_by_name=True)
-
-    request_id: str = Field(alias="requestId")
-    answers: list[list[str]] = Field(default_factory=list)
-    v2: bool = True
-    reject: bool = False
-    wait_for_result: bool = Field(default=False, alias="waitForResult")
-    after_seq: int = Field(default=0, alias="afterSeq")
-    timeout_seconds: int = Field(default=180, alias="timeoutSeconds")
 
 
 class CodeTaskSnapshot(BaseModel):

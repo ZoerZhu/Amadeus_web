@@ -1,9 +1,11 @@
-"""Complex Agent / Tools / Skills / MCP integration package.
+"""Legacy complex-agent runtime.
 
-This package implements the configurable multi-role agent orchestration,
-unified tool registry (builtin + MCP + skills), MCP client (stdio + HTTP),
-skills import/loading, browser automation, controlled file writer with
-snapshots, and the agent task hub with SSE streaming.
+New task execution flows through :mod:`amadeus_app.orchestrator`. MCP, skills,
+tool registry, and MCP resource/prompt tools live in
+:mod:`amadeus_app.orchestrator_integrations`; the similarly named modules in this
+package are compatibility re-exports only.
 
-See the project plan in the user request for the full specification.
+This package is kept for old task records, legacy artifact access, and
+compatibility imports while the rebuild finishes. It must not create new task
+runtime state.
 """

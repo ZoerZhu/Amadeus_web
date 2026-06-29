@@ -3,7 +3,6 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException
 from fastapi.responses import StreamingResponse
 
-from ..chat_service import sse
 from ..code_tasks.opencode_runner import (
     drain_opencode_task,
     reply_opencode_question,
@@ -15,6 +14,7 @@ from ..domain import (
     CodeTaskStreamRequest,
     CodeTaskSyncRequest,
 )
+from ..event_stream import sse
 
 router = APIRouter(prefix="/api/code-tasks", tags=["code-tasks"])
 

@@ -1,4 +1,4 @@
-import { FormEvent, useEffect, useMemo, useState } from "react";
+import { FormEvent, useCallback, useEffect, useMemo, useState } from "react";
 import {
   Database,
   FolderTree,
@@ -122,11 +122,7 @@ export function MemoryPanel({ currentConversationId }: MemoryPanelProps) {
   const inactiveCount = allNodes.filter((node) => !node.isActive).length;
   const searchNodes = resultNodes(searchResult);
 
-  useEffect(() => {
-    void loadMemory();
-  }, []);
-
-  async function loadMemory() {
+  const loadMemory = useCallback(async () => {
     setBusy("load");
     setFeedback(null);
     try {
@@ -137,9 +133,7 @@ export function MemoryPanel({ currentConversationId }: MemoryPanelProps) {
       setTree(treeResponse.tree);
       setAllNodes(treeResponse.nodes);
       setProjects(projectList);
-      if (!selectedNodeId && treeResponse.tree[0]) {
-        setSelectedNodeId(treeResponse.tree[0].id);
-      }
+      setSelectedNodeId((current) => current || treeResponse.tree[0]?.id || "");
       setFeedback({ kind: "success", message: `已加载 ${treeResponse.nodes.length} 个记忆节点` });
     } catch (error) {
       setFeedback({
@@ -149,7 +143,11 @@ export function MemoryPanel({ currentConversationId }: MemoryPanelProps) {
     } finally {
       setBusy(null);
     }
-  }
+  }, []);
+
+  useEffect(() => {
+    void loadMemory();
+  }, [loadMemory]);
 
   function handleSearch(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -346,7 +344,7 @@ export function MemoryPanel({ currentConversationId }: MemoryPanelProps) {
             {tree.length > 0 ? (
               <ul className="memory-tree">{tree.map(renderTreeNode)}</ul>
             ) : (
-              <div className="agent-empty-hint">暂无记忆节点</div>
+              <div className="empty-hint">暂无记忆节点</div>
             )}
           </div>
         </section>
@@ -383,7 +381,7 @@ export function MemoryPanel({ currentConversationId }: MemoryPanelProps) {
               </dl>
             </div>
           ) : (
-            <div className="agent-empty-hint">选择一个记忆节点</div>
+            <div className="empty-hint">选择一个记忆节点</div>
           )}
         </section>
       </div>
@@ -418,7 +416,7 @@ export function MemoryPanel({ currentConversationId }: MemoryPanelProps) {
               </button>
             ))
           ) : (
-            <div className="agent-empty-hint">没有检索结果</div>
+            <div className="empty-hint">没有检索结果</div>
           )}
           {searchResult.contextText && <pre className="memory-context-preview">{searchResult.contextText}</pre>}
         </div>

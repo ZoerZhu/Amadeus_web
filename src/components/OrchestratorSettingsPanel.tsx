@@ -30,19 +30,19 @@ import {
   upsertSkill
 } from "../api";
 import type {
-  AgentSettings,
   BuiltinSkillInfo,
   McpAuthType,
   McpPreset,
   McpServerConfig,
   McpTransport,
+  OrchestratorSettings,
   SkillPackageInfo
 } from "../types";
-import { normalizeAgentSettings } from "../agentDefaults";
+import { normalizeOrchestratorSettings } from "../agentDefaults";
 
-type AgentSettingsPanelProps = {
-  agent: AgentSettings;
-  onAgentChange: (agent: AgentSettings) => void;
+type OrchestratorSettingsPanelProps = {
+  settings: OrchestratorSettings;
+  onSettingsChange: (settings: OrchestratorSettings) => void;
   mcpServers: McpServerConfig[];
   onMcpServersChange: (servers: McpServerConfig[]) => void;
   skills: SkillPackageInfo[];
@@ -50,13 +50,28 @@ type AgentSettingsPanelProps = {
   section?: SectionKey;
 };
 
-type SectionKey = "agent" | "mcp" | "skills";
+type SectionKey = "orchestrator" | "mcp" | "skills";
 type McpFeedbackKind = "info" | "success" | "error";
 type McpFeedback = {
   kind: McpFeedbackKind;
   message: string;
   serverId?: string;
 };
+
+const ORCHESTRATOR_CAPABILITIES = [
+  { name: "web_search", label: "网页搜索", description: "通过内置搜索或 MCP-backed provider 收集外部资料。" },
+  { name: "file_read", label: "读取文件", description: "读取允许工作区内的文件。" },
+  { name: "code_search", label: "代码搜索", description: "搜索代码和文本文件，优先使用 MCP，缺失时本地 fallback。" },
+  { name: "file_write", label: "写入文件", description: "写入非代码文档或产物，默认需要确认。" },
+  { name: "code_agent", label: "编码 Agent", description: "复杂代码变更时委托 OpenCode。" },
+  { name: "doc_writer", label: "文档 Agent", description: "生成结构化文档。" },
+  { name: "memory", label: "记忆", description: "读取或写入层级记忆。" },
+  { name: "vision", label: "视觉理解", description: "理解上传图片或截图。" },
+  { name: "document_convert", label: "文档转换", description: "通过 MarkItDown/MCP 或本地 fallback 转 Markdown。" },
+  { name: "todo_task", label: "任务图", description: "管理本地结构化 todo/task graph。" },
+  { name: "browser", label: "浏览器", description: "打开、检查、截图或交互网页，风险较高。" },
+  { name: "mcp_resource", label: "MCP 资源", description: "读取 MCP resources 和 prompts。" }
+] as const;
 
 function emptyMcpServer(): McpServerConfig {
   return {
@@ -110,17 +125,17 @@ function isSameMcpServerConfig(left: McpServerConfig, right: McpServerConfig): b
   );
 }
 
-export function AgentSettingsPanel({
-  agent,
-  onAgentChange,
+export function OrchestratorSettingsPanel({
+  settings,
+  onSettingsChange,
   mcpServers,
   onMcpServersChange,
   skills,
   onSkillsChange,
   section
-}: AgentSettingsPanelProps) {
+}: OrchestratorSettingsPanelProps) {
   const [openSections, setOpenSections] = useState<Record<SectionKey, boolean>>({
-    agent: false,
+    orchestrator: false,
     mcp: false,
     skills: false
   });
@@ -151,8 +166,24 @@ export function AgentSettingsPanel({
     setMcpFeedback({ kind, message, serverId });
   }
 
-  function updateAgent(patch: Partial<AgentSettings>) {
-    onAgentChange({ ...normalizeAgentSettings(agent), ...patch });
+  function updateOrchestrator(patch: Partial<OrchestratorSettings>) {
+    onSettingsChange({ ...normalizeOrchestratorSettings(settings), ...patch });
+  }
+
+  function isCapabilityEnabled(name: string): boolean {
+    return normalizedOrchestrator.enabledCapabilities.length === 0 || normalizedOrchestrator.enabledCapabilities.includes(name);
+  }
+
+  function updateCapability(name: string, enabled: boolean) {
+    const allNames = ORCHESTRATOR_CAPABILITIES.map((item) => item.name);
+    const current = new Set(normalizedOrchestrator.enabledCapabilities.length ? normalizedOrchestrator.enabledCapabilities : allNames);
+    if (enabled) {
+      current.add(name);
+    } else {
+      current.delete(name);
+    }
+    const next = allNames.filter((item) => current.has(item));
+    updateOrchestrator({ enabledCapabilities: next.length === allNames.length ? [] : next });
   }
 
   function updateServer(id: string, patch: Partial<McpServerConfig>) {
@@ -463,10 +494,10 @@ export function AgentSettingsPanel({
     return skill.mcpServers.every((name) => configuredNames.has(name));
   }
 
-  const normalizedAgent = normalizeAgentSettings(agent);
+  const normalizedOrchestrator = normalizeOrchestratorSettings(settings);
 
   const isSingleSection = Boolean(section);
-  const isAgentOpen = section ? section === "agent" : openSections.agent;
+  const isOrchestratorOpen = section ? section === "orchestrator" : openSections.orchestrator;
   const isMcpOpen = section ? section === "mcp" : openSections.mcp;
   const isSkillsOpen = section ? section === "skills" : openSections.skills;
   const selectedMcpServer =
@@ -477,38 +508,38 @@ export function AgentSettingsPanel({
       : null;
 
   return (
-    <div className={`agent-settings-panel ${isSingleSection ? "is-single-section" : ""}`}>
+    <div className={`orchestrator-settings-panel ${isSingleSection ? "is-single-section" : ""}`}>
       <ConfigGroup
         title="Agent"
         icon={<Boxes size={16} />}
-        open={isAgentOpen}
+        open={isOrchestratorOpen}
         onToggle={() => {
           if (!section) {
-            toggleSection("agent");
+            toggleSection("orchestrator");
           }
         }}
       >
         <label className="switch-row">
-          <span>启用复杂 Agent</span>
+          <span>启用任务 Agent</span>
           <input
-            checked={normalizedAgent.enabled}
-            onChange={(event) => updateAgent({ enabled: event.target.checked })}
+            checked={normalizedOrchestrator.enabled}
+            onChange={(event) => updateOrchestrator({ enabled: event.target.checked })}
             type="checkbox"
           />
         </label>
         <label className="switch-row">
           <span>信任模式（自动批准已知确认类工具，高风险操作仍需确认）</span>
           <input
-            checked={normalizedAgent.trustMode}
-            onChange={(event) => updateAgent({ trustMode: event.target.checked })}
+            checked={normalizedOrchestrator.trustMode}
+            onChange={(event) => updateOrchestrator({ trustMode: event.target.checked })}
             type="checkbox"
           />
         </label>
         <label className="field">
           <span>默认工作目录</span>
           <input
-            value={normalizedAgent.defaultWorkspace}
-            onChange={(event) => updateAgent({ defaultWorkspace: event.target.value })}
+            value={normalizedOrchestrator.defaultWorkspace}
+            onChange={(event) => updateOrchestrator({ defaultWorkspace: event.target.value })}
             placeholder="留空则要求每次指定"
           />
         </label>
@@ -517,8 +548,8 @@ export function AgentSettingsPanel({
           <input
             type="number"
             min={1}
-            value={normalizedAgent.maxRounds}
-            onChange={(event) => updateAgent({ maxRounds: Number(event.target.value) || 0 })}
+            value={normalizedOrchestrator.maxRounds}
+            onChange={(event) => updateOrchestrator({ maxRounds: Number(event.target.value) || 0 })}
           />
         </label>
         <label className="field">
@@ -526,8 +557,8 @@ export function AgentSettingsPanel({
           <input
             type="number"
             min={1}
-            value={normalizedAgent.maxToolCalls}
-            onChange={(event) => updateAgent({ maxToolCalls: Number(event.target.value) || 0 })}
+            value={normalizedOrchestrator.maxToolCalls}
+            onChange={(event) => updateOrchestrator({ maxToolCalls: Number(event.target.value) || 0 })}
           />
         </label>
         <label className="field">
@@ -535,8 +566,8 @@ export function AgentSettingsPanel({
           <input
             type="number"
             min={1}
-            value={normalizedAgent.maxRuntimeSeconds}
-            onChange={(event) => updateAgent({ maxRuntimeSeconds: Number(event.target.value) || 0 })}
+            value={normalizedOrchestrator.maxRuntimeSeconds}
+            onChange={(event) => updateOrchestrator({ maxRuntimeSeconds: Number(event.target.value) || 0 })}
           />
         </label>
         <label className="field">
@@ -544,50 +575,84 @@ export function AgentSettingsPanel({
           <input
             type="number"
             min={0}
-            value={normalizedAgent.maxSamplingDepth}
-            onChange={(event) => updateAgent({ maxSamplingDepth: Number(event.target.value) || 0 })}
+            value={normalizedOrchestrator.maxSamplingDepth}
+            onChange={(event) => updateOrchestrator({ maxSamplingDepth: Number(event.target.value) || 0 })}
           />
         </label>
         <label className="switch-row">
           <span>允许回滚</span>
           <input
-            checked={normalizedAgent.rollbackEnabled}
-            onChange={(event) => updateAgent({ rollbackEnabled: event.target.checked })}
+            checked={normalizedOrchestrator.rollbackEnabled}
+            onChange={(event) => updateOrchestrator({ rollbackEnabled: event.target.checked })}
             type="checkbox"
           />
         </label>
         <label className="switch-row">
           <span>启用浏览器工具</span>
           <input
-            checked={normalizedAgent.browserEnabled}
-            onChange={(event) => updateAgent({ browserEnabled: event.target.checked })}
+            checked={normalizedOrchestrator.browserEnabled}
+            onChange={(event) => updateOrchestrator({ browserEnabled: event.target.checked })}
             type="checkbox"
           />
         </label>
         <label className="switch-row">
           <span>启用 OpenCode 集成</span>
           <input
-            checked={normalizedAgent.opencodeEnabled}
-            onChange={(event) => updateAgent({ opencodeEnabled: event.target.checked })}
+            checked={normalizedOrchestrator.opencodeEnabled}
+            onChange={(event) => updateOrchestrator({ opencodeEnabled: event.target.checked })}
             type="checkbox"
           />
         </label>
-        {normalizedAgent.opencodeEnabled && (
+        <div className="orchestrator-capability-panel">
+          <div className="orchestrator-capability-head">
+            <div>
+              <strong>能力白名单</strong>
+              <small>
+                {normalizedOrchestrator.enabledCapabilities.length === 0
+                  ? "当前全部能力可用"
+                  : `当前启用 ${normalizedOrchestrator.enabledCapabilities.length} 项能力`}
+              </small>
+            </div>
+            <button
+              className="text-icon-button"
+              onClick={() => updateOrchestrator({ enabledCapabilities: [] })}
+              type="button"
+            >
+              全部启用
+            </button>
+          </div>
+          <div className="orchestrator-capability-grid">
+            {ORCHESTRATOR_CAPABILITIES.map((capability) => (
+              <label className="orchestrator-capability-item" key={capability.name}>
+                <input
+                  checked={isCapabilityEnabled(capability.name)}
+                  onChange={(event) => updateCapability(capability.name, event.target.checked)}
+                  type="checkbox"
+                />
+                <span>
+                  <strong>{capability.label}</strong>
+                  <small>{capability.description}</small>
+                </span>
+              </label>
+            ))}
+          </div>
+        </div>
+        {normalizedOrchestrator.opencodeEnabled && (
           <div className="opencode-routing-config">
             <label className="switch-row">
               <span>启用 OpenCode 路由（按复杂度按需调用）</span>
               <input
-                checked={normalizedAgent.opencodeRouting.enabled}
-                onChange={(event) => updateAgent({
+                checked={normalizedOrchestrator.opencodeRouting.enabled}
+                onChange={(event) => updateOrchestrator({
                   opencodeRouting: {
-                    ...normalizedAgent.opencodeRouting,
+                    ...normalizedOrchestrator.opencodeRouting,
                     enabled: event.target.checked,
                   },
                 })}
                 type="checkbox"
               />
             </label>
-            {normalizedAgent.opencodeRouting.enabled && (
+            {normalizedOrchestrator.opencodeRouting.enabled && (
               <>
                 <div className="inline-fields">
                   <label className="field">
@@ -596,10 +661,10 @@ export function AgentSettingsPanel({
                       type="number"
                       min={0}
                       max={100}
-                      value={normalizedAgent.opencodeRouting.allowThreshold}
-                      onChange={(event) => updateAgent({
+                      value={normalizedOrchestrator.opencodeRouting.allowThreshold}
+                      onChange={(event) => updateOrchestrator({
                         opencodeRouting: {
-                          ...normalizedAgent.opencodeRouting,
+                          ...normalizedOrchestrator.opencodeRouting,
                           allowThreshold: Number(event.target.value) || 0,
                         },
                       })}
@@ -611,10 +676,10 @@ export function AgentSettingsPanel({
                       type="number"
                       min={0}
                       max={100}
-                      value={normalizedAgent.opencodeRouting.ambiguousThreshold}
-                      onChange={(event) => updateAgent({
+                      value={normalizedOrchestrator.opencodeRouting.ambiguousThreshold}
+                      onChange={(event) => updateOrchestrator({
                         opencodeRouting: {
-                          ...normalizedAgent.opencodeRouting,
+                          ...normalizedOrchestrator.opencodeRouting,
                           ambiguousThreshold: Number(event.target.value) || 0,
                         },
                       })}
@@ -624,10 +689,10 @@ export function AgentSettingsPanel({
                 <label className="switch-row">
                   <span>允许 LLM 复判（模糊区间内用 LLM 二次判定）</span>
                   <input
-                    checked={normalizedAgent.opencodeRouting.allowLlmRejudge}
-                    onChange={(event) => updateAgent({
+                    checked={normalizedOrchestrator.opencodeRouting.allowLlmRejudge}
+                    onChange={(event) => updateOrchestrator({
                       opencodeRouting: {
-                        ...normalizedAgent.opencodeRouting,
+                        ...normalizedOrchestrator.opencodeRouting,
                         allowLlmRejudge: event.target.checked,
                       },
                     })}
@@ -637,10 +702,10 @@ export function AgentSettingsPanel({
                 <label className="field">
                   <span>强制允许关键词（逗号分隔，命中即允许）</span>
                   <input
-                    value={normalizedAgent.opencodeRouting.forceAllowKeywords.join(", ")}
-                    onChange={(event) => updateAgent({
+                    value={normalizedOrchestrator.opencodeRouting.forceAllowKeywords.join(", ")}
+                    onChange={(event) => updateOrchestrator({
                       opencodeRouting: {
-                        ...normalizedAgent.opencodeRouting,
+                        ...normalizedOrchestrator.opencodeRouting,
                         forceAllowKeywords: event.target.value
                           .split(",").map((s) => s.trim()).filter(Boolean),
                       },
@@ -651,10 +716,10 @@ export function AgentSettingsPanel({
                 <label className="field">
                   <span>强制禁用关键词（逗号分隔，命中即拒绝，优先级最高）</span>
                   <input
-                    value={normalizedAgent.opencodeRouting.forceDenyKeywords.join(", ")}
-                    onChange={(event) => updateAgent({
+                    value={normalizedOrchestrator.opencodeRouting.forceDenyKeywords.join(", ")}
+                    onChange={(event) => updateOrchestrator({
                       opencodeRouting: {
-                        ...normalizedAgent.opencodeRouting,
+                        ...normalizedOrchestrator.opencodeRouting,
                         forceDenyKeywords: event.target.value
                           .split(",").map((s) => s.trim()).filter(Boolean),
                       },
@@ -666,15 +731,15 @@ export function AgentSettingsPanel({
                   <div className="opencode-routing-rules-head">
                     <span>路由规则（权重为正=允许信号，为负=拒绝信号）</span>
                   </div>
-                  {normalizedAgent.opencodeRouting.rules.map((rule, index) => (
+                  {normalizedOrchestrator.opencodeRouting.rules.map((rule, index) => (
                     <div className="opencode-routing-rule-item" key={rule.id || index}>
                       <input
                         value={rule.name}
                         onChange={(event) => {
-                          const rules = [...normalizedAgent.opencodeRouting.rules];
+                          const rules = [...normalizedOrchestrator.opencodeRouting.rules];
                           rules[index] = { ...rule, name: event.target.value };
-                          updateAgent({
-                            opencodeRouting: { ...normalizedAgent.opencodeRouting, rules },
+                          updateOrchestrator({
+                            opencodeRouting: { ...normalizedOrchestrator.opencodeRouting, rules },
                           });
                         }}
                         placeholder="规则名称"
@@ -683,10 +748,10 @@ export function AgentSettingsPanel({
                         type="number"
                         value={rule.weight}
                         onChange={(event) => {
-                          const rules = [...normalizedAgent.opencodeRouting.rules];
+                          const rules = [...normalizedOrchestrator.opencodeRouting.rules];
                           rules[index] = { ...rule, weight: Number(event.target.value) || 0 };
-                          updateAgent({
-                            opencodeRouting: { ...normalizedAgent.opencodeRouting, rules },
+                          updateOrchestrator({
+                            opencodeRouting: { ...normalizedOrchestrator.opencodeRouting, rules },
                           });
                         }}
                         placeholder="权重"
@@ -694,10 +759,10 @@ export function AgentSettingsPanel({
                       <select
                         value={rule.matchType}
                         onChange={(event) => {
-                          const rules = [...normalizedAgent.opencodeRouting.rules];
+                          const rules = [...normalizedOrchestrator.opencodeRouting.rules];
                           rules[index] = { ...rule, matchType: event.target.value as "keyword" | "regex" };
-                          updateAgent({
-                            opencodeRouting: { ...normalizedAgent.opencodeRouting, rules },
+                          updateOrchestrator({
+                            opencodeRouting: { ...normalizedOrchestrator.opencodeRouting, rules },
                           });
                         }}
                       >
@@ -707,13 +772,13 @@ export function AgentSettingsPanel({
                       <input
                         value={rule.keywords.join(", ")}
                         onChange={(event) => {
-                          const rules = [...normalizedAgent.opencodeRouting.rules];
+                          const rules = [...normalizedOrchestrator.opencodeRouting.rules];
                           rules[index] = {
                             ...rule,
                             keywords: event.target.value.split(",").map((s) => s.trim()).filter(Boolean),
                           };
-                          updateAgent({
-                            opencodeRouting: { ...normalizedAgent.opencodeRouting, rules },
+                          updateOrchestrator({
+                            opencodeRouting: { ...normalizedOrchestrator.opencodeRouting, rules },
                           });
                         }}
                         placeholder={rule.matchType === "regex" ? "正则表达式（逗号分隔）" : "关键词（逗号分隔）"}
@@ -721,10 +786,10 @@ export function AgentSettingsPanel({
                       <input
                         value={rule.description}
                         onChange={(event) => {
-                          const rules = [...normalizedAgent.opencodeRouting.rules];
+                          const rules = [...normalizedOrchestrator.opencodeRouting.rules];
                           rules[index] = { ...rule, description: event.target.value };
-                          updateAgent({
-                            opencodeRouting: { ...normalizedAgent.opencodeRouting, rules },
+                          updateOrchestrator({
+                            opencodeRouting: { ...normalizedOrchestrator.opencodeRouting, rules },
                           });
                         }}
                         placeholder="描述（可选）"
@@ -732,9 +797,9 @@ export function AgentSettingsPanel({
                       <button
                         type="button"
                         onClick={() => {
-                          const rules = normalizedAgent.opencodeRouting.rules.filter((_, i) => i !== index);
-                          updateAgent({
-                            opencodeRouting: { ...normalizedAgent.opencodeRouting, rules },
+                          const rules = normalizedOrchestrator.opencodeRouting.rules.filter((_, i) => i !== index);
+                          updateOrchestrator({
+                            opencodeRouting: { ...normalizedOrchestrator.opencodeRouting, rules },
                           });
                         }}
                       >
@@ -745,7 +810,7 @@ export function AgentSettingsPanel({
                   <button
                     type="button"
                     onClick={() => {
-                      const rules = [...normalizedAgent.opencodeRouting.rules, {
+                      const rules = [...normalizedOrchestrator.opencodeRouting.rules, {
                         id: `rule-${Date.now()}`,
                         name: "新规则",
                         weight: 0,
@@ -753,8 +818,8 @@ export function AgentSettingsPanel({
                         matchType: "keyword" as const,
                         description: "",
                       }];
-                      updateAgent({
-                        opencodeRouting: { ...normalizedAgent.opencodeRouting, rules },
+                      updateOrchestrator({
+                        opencodeRouting: { ...normalizedOrchestrator.opencodeRouting, rules },
                       });
                     }}
                   >
@@ -777,7 +842,7 @@ export function AgentSettingsPanel({
           }
         }}
       >
-        <div className="agent-section-actions">
+        <div className="orchestrator-section-actions">
           <button
             className="text-icon-button"
             onClick={addServer}
@@ -795,7 +860,7 @@ export function AgentSettingsPanel({
             <LayoutGrid size={15} />
             从模板添加
           </button>
-          {mcpStatus && <span className="agent-status-text">{mcpStatus}</span>}
+          {mcpStatus && <span className="orchestrator-status-text">{mcpStatus}</span>}
         </div>
         {presetOpen && (
           <div className="mcp-preset-panel">
@@ -811,7 +876,7 @@ export function AgentSettingsPanel({
                 刷新
               </button>
             </div>
-            {presetError && <div className="agent-empty-hint">{presetError}</div>}
+            {presetError && <div className="empty-hint">{presetError}</div>}
             {presets.length > 0 && (
               <div className="mcp-preset-grid">
                 {presets.map((preset) => {
@@ -848,7 +913,7 @@ export function AgentSettingsPanel({
           </div>
         )}
         {mcpServers.length === 0 && (
-          <div className="agent-empty-hint">尚未配置 MCP 服务器</div>
+          <div className="empty-hint">尚未配置 MCP 服务器</div>
         )}
         {mcpServers.length > 0 && (
           <div className="mcp-configured-panel">
@@ -886,15 +951,15 @@ export function AgentSettingsPanel({
           </div>
         )}
         {selectedMcpServer && (
-          <div className="agent-mcp-card" key={selectedMcpServer.id}>
-            <div className="agent-mcp-head">
+          <div className="orchestrator-mcp-card" key={selectedMcpServer.id}>
+            <div className="orchestrator-mcp-head">
               <input
-                className="agent-mcp-name"
+                className="orchestrator-mcp-name"
                 value={selectedMcpServer.name}
                 onChange={(event) => updateServer(selectedMcpServer.id, { name: event.target.value })}
                 placeholder="服务器名称"
               />
-              <label className="agent-mcp-toggle">
+              <label className="orchestrator-mcp-toggle">
                 <input
                   checked={selectedMcpServer.enabled}
                   onChange={(event) => updateServer(selectedMcpServer.id, { enabled: event.target.checked })}
@@ -902,7 +967,7 @@ export function AgentSettingsPanel({
                 />
                 <span>启用</span>
               </label>
-              <span className={`agent-mcp-status ${selectedMcpServer.connected ? "is-live" : ""}`}>
+              <span className={`orchestrator-mcp-status ${selectedMcpServer.connected ? "is-live" : ""}`}>
                 {selectedMcpServer.connected ? "已连接" : "未连接"}
               </span>
             </div>
@@ -989,7 +1054,7 @@ export function AgentSettingsPanel({
                 onChange={(event) => updateServer(selectedMcpServer.id, { timeoutSeconds: Number(event.target.value) || 30 })}
               />
             </label>
-            <div className="agent-mcp-actions">
+            <div className="orchestrator-mcp-actions">
               <button
                 className="text-icon-button"
                 disabled={mcpBusyId === selectedMcpServer.id}
@@ -1038,7 +1103,7 @@ export function AgentSettingsPanel({
               {mcpBusyId === selectedMcpServer.id && <Loader2 className="phase-spinner" size={14} />}
             </div>
             {selectedMcpFeedback && (
-              <div className={`agent-mcp-feedback is-${selectedMcpFeedback.kind}`}>
+              <div className={`orchestrator-mcp-feedback is-${selectedMcpFeedback.kind}`}>
                 {selectedMcpFeedback.message}
               </div>
             )}
@@ -1056,16 +1121,16 @@ export function AgentSettingsPanel({
           }
         }}
       >
-        <div className="agent-skill-import">
-          <div className="agent-skill-import-row">
+        <div className="orchestrator-skill-import">
+          <div className="orchestrator-skill-import-row">
             <input
-              className="agent-skill-git-url"
+              className="orchestrator-skill-git-url"
               value={gitUrl}
               onChange={(event) => setGitUrl(event.target.value)}
               placeholder="Git URL"
             />
             <input
-              className="agent-skill-git-branch"
+              className="orchestrator-skill-git-branch"
               value={gitBranch}
               onChange={(event) => setGitBranch(event.target.value)}
               placeholder="分支"
@@ -1080,7 +1145,7 @@ export function AgentSettingsPanel({
               导入
             </button>
           </div>
-          <div className="agent-skill-import-row">
+          <div className="orchestrator-skill-import-row">
             <input
               ref={zipInputRef}
               type="file"
@@ -1113,13 +1178,13 @@ export function AgentSettingsPanel({
               安装内置 Skills
             </button>
             {skillImportBusy && <Loader2 className="phase-spinner" size={14} />}
-            {skillImportStatus && <span className="agent-status-text">{skillImportStatus}</span>}
-            {installStatus && <span className="agent-status-text">{installStatus}</span>}
+            {skillImportStatus && <span className="orchestrator-status-text">{skillImportStatus}</span>}
+            {installStatus && <span className="orchestrator-status-text">{installStatus}</span>}
           </div>
         </div>
         {builtinSkills.length > 0 && (
-          <div className="agent-builtin-skills">
-            <div className="agent-builtin-skills-head">
+          <div className="orchestrator-builtin-skills">
+            <div className="orchestrator-builtin-skills-head">
               <span>内置 Skills（{builtinSkills.length}）</span>
               <button
                 className="text-icon-button is-muted"
@@ -1134,37 +1199,37 @@ export function AgentSettingsPanel({
             {builtinSkills.map((skill) => {
               const met = isSkillDependencyMet(skill);
               return (
-                <div className="agent-skill-card is-builtin" key={skill.id}>
-                  <div className="agent-skill-head">
-                    <div className="agent-skill-title">
+                <div className="orchestrator-skill-card is-builtin" key={skill.id}>
+                  <div className="orchestrator-skill-head">
+                    <div className="orchestrator-skill-title">
                       <Sparkles size={15} />
                       <strong>{skill.name}</strong>
                       <small>v{skill.version}</small>
-                      <span className="agent-skill-source">builtin</span>
+                      <span className="orchestrator-skill-source">builtin</span>
                     </div>
                     <span className={`skill-dependency-status ${met ? "is-met" : "is-missing"}`}>
                       {met ? <CheckCircle2 size={13} /> : <XCircle size={13} />}
                       {met ? "依赖已就绪" : "依赖缺失"}
                     </span>
                   </div>
-                  {skill.description && <p className="agent-skill-desc">{skill.description}</p>}
+                  {skill.description && <p className="orchestrator-skill-desc">{skill.description}</p>}
                   {skill.triggers.length > 0 && (
-                    <div className="agent-skill-triggers">
+                    <div className="orchestrator-skill-triggers">
                       {skill.triggers.map((trigger, index) => (
-                        <span className="agent-skill-tag" key={`${skill.id}-trigger-${index}`}>
+                        <span className="orchestrator-skill-tag" key={`${skill.id}-trigger-${index}`}>
                           {trigger}
                         </span>
                       ))}
                     </div>
                   )}
                   {skill.mcpServers.length > 0 && (
-                    <div className="agent-skill-deps">
+                    <div className="orchestrator-skill-deps">
                       <small>依赖 MCP：</small>
                       {skill.mcpServers.map((name) => {
                         const configured = mcpServers.some((server) => server.name === name);
                         return (
                           <span
-                            className={`agent-skill-tag ${configured ? "is-met" : "is-missing"}`}
+                            className={`orchestrator-skill-tag ${configured ? "is-met" : "is-missing"}`}
                             key={`${skill.id}-dep-${name}`}
                           >
                             {name}
@@ -1179,18 +1244,18 @@ export function AgentSettingsPanel({
           </div>
         )}
         {skills.length === 0 && (
-          <div className="agent-empty-hint">尚未安装技能包</div>
+          <div className="empty-hint">尚未安装技能包</div>
         )}
         {skills.map((skill) => (
-          <div className="agent-skill-card" key={skill.id}>
-            <div className="agent-skill-head">
-              <div className="agent-skill-title">
+          <div className="orchestrator-skill-card" key={skill.id}>
+            <div className="orchestrator-skill-head">
+              <div className="orchestrator-skill-title">
                 <Package size={15} />
                 <strong>{skill.name}</strong>
                 <small>v{skill.version}</small>
-                <span className="agent-skill-source">{skill.source}</span>
+                <span className="orchestrator-skill-source">{skill.source}</span>
               </div>
-              <label className="agent-mcp-toggle">
+              <label className="orchestrator-mcp-toggle">
                 <input
                   checked={skill.enabled}
                   onChange={() => toggleSkillEnabled(skill)}
@@ -1199,17 +1264,17 @@ export function AgentSettingsPanel({
                 <span>启用</span>
               </label>
             </div>
-            {skill.description && <p className="agent-skill-desc">{skill.description}</p>}
+            {skill.description && <p className="orchestrator-skill-desc">{skill.description}</p>}
             {skill.triggers.length > 0 && (
-              <div className="agent-skill-triggers">
+              <div className="orchestrator-skill-triggers">
                 {skill.triggers.map((trigger, index) => (
-                  <span className="agent-skill-tag" key={`${skill.id}-trigger-${index}`}>
+                  <span className="orchestrator-skill-tag" key={`${skill.id}-trigger-${index}`}>
                     {trigger}
                   </span>
                 ))}
               </div>
             )}
-            <div className="agent-mcp-actions">
+            <div className="orchestrator-mcp-actions">
               <button
                 className="text-icon-button is-muted"
                 onClick={() => removeSkill(skill)}

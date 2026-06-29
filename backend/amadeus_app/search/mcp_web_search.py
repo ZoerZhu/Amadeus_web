@@ -47,7 +47,7 @@ def discover_mcp_web_tools() -> McpWebTools:
     Matching is case-insensitive on ``meta.toolName``. Returns a :class:`McpWebTools`
     with whatever was found (fields stay ``None`` when absent).
     """
-    from ..complex_agent.tool_registry import unified_tool_registry
+    from ..orchestrator_integrations.tool_registry import unified_tool_registry
 
     tools = McpWebTools()
     for tool in unified_tool_registry.list_tools():
@@ -77,7 +77,7 @@ async def firecrawl_search_via_mcp(
 
     Raises ``RuntimeError`` when the MCP call fails or reports an error.
     """
-    from ..complex_agent.tool_registry import unified_tool_registry
+    from ..orchestrator_integrations.tool_registry import unified_tool_registry
 
     args: dict[str, Any] = {"query": query, "limit": max_results}
     if domains:
@@ -138,7 +138,7 @@ async def firecrawl_scrape_via_mcp(tool_name: str, url: str) -> dict[str, Any]:
     Returns a dict with ``text``, ``title``, ``contentSummary``, ``publishedAt``,
     ``fetchStatus`` keys suitable for merging into a :class:`SearchResult`.
     """
-    from ..complex_agent.tool_registry import unified_tool_registry
+    from ..orchestrator_integrations.tool_registry import unified_tool_registry
 
     response = await unified_tool_registry.call(
         tool_name, {"url": url, "formats": ["markdown"]}
@@ -167,7 +167,7 @@ async def firecrawl_scrape_via_mcp(tool_name: str, url: str) -> dict[str, Any]:
 
 async def fetch_via_mcp(tool_name: str, url: str) -> dict[str, Any]:
     """Call Fetch MCP tool and return normalized content fields."""
-    from ..complex_agent.tool_registry import unified_tool_registry
+    from ..orchestrator_integrations.tool_registry import unified_tool_registry
 
     response = await unified_tool_registry.call(tool_name, {"url": url})
     unwrapped = _unwrap_mcp_response(response)

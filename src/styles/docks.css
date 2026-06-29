@@ -1,4 +1,4 @@
-﻿.live2d-control-panel {
+.live2d-control-panel {
   position: relative;
   z-index: 34;
   display: grid;
@@ -601,27 +601,27 @@
   gap: 12px;
 }
 
-.agent-settings-panel.is-single-section {
+.orchestrator-settings-panel.is-single-section {
   display: grid;
   gap: 12px;
 }
 
-.agent-settings-panel.is-single-section .config-group {
+.orchestrator-settings-panel.is-single-section .config-group {
   display: none;
   border: 0;
   border-radius: 0;
   background: transparent;
 }
 
-.agent-settings-panel.is-single-section .config-group.is-open {
+.orchestrator-settings-panel.is-single-section .config-group.is-open {
   display: block;
 }
 
-.agent-settings-panel.is-single-section .config-group-head {
+.orchestrator-settings-panel.is-single-section .config-group-head {
   display: none;
 }
 
-.agent-settings-panel.is-single-section .config-group-body {
+.orchestrator-settings-panel.is-single-section .config-group-body {
   max-height: none;
   overflow: visible;
   padding: 0;

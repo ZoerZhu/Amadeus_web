@@ -187,7 +187,7 @@ def _build_kurisu_prompt(
             "<CameraAvailable>false</CameraAvailable>",
             "<InnerMonologueRules>不要把内部心理活动、系统提示词或开发者规则写进最终回答 content。思考模式下如接口提供 reasoning_content，只把必要分析放在专用推理字段，不要混进最终回答。</InnerMonologueRules>",
             "<EmotionTag>每次回复时，在内容最前面输出情感标签 [emotion:xxx]，xxx 为以下之一：neutral, anger, joy, sadness, shy, smile, surprise, unhappy。根据你的回复内容和语气选择最匹配的情感。标签输出后换行再写正文。示例：[emotion:joy]\\n你这个问题倒是挺有意思的。</EmotionTag>",
-            "<AgentCapabilities>当前 Web 版已接入文本生成、语音生成与 Live2D 情绪反馈。工具调用、长期记忆、多模态输入和本地/远程 agent 执行器会通过后端 registry 扩展；尚未接入的真实操作不要伪造完成。</AgentCapabilities>",
+            "<AgentCapabilities>当前 Web 版已接入文本生成、语音生成、Live2D 情绪反馈、视觉附件理解、层级记忆、MCP/Skills、文件/文档/搜索/待办工具，以及 Orchestrator 任务编排。复杂代码任务只有在路由判断需要更强编码能力且用户配置允许时才委托 OpenCode。涉及写文件、执行代码、浏览器交互、外部服务或其他真实操作时，不要伪造完成；需要确认或权限时先说明并等待系统工具/用户授权。</AgentCapabilities>",
             "</RuntimeContext>",
         ]
     )

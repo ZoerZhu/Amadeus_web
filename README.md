@@ -2,7 +2,7 @@
 
 Desktop/web runtime migrated from `E:\Amadeus\Amadeus_web` and refactored back into a full backend capability set.
 
-The current backend keeps normal streaming chat, persona prompts, Live2D emotion feedback, segmented voice output, visual attachments, desktop assistant APIs, complex Agent tasks, Tools, MCP, Skills, OpenCode delegation, and Memory. The mobile bridge remains intentionally excluded.
+The current backend keeps normal streaming chat, persona prompts, Live2D emotion feedback, segmented voice output, visual attachments, desktop assistant APIs, Orchestrator tasks, Tools, MCP, Skills, OpenCode delegation, and Memory. The mobile bridge remains intentionally excluded.
 
 ## Run
 
@@ -29,13 +29,15 @@ Open <http://127.0.0.1:5173>.
 
 ## Backend Architecture
 
-- `chat_service` handles OpenAI-compatible streaming chat, persona prompts, emotion tags, vision enrichment, tool calling, Memory injection, conversation persistence, and segmented TTS.
-- `complex_agent` provides the Agent task runtime. Callers use the `AgentRunner` interface; the default runner is LangGraph-based.
-- `agent_registry` and `complex_agent/tool_registry.py` expose builtin tools, task-scoped tools, MCP tools, Memory tools, and OpenCode delegation through one OpenAI-compatible tool schema.
-- `memory` keeps the legacy tree + FTS5 design with optional sqlite-vec acceleration. If sqlite-vec is unavailable, Memory falls back to FTS.
-- `code_tasks` keeps OpenCode isolated as an optional adapter and as the `opencode_delegate` tool.
+- `chat_service` handles OpenAI-compatible streaming chat, persona prompts, emotion tags, vision enrichment, tool calling, Memory injection, conversation persistence, and segmented TTS. When a user explicitly asks for a complex task, chat creates an Orchestrator task and emits an `orchestrator_task` stream event.
+- `orchestrator` owns the task runtime, planner, capability gateway, permission queue, task ledger, artifacts, and OpenCode routing decisions. New task work should use `/api/orchestrator/*` and the `orchestrator_tasks` tables.
+- `orchestrator_integrations` owns MCP servers, MCP resources, Skills, and the unified integration registry. `agent_integrations` is only a compatibility import layer.
+- `builtin_tool_registry` exposes builtin tool schemas for explicit invoke-style calls. `agent_registry` remains as a compatibility import layer.
+- `complex_agent` is retired as a runtime. Its remaining modules either re-export Orchestrator types or raise errors that direct callers to `/api/orchestrator/tasks`.
+- `memory` keeps the tree + FTS5 design with optional sqlite-vec acceleration. If sqlite-vec is unavailable, Memory falls back to FTS.
+- `code_tasks` keeps OpenCode isolated as an optional adapter. Orchestrator calls it only when the planner and OpenCode routing rules decide the task needs a stronger coding agent.
 
-Mounted API groups include chat, settings, conversations, files, voice, Agent tasks, MCP, Skills, artifacts, permissions, Memory, projects, and code tasks. `/api/mobile/*` is not mounted.
+Mounted API groups include chat, settings, conversations, files, voice, Orchestrator tasks, legacy Agent compatibility routes, MCP, Skills, artifacts, permissions, Memory, projects, and code tasks. `/api/mobile/*` is not mounted.
 
 ## Legacy Migration
 
@@ -51,7 +53,7 @@ Run the explicit migration:
 npm run migrate:legacy
 ```
 
-The migration backs up the target SQLite files, copies `agent_state/skills`, migrates settings, conversations, messages, Memory, MCP, Skills, Agent task tables, permissions, and artifacts, then rewrites skill paths to the new project and rebuilds Memory FTS. Secrets in the legacy database are migrated as-is.
+The migration backs up the target SQLite files, copies `agent_state/skills`, migrates settings, conversations, messages, Memory, MCP, Skills, legacy Agent task tables, permissions, and artifacts, then rewrites skill paths to the new project and rebuilds Memory FTS. Secrets in the legacy database are migrated as-is.
 
 ## Memory Embedding
 

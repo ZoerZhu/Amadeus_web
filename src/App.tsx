@@ -44,7 +44,7 @@ import {
   syncCodeTaskHistory,
   synthesizeVoice,
   transcribeVoiceInput,
-  uploadAgentFile
+  uploadWorkspaceFile
 } from "./api";
 import {
   DEFAULT_LIVE2D_MODEL,
@@ -58,11 +58,11 @@ import {
   type Live2DModelRecord,
   type Live2DModelTransform
 } from "./agents/live2dImportAgent";
-import { normalizeAgentSettings } from "./agentDefaults";
+import { normalizeOrchestratorSettings } from "./agentDefaults";
 import { BootLoader } from "./components/BootLoader";
 import { ChatMessageBubble } from "./components/ChatMessageBubble";
-import { AgentSettingsPanel } from "./components/AgentSettingsPanel";
-import { AgentTaskPanel } from "./components/AgentTaskPanel";
+import { OrchestratorSettingsPanel } from "./components/OrchestratorSettingsPanel";
+import { OrchestratorTaskPanel } from "./components/OrchestratorTaskPanel";
 import { LeftDock } from "./components/LeftDock";
 import { Live2DStage, type Live2DStageHandle } from "./components/Live2DStage";
 import { Live2DModelHistory, Live2DQuickControls } from "./components/Live2DControls";
@@ -72,7 +72,7 @@ import { TaskPanel } from "./components/TaskPanel";
 import { TopBar } from "./components/TopBar";
 import { UploadAttachmentTray, UploadPopover } from "./components/UploadControls";
 import type {
-  AgentSettings,
+  OrchestratorSettings,
   ChatMessage,
   ChatMode,
   CodeTaskEvent,
@@ -113,7 +113,6 @@ import {
   STORAGE_KEY,
   appendLimitedCodeTaskText,
   buildCodeTaskPhases,
-  buildCodeTaskMobileViewSnapshot,
   buildCodeTaskSummaryText,
   buildCodeTaskVoiceSummarySource,
   buildConversationTitle,
@@ -200,13 +199,13 @@ export default function App() {
   const [voiceRecording, setVoiceRecording] = useState(false);
   const [voiceRecordingSeconds, setVoiceRecordingSeconds] = useState(0);
   const [voiceInputLevels, setVoiceInputLevels] = useState<number[]>(Array.from({ length: 18 }, () => 0.24));
-  const [agentSettings, setAgentSettings] = useState<AgentSettings>(() => normalizeAgentSettings(stored.agent));
+  const [orchestratorSettings, setOrchestratorSettings] = useState<OrchestratorSettings>(() => normalizeOrchestratorSettings(stored.orchestrator ?? stored.agent));
   const [mcpServers, setMcpServers] = useState<McpServerConfig[]>(() =>
     normalizeMcpServersForStorage(stored.mcpServers)
   );
   const [skills, setSkills] = useState<SkillPackageInfo[]>([]);
-  const [agentTaskId, setAgentTaskId] = useState<string | null>(null);
-  const [complexTaskByMessage, setComplexTaskByMessage] = useState<
+  const [orchestratorTaskId, setOrchestratorTaskId] = useState<string | null>(null);
+  const [orchestratorTaskByMessage, setOrchestratorTaskByMessage] = useState<
     Record<string, { taskId: string; title: string; reason: string; skillIds: string[] }>
   >({});
   const [desktopAssistantMode, setDesktopAssistantMode] = useState(launchedAsDesktopAssistant);
@@ -242,10 +241,6 @@ export default function App() {
   const codeTaskServerUrlRef = useRef("");
   const codeTaskPersistTimerRef = useRef<number | null>(null);
   const codeTaskHistorySyncTimerRef = useRef<number | null>(null);
-  const mobileTaskViewTimerRef = useRef<number | null>(null);
-  const mobileTaskViewFrameRef = useRef<number | null>(null);
-  const pendingMobileTaskViewPublishRef = useRef(false);
-  const lastMobileTaskViewHashRef = useRef("");
   const handledCodeTaskEventKeysRef = useRef<Set<string>>(new Set());
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const audioQueueRef = useRef<AudioQueueItem[]>([]);
@@ -301,7 +296,6 @@ export default function App() {
   const ensureIncomingCodeTaskVisibleRef = useRef<(taskId: string, event: CodeTaskEvent) => boolean>(() => false);
   const handleCodeTaskEventOnceRef = useRef<(event: CodeTaskEvent, taskId?: string | null) => void>(() => undefined);
   const runDesktopAutoObservationRef = useRef<() => Promise<void>>(async () => undefined);
-  const scheduleMobileTaskViewPublishRef = useRef<(delayMs: number) => void>(() => undefined);
   const startDesktopAssistantListeningRef = useRef<() => Promise<void>>(async () => undefined);
   const stopAudioPlaybackRef = useRef<() => void>(() => undefined);
   const stopDesktopAssistantListeningRef = useRef<() => void>(() => undefined);
@@ -374,7 +368,6 @@ export default function App() {
   ensureIncomingCodeTaskVisibleRef.current = ensureIncomingCodeTaskVisible;
   handleCodeTaskEventOnceRef.current = handleCodeTaskEventOnce;
   runDesktopAutoObservationRef.current = runDesktopAutoObservation;
-  scheduleMobileTaskViewPublishRef.current = scheduleMobileTaskViewPublish;
   startDesktopAssistantListeningRef.current = startDesktopAssistantListening;
   stopAudioPlaybackRef.current = stopAudioPlayback;
   stopDesktopAssistantListeningRef.current = stopDesktopAssistantListening;
@@ -466,8 +459,9 @@ export default function App() {
             normalizeDesktopAssistantSettings({ ...prev, ...(remoteSettings.desktopAssistant ?? {}) })
           );
           setMode(remoteSettings.mode);
-          if (remoteSettings.agent) {
-            setAgentSettings((prev) => normalizeAgentSettings({ ...prev, ...remoteSettings.agent }));
+          const remoteOrchestratorSettings = remoteSettings.orchestrator ?? remoteSettings.agent;
+          if (remoteOrchestratorSettings) {
+            setOrchestratorSettings((prev) => normalizeOrchestratorSettings({ ...prev, ...remoteOrchestratorSettings }));
           }
           if (remoteSettings.mcpServers) {
             setMcpServers(normalizeMcpServersForStorage(remoteSettings.mcpServers));
@@ -481,7 +475,7 @@ export default function App() {
             setSkills(skillList);
           }
         } catch {
-          // non-fatal: agent subsystem may be offline
+          // non-fatal: orchestrator integrations may be offline
         }
         setConversations(conversationItems);
         if (conversationItems.length > 0) {
@@ -515,7 +509,7 @@ export default function App() {
         voice: voiceSettings,
         desktopAssistant: desktopAssistantSettings,
         mode,
-        agent: agentSettings,
+        orchestrator: orchestratorSettings,
         mcpServers: persistedMcpServers
       })
     );
@@ -534,13 +528,13 @@ export default function App() {
         voice: voiceSettings,
         desktopAssistant: desktopAssistantSettings,
         mode,
-        agent: agentSettings,
+        orchestrator: orchestratorSettings,
         mcpServers: persistedMcpServers
       }).catch((error) => {
         setStorageError(error instanceof Error ? error.message : "settings save failed");
       });
     }, 350);
-  }, [modelSettings, visionSettings, speechInputSettingsForPersistence, voiceSettings, desktopAssistantSettings, mode, agentSettings, persistedMcpServers, storageOnline]);
+  }, [modelSettings, visionSettings, speechInputSettingsForPersistence, voiceSettings, desktopAssistantSettings, mode, orchestratorSettings, persistedMcpServers, storageOnline]);
 
   useEffect(() => {
     const payload = codeTasks.slice(0, CODE_TASK_MAX_HISTORY);
@@ -789,25 +783,6 @@ export default function App() {
   }, [activeCodeTaskId, codeTaskMessages, codeTaskStatus, codeTaskWorkspace, codeTaskRunning]);
 
   useEffect(() => {
-    if (!activeCodeTaskId) {
-      return;
-    }
-    pendingMobileTaskViewPublishRef.current = true;
-    if (!codeTaskRunning || codeTaskStatus === "waiting_input" || codeTaskStatus === "error") {
-      scheduleMobileTaskViewPublishRef.current(120);
-    }
-  }, [activeCodeTaskId, codeTaskMessages, codeTaskStatus, codeTaskWorkspace, codeTaskRunning]);
-
-  useEffect(() => {
-    const timer = window.setInterval(() => {
-      if (pendingMobileTaskViewPublishRef.current) {
-        publishMobileTaskViewSnapshot();
-      }
-    }, 1000);
-    return () => window.clearInterval(timer);
-  }, []);
-
-  useEffect(() => {
     return () => {
       if (saveSettingsTimerRef.current !== null) {
         window.clearTimeout(saveSettingsTimerRef.current);
@@ -820,12 +795,6 @@ export default function App() {
       }
       if (codeTaskHistorySyncTimerRef.current !== null) {
         window.clearTimeout(codeTaskHistorySyncTimerRef.current);
-      }
-      if (mobileTaskViewTimerRef.current !== null) {
-        window.clearTimeout(mobileTaskViewTimerRef.current);
-      }
-      if (mobileTaskViewFrameRef.current !== null) {
-        window.cancelAnimationFrame(mobileTaskViewFrameRef.current);
       }
       if (desktopSubtitleTimerRef.current !== null) {
         window.clearTimeout(desktopSubtitleTimerRef.current);
@@ -2416,7 +2385,7 @@ export default function App() {
       for (let index = 0; index < files.length; index += 1) {
         const file = files[index];
         setStatus(files.length > 1 ? `upload ${index + 1}/${files.length}` : "upload");
-        const response = await uploadAgentFile({
+        const response = await uploadWorkspaceFile({
           file,
           device: "host",
           overwrite: true
@@ -2622,15 +2591,15 @@ export default function App() {
       setStatus(`voice: ${event.payload.message}`);
       return;
     }
-    if (event.event === "complex_task") {
+    if (event.event === "orchestrator_task") {
       const { taskId, title, reason, skillIds } = event.payload;
-      setComplexTaskByMessage((prev) => ({
+      setOrchestratorTaskByMessage((prev) => ({
         ...prev,
         [assistantId]: { taskId, title, reason, skillIds }
       }));
-      setAgentTaskId(taskId);
-      setRightPanelTab("agent");
-      setStatus(`agent: ${title}`);
+      setOrchestratorTaskId(taskId);
+      setRightPanelTab("orchestrator");
+      setStatus(`orchestrator: ${title}`);
       return;
     }
     if (event.event === "error") {
@@ -2809,19 +2778,13 @@ export default function App() {
     setChatOpen(true);
   }
 
-  function getCodeTaskEventTaskId(event: CodeTaskEvent): string {
-    const payload = event.payload as Record<string, unknown>;
-    return typeof payload.taskId === "string" ? payload.taskId : "";
-  }
-
   function ensureIncomingCodeTaskVisible(taskId: string, event: CodeTaskEvent): boolean {
     if (taskId === activeCodeTaskIdRef.current) {
       return true;
     }
     const payload = event.payload as Record<string, unknown>;
-    const source = typeof payload.source === "string" ? payload.source : "";
     const existing = codeTasksRef.current.find((task) => task.id === taskId) ?? null;
-    const shouldSwitch = !activeCodeTaskIdRef.current || !existing || source === "mobile";
+    const shouldSwitch = !activeCodeTaskIdRef.current || !existing;
     if (!shouldSwitch) {
       return false;
     }
@@ -2867,61 +2830,6 @@ export default function App() {
     });
     openTaskPanel();
     return true;
-  }
-
-  function scheduleMobileTaskViewPublish(delayMs: number) {
-    if (mobileTaskViewTimerRef.current !== null) {
-      window.clearTimeout(mobileTaskViewTimerRef.current);
-    }
-    mobileTaskViewTimerRef.current = window.setTimeout(() => {
-      mobileTaskViewTimerRef.current = null;
-      publishMobileTaskViewSnapshot();
-    }, delayMs);
-  }
-
-  function publishMobileTaskViewSnapshot() {
-    const taskId = activeCodeTaskIdRef.current;
-    if (!taskId) {
-      pendingMobileTaskViewPublishRef.current = false;
-      return;
-    }
-    const baseTask = codeTasksRef.current.find((task) => task.id === taskId);
-    if (!baseTask) {
-      pendingMobileTaskViewPublishRef.current = false;
-      return;
-    }
-    const messagesForSnapshot = codeTaskMessagesRef.current;
-    const taskForSnapshot: CodeTaskRecord = {
-      ...baseTask,
-      workspacePath: codeTaskWorkspaceRef.current,
-      status: codeTaskStatusRef.current,
-      messages: messagesForSnapshot,
-      updatedAt: new Date().toISOString()
-    };
-    const snapshot = buildCodeTaskMobileViewSnapshot(
-      taskForSnapshot,
-      messagesForSnapshot,
-      codeTaskRunningRef.current
-    );
-    const snapshotHash = JSON.stringify({
-      task: snapshot.task,
-      status: snapshot.status,
-      running: snapshot.running,
-      view: snapshot.view,
-      turns: snapshot.turns,
-      pendingQuestion: snapshot.pendingQuestion,
-      summary: snapshot.summary
-    });
-    if (snapshotHash === lastMobileTaskViewHashRef.current) {
-      pendingMobileTaskViewPublishRef.current = false;
-      return;
-    }
-    lastMobileTaskViewHashRef.current = snapshotHash;
-    pendingMobileTaskViewPublishRef.current = false;
-    if (mobileTaskViewFrameRef.current !== null) {
-      window.cancelAnimationFrame(mobileTaskViewFrameRef.current);
-      mobileTaskViewFrameRef.current = null;
-    }
   }
 
   function updateCodeTaskRecord(taskId: string, updater: (task: CodeTaskRecord) => CodeTaskRecord) {
@@ -3130,16 +3038,6 @@ export default function App() {
     if (event.event === "input") {
       setCodeTaskRunning(true);
       setCodeTaskStatus("running");
-      if (event.payload.source === "mobile") {
-        flushCodeTaskUpdates();
-        codeTaskAssistantMessageIdRef.current = null;
-        appendCodeTaskMessage({
-          kind: "user",
-          title: "手机端指令",
-          text: event.payload.text || event.payload.message || "",
-          detail: event.payload.workspacePath
-        });
-      }
       return;
     }
     if (event.event === "output") {
@@ -4020,18 +3918,18 @@ export default function App() {
       )
     },
     {
-      key: "agent",
-      label: "Agent",
+      key: "orchestrator",
+      label: "任务 Agent",
       icon: <Boxes size={16} />,
       content: (
-        <AgentSettingsPanel
-          agent={agentSettings}
-          onAgentChange={setAgentSettings}
+        <OrchestratorSettingsPanel
+          settings={orchestratorSettings}
+          onSettingsChange={setOrchestratorSettings}
           mcpServers={mcpServers}
           onMcpServersChange={setMcpServers}
           skills={skills}
           onSkillsChange={setSkills}
-          section="agent"
+          section="orchestrator"
         />
       )
     },
@@ -4046,9 +3944,9 @@ export default function App() {
       label: "MCP 服务器",
       icon: <Plug size={16} />,
       content: (
-        <AgentSettingsPanel
-          agent={agentSettings}
-          onAgentChange={setAgentSettings}
+        <OrchestratorSettingsPanel
+          settings={orchestratorSettings}
+          onSettingsChange={setOrchestratorSettings}
           mcpServers={mcpServers}
           onMcpServersChange={setMcpServers}
           skills={skills}
@@ -4062,9 +3960,9 @@ export default function App() {
       label: "技能包",
       icon: <Package size={16} />,
       content: (
-        <AgentSettingsPanel
-          agent={agentSettings}
-          onAgentChange={setAgentSettings}
+        <OrchestratorSettingsPanel
+          settings={orchestratorSettings}
+          onSettingsChange={setOrchestratorSettings}
           mcpServers={mcpServers}
           onMcpServersChange={setMcpServers}
           skills={skills}
@@ -4076,7 +3974,7 @@ export default function App() {
   ];
 
   function renderMessageBubble(message: ChatMessage, surface: "floating" | "panel") {
-    const complexTask = complexTaskByMessage[message.id];
+    const orchestratorTask = orchestratorTaskByMessage[message.id];
     return (
       <div key={message.id} className={`message-wrapper ${surface === "floating" ? "is-floating" : "is-panel"}`}>
         <ChatMessageBubble
@@ -4086,19 +3984,19 @@ export default function App() {
           onCopy={copyMessageText}
           onPlay={playAssistantMessage}
         />
-        {complexTask && (
-          <div className="complex-task-card">
-            <div className="complex-task-card-head">
+        {orchestratorTask && (
+          <div className="orchestrator-task-card">
+            <div className="orchestrator-task-card-head">
               <Boxes size={15} />
-              <span>{complexTask.title}</span>
+              <span>{orchestratorTask.title}</span>
             </div>
-            {complexTask.reason && <p className="complex-task-card-reason">{complexTask.reason}</p>}
-            <div className="complex-task-card-actions">
+            {orchestratorTask.reason && <p className="orchestrator-task-card-reason">{orchestratorTask.reason}</p>}
+            <div className="orchestrator-task-card-actions">
               <button
                 className="text-icon-button"
                 onClick={() => {
-                  setAgentTaskId(complexTask.taskId);
-                  setRightPanelTab("agent");
+                  setOrchestratorTaskId(orchestratorTask.taskId);
+                  setRightPanelTab("orchestrator");
                   if (!chatOpen) {
                     setChatOpen(true);
                   }
@@ -4489,13 +4387,13 @@ export default function App() {
         <div className="chat-head">
           <div>
             <span className="eyebrow">
-              {rightPanelTab === "chat" ? "Session" : rightPanelTab === "agent" ? "Agent" : "Task"}
+              {rightPanelTab === "chat" ? "Session" : rightPanelTab === "orchestrator" ? "Orchestrator" : "Task"}
             </span>
             <h2>
               {rightPanelTab === "chat"
                 ? currentConversation?.title ?? "Kurisu"
-                : rightPanelTab === "agent"
-                  ? "Agent 任务"
+                : rightPanelTab === "orchestrator"
+                  ? "任务 Agent"
                   : "OpenCode 任务"}
             </h2>
           </div>
@@ -4517,16 +4415,16 @@ export default function App() {
               任务
             </button>
             <button
-              className={rightPanelTab === "agent" ? "is-active" : ""}
-              onClick={() => setRightPanelTab("agent")}
+              className={rightPanelTab === "orchestrator" ? "is-active" : ""}
+              onClick={() => setRightPanelTab("orchestrator")}
               type="button"
             >
               <Boxes size={14} />
-              Agent
+              任务 Agent
             </button>
           </div>
-          <div className={`status-pill ${rightPanelTab === "chat" ? (isStreaming ? "is-live" : "") : rightPanelTab === "agent" ? (agentTaskId ? "is-live" : "") : codeTaskRunning ? "is-live" : ""}`}>
-            {rightPanelTab === "chat" ? status : rightPanelTab === "agent" ? (agentTaskId ? "agent" : "idle") : codeTaskStatus}
+          <div className={`status-pill ${rightPanelTab === "chat" ? (isStreaming ? "is-live" : "") : rightPanelTab === "orchestrator" ? (orchestratorTaskId ? "is-live" : "") : codeTaskRunning ? "is-live" : ""}`}>
+            {rightPanelTab === "chat" ? status : rightPanelTab === "orchestrator" ? (orchestratorTaskId ? "orchestrator" : "idle") : codeTaskStatus}
           </div>
           <button className="icon-button" onClick={() => setChatOpen(false)} type="button" aria-label="收起对话栏">
             <ChevronRight size={18} />
@@ -4620,11 +4518,11 @@ export default function App() {
               </div>
             </form>
           </>
-        ) : rightPanelTab === "agent" ? (
-          <AgentTaskPanel
+        ) : rightPanelTab === "orchestrator" ? (
+          <OrchestratorTaskPanel
             conversationId={currentConversationId}
-            selectedTaskId={agentTaskId}
-            onSelectTask={setAgentTaskId}
+            selectedTaskId={orchestratorTaskId}
+            onSelectTask={setOrchestratorTaskId}
           />
         ) : (
           renderTaskPanel()

@@ -12,10 +12,14 @@ from uuid import uuid4
 
 import httpx
 
-from .agent_registry import tool_registry
+from .builtin_tool_registry import tool_registry
 from .domain import ChatAttachment, ChatStreamRequest, ModelProviderPreset, ModelSettings, VoiceSettings
+from .event_stream import sse
 from .logging_config import get_logger
 from .model_adapter import build_chat_payload, should_read_reasoning
+from .orchestrator.capability_adapters import CapabilityExecutionContext, default_capability_registry
+from .orchestrator.capabilities import CapabilityGateway
+from .orchestrator.domain import OrchestratorSettings
 
 _log = get_logger(__name__)
 from .local_voice_service import local_voice_engine_url
@@ -61,6 +65,13 @@ CHAT_TOOL_RESULT_MAX_CHARS = env_int("AMADEUS_CHAT_TOOL_RESULT_MAX_CHARS", 12000
 CHAT_TOOL_EVENT_PREVIEW_CHARS = env_int("AMADEUS_CHAT_TOOL_EVENT_PREVIEW_CHARS", 900)
 CHAT_WEB_SEARCH_RESULT_MAX_CHARS = env_int("AMADEUS_CHAT_WEB_SEARCH_RESULT_MAX_CHARS", 5000)
 CHAT_DOC_WRITER_RESULT_MAX_CHARS = env_int("AMADEUS_CHAT_DOC_WRITER_RESULT_MAX_CHARS", 8000)
+CHAT_TOOL_CAPABILITIES = {
+    "web_search": "web_search",
+    "file_reader": "file_read",
+    "image_understand": "vision",
+    "doc_writer": "doc_writer",
+    "todo_task": "todo_task",
+}
 
 
 @dataclass
@@ -674,10 +685,6 @@ class ChatStreamState:
         if display_delta:
             events.append(("content", {"text": display_delta}))
         return events
-
-
-def sse(event: str, payload: dict) -> str:
-    return f"event: {event}\ndata: {json.dumps(payload, ensure_ascii=False)}\n\n"
 
 
 def resolve_chat_settings(request: ChatStreamRequest) -> tuple[ModelProviderPreset, ModelSettings]:
@@ -1325,12 +1332,95 @@ async def execute_model_tool_call(call: ModelToolCall, *, fallback_user_request:
     return await execute_registered_tool(call, arguments)
 
 
+async def execute_chat_capability_tool(
+    call: ModelToolCall,
+    arguments: dict[str, Any],
+    *,
+    parse_warning: str = "",
+) -> ExecutedToolCall:
+    capability = CHAT_TOOL_CAPABILITIES[call.name]
+    gateway = CapabilityGateway(trust_mode=False)
+    decision = gateway.decide(capability)
+    if not decision.allowed:
+        message = f"{capability} requires orchestrator permission; use /api/orchestrator/tasks for this operation."
+        payload = {
+            "ok": False,
+            "error": message,
+            "tool": call.name,
+            "capability": capability,
+            "risk": decision.risk,
+            "reason": decision.reason,
+        }
+        return ExecutedToolCall(
+            call=call,
+            ok=False,
+            summary=message,
+            content=json.dumps(payload, ensure_ascii=False),
+            arguments=arguments,
+            error=message,
+            result_payload=payload,
+        )
+
+    workspace_path = chat_capability_workspace(arguments)
+    context = CapabilityExecutionContext(
+        task_id=f"chat-tool-{uuid4().hex[:12]}",
+        prompt=chat_capability_prompt(arguments),
+        workspace_path=workspace_path,
+        settings=OrchestratorSettings(trustMode=False, defaultWorkspace=workspace_path),
+        metadata={"source": "chat_tool_call", "tool": call.name},
+    )
+    result = await default_capability_registry.execute(capability, arguments, context)
+    ok = bool(result.get("ok", True))
+    summary = str(result.get("summary") or f"{capability} completed.")
+    if parse_warning:
+        summary = f"{summary}（{parse_warning}）"
+    payload = {
+        "ok": ok,
+        "summary": summary,
+        "data": {
+            "tool": call.name,
+            "capability": capability,
+            "args": arguments,
+            "result": result.get("data", {}),
+            "artifactIds": result.get("artifactIds", []),
+        },
+    }
+    return ExecutedToolCall(
+        call=call,
+        ok=ok,
+        summary=summary,
+        content=truncate_json(payload, tool_result_max_chars(call.name)),
+        arguments=arguments,
+        error="" if ok else summary,
+        result_payload=payload,
+    )
+
+
+def chat_capability_prompt(arguments: dict[str, Any]) -> str:
+    for key in ("query", "instruction", "prompt", "intent", "title", "topic", "task"):
+        value = arguments.get(key)
+        if value is not None and str(value).strip():
+            return str(value).strip()
+    return ""
+
+
+def chat_capability_workspace(arguments: dict[str, Any]) -> str:
+    for key in ("workspacePath", "workspace", "root", "basePath"):
+        value = arguments.get(key)
+        if value is not None and str(value).strip():
+            return str(value).strip()
+    return "."
+
+
 async def execute_registered_tool(
     call: ModelToolCall,
     arguments: dict[str, Any],
     *,
     parse_warning: str = "",
 ) -> ExecutedToolCall:
+    if call.name in CHAT_TOOL_CAPABILITIES:
+        return await execute_chat_capability_tool(call, arguments, parse_warning=parse_warning)
+
     tool = tool_registry.get(call.name)
     if tool is None or tool.handler is None:
         return ExecutedToolCall(
@@ -1691,17 +1781,16 @@ async def stream_chat(
     last_user_request = latest_user_message_text(chat_messages)
     thinking_log: list[str] = []
 
-    # Complex task routing: if the latest user message indicates a complex
-    # multi-step task, create an Agent Task and emit a complex_task event
-    # so the frontend can open the task panel. The task runs in the
-    # background and writes its summary back to the conversation.
+    # Orchestrator routing: if the latest user message indicates a multi-step
+    # task, create an orchestrator task and emit an orchestrator_task event so
+    # the frontend can open the task panel. The task runs in the background and
+    # writes its summary back to the conversation.
     try:
-        from .complex_agent.chat_router import detect_complex_task_intent
-        from .complex_agent.domain import AgentSettings
-        from .complex_agent.task_hub import TaskBudget, agent_task_hub
-        from .complex_agent.skills import load_skill_context
-        from .complex_agent.runner import default_agent_runner
-        from .complex_agent.tool_registry import sync_builtin_tools
+        from .orchestrator import storage as orchestrator_storage
+        from .orchestrator.chat_routing import detect_orchestrator_task_intent
+        from .orchestrator.domain import OrchestratorSettings, OrchestratorTaskCreateRequest
+        from .orchestrator.runner import default_orchestrator_runner
+        from .orchestrator_integrations import storage as integration_storage
         from .storage import DEFAULT_USER_ID as _DEFAULT_USER_ID
 
         last_user_msg = next(
@@ -1709,54 +1798,19 @@ async def stream_chat(
             None,
         )
         if last_user_msg is not None and storage is not None and storage.connected:
-            agent_settings_dict = (await storage.get_settings(_DEFAULT_USER_ID) or {}).get("agent") or {}
-            agent_settings = AgentSettings.model_validate(agent_settings_dict)
-            if agent_settings.enabled:
-                enabled_skills = await __import__(
-                    "amadeus_app.complex_agent.agent_storage", fromlist=["list_skill_packages"]
-                ).list_skill_packages(storage, _DEFAULT_USER_ID)
-                routing = detect_complex_task_intent(
+            app_settings = await storage.get_settings(_DEFAULT_USER_ID) or {}
+            orchestrator_settings_dict = app_settings.get("orchestrator") or app_settings.get("agent") or {}
+            orchestrator_settings = OrchestratorSettings.model_validate(orchestrator_settings_dict)
+            if orchestrator_settings.enabled:
+                enabled_skills = await integration_storage.list_skill_packages(storage, _DEFAULT_USER_ID)
+                routing = detect_orchestrator_task_intent(
                     last_user_msg.content,
                     enabled_skills=enabled_skills,
-                    agent_settings=agent_settings,
+                    orchestrator_settings=orchestrator_settings,
                 )
                 if routing is not None:
-                    sync_builtin_tools()
-                    workspace = agent_settings.default_workspace or "."
-                    skill_contexts = []
-                    for skill_id in routing.get("skillIds", []):
-                        skill = await __import__(
-                            "amadeus_app.complex_agent.agent_storage", fromlist=["get_skill_package"]
-                        ).get_skill_package(storage, skill_id)
-                        if skill is None or not skill.get("enabled", True):
-                            continue
-                        from pathlib import Path
-                        skill_dir = Path(skill["path"])
-                        if skill_dir.exists():
-                            try:
-                                skill_contexts.append(load_skill_context(skill_dir))
-                            except Exception as error:  # noqa: BLE001
-                                _log.warning("failed to load skill %s: %s", skill_id, error)
-                    budget = TaskBudget(
-                        max_rounds=agent_settings.max_rounds,
-                        max_tool_calls=agent_settings.max_tool_calls,
-                        max_runtime_seconds=agent_settings.max_runtime_seconds,
-                        max_sampling_depth=agent_settings.max_sampling_depth,
-                    )
-                    task = await agent_task_hub.create_task(
-                        storage=storage,
-                        user_id=_DEFAULT_USER_ID,
-                        title=last_user_msg.content[:60],
-                        prompt=last_user_msg.content,
-                        workspace_path=workspace,
-                        conversation_id=str(stored_conversation_id) if stored_conversation_id else None,
-                        active_skill_ids=routing.get("skillIds", []),
-                        settings=agent_settings.model_dump(by_alias=True),
-                        budget=budget,
-                    )
-                    # Launch the agent in the background
-                    from .complex_agent.domain import AgentTaskCreateRequest
-                    agent_request = AgentTaskCreateRequest(
+                    workspace = orchestrator_settings.default_workspace or "."
+                    orchestrator_request = OrchestratorTaskCreateRequest(
                         title=last_user_msg.content[:60],
                         prompt=last_user_msg.content,
                         workspacePath=workspace,
@@ -1765,26 +1819,41 @@ async def stream_chat(
                         model=request.model.model_dump(by_alias=True),
                         mode=request.mode,
                     )
-                    background = asyncio.create_task(
-                        default_agent_runner.run(
-                            storage=storage,
-                            task=task,
-                            request=agent_request,
-                            agent_settings=agent_settings,
-                            skill_contexts=skill_contexts,
-                        ),
-                        name=f"agent-task-{task.task_id}",
+                    task = await orchestrator_storage.create_task(
+                        storage=storage,
+                        user_id=_DEFAULT_USER_ID,
+                        title=last_user_msg.content[:60],
+                        prompt=last_user_msg.content,
+                        workspace_path=workspace,
+                        conversation_id=str(stored_conversation_id) if stored_conversation_id else None,
+                        active_skill_ids=routing.get("skillIds", []),
+                        settings=orchestrator_settings.model_dump(by_alias=True),
+                        context={"mode": request.mode, "model": request.model.model_dump(by_alias=True)},
+                        budget={
+                            "maxRounds": orchestrator_settings.max_rounds,
+                            "maxToolCalls": orchestrator_settings.max_tool_calls,
+                            "maxRuntimeSeconds": orchestrator_settings.max_runtime_seconds,
+                            "maxSamplingDepth": orchestrator_settings.max_sampling_depth,
+                        },
                     )
-                    await agent_task_hub.attach_background_task(task.task_id, background)
-                    yield sse("complex_task", {
-                        "taskId": task.task_id,
-                        "title": task.title,
+                    asyncio.create_task(
+                        default_orchestrator_runner.run(
+                            storage=storage,
+                            task_id=task["id"],
+                            request=orchestrator_request,
+                            settings=orchestrator_settings,
+                        ),
+                        name=f"orchestrator-task-{task['id']}",
+                    )
+                    yield sse("orchestrator_task", {
+                        "taskId": task["id"],
+                        "title": task["title"],
                         "reason": routing.get("reason", ""),
                         "skillIds": routing.get("skillIds", []),
                     })
                     return
     except Exception as error:  # noqa: BLE001
-        _log.debug("Complex task routing failed (non-fatal): %s", error)
+        _log.debug("Orchestrator task routing failed (non-fatal): %s", error)
 
     image_attachments = chat_image_attachments(request.attachments)
     if image_attachments:
@@ -2272,7 +2341,7 @@ async def stream_chat(
                 # AMADEUS_MEMORY_EXTRACT_INTERVAL=6 表示每 6 轮用户消息提取一次
                 extract_interval = int(os.getenv("AMADEUS_MEMORY_EXTRACT_INTERVAL", "6"))
                 # 从 SQLite 持久化消息统计用户消息数，不依赖请求携带的 messages 数量
-                # 这样即使移动端/外部 API 只发最近一条消息也能正确触发
+                # 这样即使外部 API 只发最近一条消息也能正确触发
                 user_msg_count = 0
                 try:
                     from uuid import UUID as _UUID

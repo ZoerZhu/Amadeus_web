@@ -282,7 +282,7 @@ class SQLiteStorage:
             CREATE INDEX IF NOT EXISTS memory_jobs_status_idx
                 ON memory_jobs (status, updated_at ASC);
 
-            -- ===== Complex Agent / MCP / Skills Tables =====
+            -- ===== Legacy Agent task tables (read-only compatibility) =====
 
             CREATE TABLE IF NOT EXISTS agent_tasks (
                 id              TEXT PRIMARY KEY,
@@ -342,6 +342,8 @@ class SQLiteStorage:
 
             CREATE INDEX IF NOT EXISTS agent_artifacts_task_idx
                 ON agent_artifacts (task_id, created_at ASC);
+
+            -- ===== MCP / Skills integration tables =====
 
             CREATE TABLE IF NOT EXISTS mcp_servers (
                 id              TEXT PRIMARY KEY,
@@ -424,6 +426,85 @@ class SQLiteStorage:
 
             CREATE INDEX IF NOT EXISTS agent_permission_requests_task_idx
                 ON agent_permission_requests (task_id, status, created_at);
+
+            -- ===== Orchestrator v2 Tables =====
+
+            CREATE TABLE IF NOT EXISTS orchestrator_tasks (
+                id              TEXT PRIMARY KEY,
+                user_id         TEXT NOT NULL,
+                title           TEXT NOT NULL DEFAULT '',
+                prompt          TEXT NOT NULL DEFAULT '',
+                workspace_path  TEXT NOT NULL DEFAULT '',
+                conversation_id TEXT,
+                status          TEXT NOT NULL DEFAULT 'created'
+                                CHECK (status IN ('created','running','paused','cancelled','done','failed','rolled_back')),
+                active_skill_ids TEXT NOT NULL DEFAULT '[]',
+                settings_json   TEXT NOT NULL DEFAULT '{}',
+                context_json    TEXT NOT NULL DEFAULT '{}',
+                budget_json     TEXT NOT NULL DEFAULT '{}',
+                error           TEXT NOT NULL DEFAULT '',
+                created_at      TEXT NOT NULL,
+                updated_at      TEXT NOT NULL,
+                finished_at     TEXT
+            );
+
+            CREATE INDEX IF NOT EXISTS orchestrator_tasks_user_updated_idx
+                ON orchestrator_tasks (user_id, updated_at DESC);
+            CREATE INDEX IF NOT EXISTS orchestrator_tasks_conversation_idx
+                ON orchestrator_tasks (conversation_id) WHERE conversation_id IS NOT NULL;
+
+            CREATE TABLE IF NOT EXISTS orchestrator_ledger_events (
+                task_id         TEXT NOT NULL REFERENCES orchestrator_tasks(id) ON DELETE CASCADE,
+                seq             INTEGER NOT NULL,
+                kind            TEXT NOT NULL
+                                CHECK (kind IN ('status','plan','step','tool','mcp','browser','artifact','question','sampling','opencode_routing','error','done')),
+                role            TEXT NOT NULL DEFAULT '',
+                name            TEXT NOT NULL DEFAULT '',
+                status          TEXT NOT NULL DEFAULT '',
+                summary         TEXT NOT NULL DEFAULT '',
+                payload_json    TEXT NOT NULL DEFAULT '{}',
+                artifact_ids_json TEXT NOT NULL DEFAULT '[]',
+                created_at      TEXT NOT NULL,
+                PRIMARY KEY (task_id, seq)
+            );
+
+            CREATE INDEX IF NOT EXISTS orchestrator_ledger_task_seq_idx
+                ON orchestrator_ledger_events (task_id, seq ASC);
+
+            CREATE TABLE IF NOT EXISTS orchestrator_artifacts (
+                id              TEXT PRIMARY KEY,
+                task_id         TEXT NOT NULL REFERENCES orchestrator_tasks(id) ON DELETE CASCADE,
+                kind            TEXT NOT NULL DEFAULT 'file'
+                                CHECK (kind IN ('file','screenshot','document','log','diff','snapshot')),
+                name            TEXT NOT NULL,
+                path            TEXT NOT NULL,
+                mime_type       TEXT NOT NULL DEFAULT 'application/octet-stream',
+                size_bytes      INTEGER NOT NULL DEFAULT 0,
+                description     TEXT NOT NULL DEFAULT '',
+                meta_json       TEXT NOT NULL DEFAULT '{}',
+                created_at      TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS orchestrator_artifacts_task_idx
+                ON orchestrator_artifacts (task_id, created_at ASC);
+
+            CREATE TABLE IF NOT EXISTS orchestrator_permission_requests (
+                id              TEXT PRIMARY KEY,
+                task_id         TEXT NOT NULL REFERENCES orchestrator_tasks(id) ON DELETE CASCADE,
+                tool_name       TEXT NOT NULL,
+                arguments_preview TEXT NOT NULL DEFAULT '',
+                risk_level      TEXT NOT NULL DEFAULT 'confirm'
+                                CHECK (risk_level IN ('safe', 'confirm', 'dangerous')),
+                status          TEXT NOT NULL DEFAULT 'pending'
+                                CHECK (status IN ('pending', 'approved', 'rejected', 'timeout')),
+                reason          TEXT NOT NULL DEFAULT '',
+                payload_json    TEXT NOT NULL DEFAULT '{}',
+                created_at      TEXT NOT NULL,
+                resolved_at     TEXT
+            );
+
+            CREATE INDEX IF NOT EXISTS orchestrator_permission_requests_task_idx
+                ON orchestrator_permission_requests (task_id, status, created_at ASC);
             """
         )
         app_settings_columns = {
@@ -446,6 +527,14 @@ class SQLiteStorage:
         }
         if "assistant_voice" not in chat_message_columns:
             conn.execute("ALTER TABLE chat_messages ADD COLUMN assistant_voice TEXT NOT NULL DEFAULT '{}'")
+        orchestrator_permission_columns = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(orchestrator_permission_requests)").fetchall()
+        }
+        if "payload_json" not in orchestrator_permission_columns:
+            conn.execute(
+                "ALTER TABLE orchestrator_permission_requests ADD COLUMN payload_json TEXT NOT NULL DEFAULT '{}'"
+            )
 
         # ----- Memory: FTS5 + sqlite-vec -----
         conn.execute(
@@ -490,13 +579,15 @@ class SQLiteStorage:
         ).fetchone()
         if row is None:
             return None
+        orchestrator_settings = _decode_json(row["agent_settings"]) if "agent_settings" in row.keys() else {}
         return {
             "model": _decode_json(row["model_settings"]),
             "vision": _decode_json(row["vision_settings"]),
             "speechInput": _decode_json(row["speech_input_settings"]),
             "voice": _decode_json(row["voice_settings"]),
             "desktopAssistant": _decode_json(row["desktop_assistant_settings"]),
-            "agent": _decode_json(row["agent_settings"]) if "agent_settings" in row.keys() else {},
+            "orchestrator": orchestrator_settings,
+            "agent": orchestrator_settings,
             "mcpServers": _clean_mcp_servers(_decode_json(row["mcp_servers_json"]) if "mcp_servers_json" in row.keys() else []),
             "mode": row["mode"],
             "updatedAt": row["updated_at"],
@@ -512,6 +603,7 @@ class SQLiteStorage:
         voice: dict[str, Any],
         desktop_assistant: dict[str, Any],
         mode: str,
+        orchestrator: dict[str, Any] | None = None,
         agent: dict[str, Any] | None = None,
         mcp_servers: list[dict[str, Any]] | None = None,
     ) -> None:
@@ -525,6 +617,7 @@ class SQLiteStorage:
                 voice,
                 desktop_assistant,
                 mode,
+                orchestrator,
                 agent,
                 mcp_servers,
             )
@@ -538,18 +631,20 @@ class SQLiteStorage:
         voice: dict[str, Any],
         desktop_assistant: dict[str, Any],
         mode: str,
+        orchestrator: dict[str, Any] | None,
         agent: dict[str, Any] | None,
         mcp_servers: list[dict[str, Any]] | None,
     ) -> None:
         conn = self.require_connection()
-        # Read existing agent/mcp values to preserve them if not provided
+        # The physical column is still named agent_settings for migration
+        # compatibility; new callers should pass orchestrator.
         existing = conn.execute(
             "SELECT agent_settings, mcp_servers_json FROM app_settings WHERE user_id = ?",
             (user_id,),
         ).fetchone()
         existing_agent = _decode_json(existing["agent_settings"]) if existing else {}
         existing_mcp = _clean_mcp_servers(_decode_json(existing["mcp_servers_json"]) if existing else [])
-        agent_value = agent if agent is not None else existing_agent
+        agent_value = orchestrator if orchestrator is not None else agent if agent is not None else existing_agent
         mcp_value = _clean_mcp_servers(mcp_servers) if mcp_servers is not None else existing_mcp
         conn.execute(
             """

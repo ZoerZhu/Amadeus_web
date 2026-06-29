@@ -328,9 +328,7 @@ def normalize_device(value: str) -> str:
     device = str(value or "host").strip().lower()
     if device in {"host", "web", "desktop", "local", "pc"}:
         return "host"
-    if device in {"mobile", "phone", "harmonyos", "harmony", "android", "ios"}:
-        return "mobile"
-    raise UploadValidationError("Upload device must be host or mobile")
+    raise UploadValidationError("Upload device must be host")
 
 
 def normalize_content_type(value: str) -> str:

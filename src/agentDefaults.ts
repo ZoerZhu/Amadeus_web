@@ -1,4 +1,4 @@
-import type { AgentSettings, OpencodeRoutingRule } from "./types";
+import type { OpencodeRoutingRule, OrchestratorSettings } from "./types";
 
 export const DEFAULT_OPENCODE_ROUTING_RULES: OpencodeRoutingRule[] = [
   {
@@ -144,7 +144,7 @@ export function cloneOpencodeRoutingRules(rules = DEFAULT_OPENCODE_ROUTING_RULES
   }));
 }
 
-export const DEFAULT_AGENT_SETTINGS: AgentSettings = {
+export const DEFAULT_ORCHESTRATOR_SETTINGS: OrchestratorSettings = {
   enabled: true,
   trustMode: true,
   defaultWorkspace: "",
@@ -156,6 +156,8 @@ export const DEFAULT_AGENT_SETTINGS: AgentSettings = {
   rollbackEnabled: true,
   browserEnabled: false,
   opencodeEnabled: true,
+  roleModels: {},
+  enabledCapabilities: [],
   opencodeRouting: {
     enabled: true,
     allowThreshold: 60,
@@ -167,9 +169,9 @@ export const DEFAULT_AGENT_SETTINGS: AgentSettings = {
   }
 };
 
-export function normalizeAgentSettings(value?: Partial<AgentSettings> | null): AgentSettings {
+export function normalizeOrchestratorSettings(value?: Partial<OrchestratorSettings> | null): OrchestratorSettings {
   const routing = {
-    ...DEFAULT_AGENT_SETTINGS.opencodeRouting,
+    ...DEFAULT_ORCHESTRATOR_SETTINGS.opencodeRouting,
     ...(value?.opencodeRouting ?? {})
   };
   const rules = Array.isArray(routing.rules) && routing.rules.length
@@ -177,14 +179,18 @@ export function normalizeAgentSettings(value?: Partial<AgentSettings> | null): A
     : cloneOpencodeRoutingRules();
   const forceAllowKeywords = Array.isArray(routing.forceAllowKeywords)
     ? [...routing.forceAllowKeywords]
-    : [...DEFAULT_AGENT_SETTINGS.opencodeRouting.forceAllowKeywords];
+    : [...DEFAULT_ORCHESTRATOR_SETTINGS.opencodeRouting.forceAllowKeywords];
   const forceDenyKeywords = Array.isArray(routing.forceDenyKeywords)
     ? [...routing.forceDenyKeywords]
-    : [...DEFAULT_AGENT_SETTINGS.opencodeRouting.forceDenyKeywords];
+    : [...DEFAULT_ORCHESTRATOR_SETTINGS.opencodeRouting.forceDenyKeywords];
+  const enabledCapabilities = Array.isArray(value?.enabledCapabilities)
+    ? value.enabledCapabilities.filter((item): item is string => typeof item === "string")
+    : [...DEFAULT_ORCHESTRATOR_SETTINGS.enabledCapabilities];
 
   return {
-    ...DEFAULT_AGENT_SETTINGS,
+    ...DEFAULT_ORCHESTRATOR_SETTINGS,
     ...(value ?? {}),
+    enabledCapabilities,
     opencodeRouting: {
       ...routing,
       forceAllowKeywords,

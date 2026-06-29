@@ -1,15 +1,13 @@
-"""Agent runner abstraction.
+"""Legacy complex-agent runner abstraction.
 
-The current implementation is LangGraph-based, but callers depend on this
-small interface so future runner engines can replace it without touching chat
-routing, REST routes, or task lifecycle code.
+New task execution uses :mod:`amadeus_app.orchestrator.runner`. This module is
+kept only for compatibility with old complex-agent runtime code.
 """
 
 from __future__ import annotations
 
 from typing import Protocol
 
-from .agent import run_agent_task
 from .domain import AgentSettings, AgentTaskCreateRequest
 from .skills import LoadedSkillContext
 from .task_hub import ManagedAgentTask
@@ -28,7 +26,7 @@ class AgentRunner(Protocol):
         """Run an agent task until it emits a terminal event."""
 
 
-class LangGraphAgentRunner:
+class DeprecatedAgentRunner:
     async def run(
         self,
         *,
@@ -38,13 +36,8 @@ class LangGraphAgentRunner:
         agent_settings: AgentSettings,
         skill_contexts: list[LoadedSkillContext],
     ) -> None:
-        await run_agent_task(
-            storage=storage,
-            task=task,
-            request=request,
-            agent_settings=agent_settings,
-            skill_contexts=skill_contexts,
-        )
+        _ = (storage, task, request, agent_settings, skill_contexts)
+        raise RuntimeError("complex_agent runtime is retired; use /api/orchestrator/tasks instead")
 
 
-default_agent_runner: AgentRunner = LangGraphAgentRunner()
+default_agent_runner: AgentRunner = DeprecatedAgentRunner()

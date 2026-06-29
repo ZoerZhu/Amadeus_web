@@ -1,12 +1,4 @@
 import type {
-  AgentArtifact,
-  AgentInvokeRequest,
-  AgentInvokeResponse,
-  AgentTaskControlAction,
-  AgentTaskCreateRequest,
-  AgentTaskDetail,
-  AgentTaskEvent,
-  AgentTaskSummary,
   ApiChatMessage,
   AssistantVoiceInfo,
   BuiltinSkillInfo,
@@ -30,7 +22,15 @@ import type {
   MemorySearchResult,
   MemoryTreeResponse,
   ModelSettings,
-  PermissionRequest,
+  OrchestratorArtifact,
+  OrchestratorInvokeRequest,
+  OrchestratorInvokeResponse,
+  OrchestratorPermissionRequest,
+  OrchestratorTaskControlAction,
+  OrchestratorTaskCreateRequest,
+  OrchestratorTaskDetail,
+  OrchestratorTaskEvent,
+  OrchestratorTaskSummary,
   ProviderPreset,
   SkillPackageInfo,
   SpeechInputSettings,
@@ -135,8 +135,10 @@ export async function saveSettings(settings: StoredSettings): Promise<void> {
     desktopAssistant: settings.desktopAssistant,
     mode: settings.mode
   };
-  if (settings.agent) {
-    payload.agent = settings.agent;
+  if (settings.orchestrator) {
+    payload.orchestrator = settings.orchestrator;
+  } else if (settings.agent) {
+    payload.orchestrator = settings.agent;
   }
   if (settings.mcpServers) {
     payload.mcpServers = settings.mcpServers;
@@ -243,17 +245,17 @@ export async function deleteConversation(id: string): Promise<void> {
   }
 }
 
-export async function fetchAgentCapabilities(): Promise<AgentInvokeResponse> {
-  const response = await fetch("/api/agent/capabilities");
+export async function fetchOrchestratorCapabilities(): Promise<OrchestratorInvokeResponse> {
+  const response = await fetch("/api/orchestrator/capabilities");
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
-    throw new Error(data.detail || `agent capabilities ${response.status}`);
+    throw new Error(data.detail || `orchestrator capabilities ${response.status}`);
   }
   return data;
 }
 
-export async function invokeAgent(request: Partial<AgentInvokeRequest>): Promise<AgentInvokeResponse> {
-  const response = await fetch("/api/agent/invoke", {
+export async function invokeOrchestrator(request: Partial<OrchestratorInvokeRequest>): Promise<OrchestratorInvokeResponse> {
+  const response = await fetch("/api/orchestrator/invoke", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -269,7 +271,7 @@ export async function invokeAgent(request: Partial<AgentInvokeRequest>): Promise
   });
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
-    throw new Error(data.detail || `agent ${response.status}`);
+    throw new Error(data.detail || `orchestrator invoke ${response.status}`);
   }
   return data;
 }
@@ -417,7 +419,7 @@ export async function replyCodeTaskQuestion(options: CodeTaskQuestionReplyReques
   }
 }
 
-export async function uploadAgentFile(options: {
+export async function uploadWorkspaceFile(options: {
   file: File;
   device?: UploadDevice;
   overwrite?: boolean;
@@ -563,59 +565,59 @@ export async function cloneVoice(options: {
 }
 
 // ---------------------------------------------------------------------------
-// Complex agent / MCP / skills API
+// Orchestrator / MCP / skills API
 // ---------------------------------------------------------------------------
 
-export async function fetchAgentTasks(conversationId?: string | null): Promise<AgentTaskSummary[]> {
+export async function fetchOrchestratorTasks(conversationId?: string | null): Promise<OrchestratorTaskSummary[]> {
   const query = conversationId ? `?conversationId=${encodeURIComponent(conversationId)}` : "";
-  const response = await fetch(`/api/agent/tasks${query}`);
+  const response = await fetch(`/api/orchestrator/tasks${query}`);
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
-    throw new Error(data.detail || `agent tasks ${response.status}`);
+    throw new Error(data.detail || `orchestrator tasks ${response.status}`);
   }
   return data.tasks ?? [];
 }
 
-export async function fetchAgentTaskDetail(id: string): Promise<AgentTaskDetail> {
-  const response = await fetch(`/api/agent/tasks/${encodeURIComponent(id)}`);
+export async function fetchOrchestratorTaskDetail(id: string): Promise<OrchestratorTaskDetail> {
+  const response = await fetch(`/api/orchestrator/tasks/${encodeURIComponent(id)}`);
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
-    throw new Error(data.detail || `agent task ${response.status}`);
+    throw new Error(data.detail || `orchestrator task ${response.status}`);
   }
-  return data.task as AgentTaskDetail;
+  return data.task as OrchestratorTaskDetail;
 }
 
-export async function controlAgentTask(
+export async function controlOrchestratorTask(
   id: string,
-  action: AgentTaskControlAction,
+  action: OrchestratorTaskControlAction,
   reason?: string
 ): Promise<{ ok: boolean }> {
-  const response = await fetch(`/api/agent/tasks/${encodeURIComponent(id)}/control`, {
+  const response = await fetch(`/api/orchestrator/tasks/${encodeURIComponent(id)}/control`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ action, reason: reason ?? "" })
   });
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
-    throw new Error(data.detail || `agent control ${response.status}`);
+    throw new Error(data.detail || `orchestrator control ${response.status}`);
   }
   return data;
 }
 
-export function streamAgentTaskEvents(options: {
+export function streamOrchestratorTaskEvents(options: {
   taskId: string;
   afterSeq?: number;
-  onEvent: (event: AgentTaskEvent) => void;
+  onEvent: (event: OrchestratorTaskEvent) => void;
   onError?: (message: string) => void;
 }): () => void {
   const afterSeq = options.afterSeq ?? 0;
-  const url = `/api/agent/tasks/${encodeURIComponent(options.taskId)}/events?afterSeq=${afterSeq}`;
+  const url = `/api/orchestrator/tasks/${encodeURIComponent(options.taskId)}/events?afterSeq=${afterSeq}`;
   const controller = new AbortController();
 
   const readerPromise = (async () => {
     const response = await fetch(url, { signal: controller.signal });
     if (!response.ok || !response.body) {
-      options.onError?.(`agent events ${response.status}`);
+      options.onError?.(`orchestrator events ${response.status}`);
       return;
     }
     const reader = response.body.getReader();
@@ -627,44 +629,44 @@ export function streamAgentTaskEvents(options: {
         break;
       }
       buffer += decoder.decode(value, { stream: true });
-      buffer = drainSseBuffer<AgentTaskEvent>(buffer, options.onEvent);
+      buffer = drainSseBuffer<OrchestratorTaskEvent>(buffer, options.onEvent);
     }
     buffer += decoder.decode();
-    drainSseBuffer<AgentTaskEvent>(buffer, options.onEvent, true);
+    drainSseBuffer<OrchestratorTaskEvent>(buffer, options.onEvent, true);
   })();
 
   readerPromise.catch((error) => {
     if (controller.signal.aborted) {
       return;
     }
-    options.onError?.(error instanceof Error ? error.message : "agent events stream failed");
+    options.onError?.(error instanceof Error ? error.message : "orchestrator events stream failed");
   });
 
   return () => controller.abort();
 }
 
-export async function createAgentTask(
-  request: AgentTaskCreateRequest
+export async function createOrchestratorTask(
+  request: OrchestratorTaskCreateRequest
 ): Promise<{ taskId: string }> {
-  const response = await fetch("/api/agent/tasks", {
+  const response = await fetch("/api/orchestrator/tasks", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(request)
   });
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
-    throw new Error(data.detail || `agent task create ${response.status}`);
+    throw new Error(data.detail || `orchestrator task create ${response.status}`);
   }
   return { taskId: String(data.taskId ?? data.id ?? "") };
 }
 
-export async function streamAgentTask(options: {
-  request: AgentTaskCreateRequest;
+export async function streamOrchestratorTask(options: {
+  request: OrchestratorTaskCreateRequest;
   signal?: AbortSignal;
-  onEvent: (event: AgentTaskEvent) => void;
+  onEvent: (event: OrchestratorTaskEvent) => void;
   onError?: (message: string) => void;
 }): Promise<string | null> {
-  const response = await fetch("/api/agent/tasks/stream", {
+  const response = await fetch("/api/orchestrator/tasks/stream", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(options.request),
@@ -672,7 +674,7 @@ export async function streamAgentTask(options: {
   });
 
   if (!response.ok || !response.body) {
-    throw new Error(`agent task stream ${response.status}`);
+    throw new Error(`orchestrator task stream ${response.status}`);
   }
 
   const taskId = response.headers.get("X-Task-Id");
@@ -686,10 +688,10 @@ export async function streamAgentTask(options: {
       break;
     }
     buffer += decoder.decode(value, { stream: true });
-    buffer = drainSseBuffer<AgentTaskEvent>(buffer, options.onEvent);
+    buffer = drainSseBuffer<OrchestratorTaskEvent>(buffer, options.onEvent);
   }
   buffer += decoder.decode();
-  drainSseBuffer<AgentTaskEvent>(buffer, options.onEvent, true);
+  drainSseBuffer<OrchestratorTaskEvent>(buffer, options.onEvent, true);
   return taskId;
 }
 
@@ -835,35 +837,35 @@ export async function deleteSkill(id: string): Promise<void> {
 
 // --- Artifacts ---
 
-export async function fetchArtifact(id: string): Promise<AgentArtifact> {
-  const response = await fetch(`/api/artifacts/${encodeURIComponent(id)}`);
+export async function fetchArtifact(id: string): Promise<OrchestratorArtifact> {
+  const response = await fetch(`/api/orchestrator/artifacts/${encodeURIComponent(id)}`);
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
     throw new Error(data.detail || `artifact ${response.status}`);
   }
-  return data.artifact as AgentArtifact;
+  return data.artifact as OrchestratorArtifact;
 }
 
 export function downloadArtifactUrl(id: string): string {
-  return `/api/artifacts/${encodeURIComponent(id)}/download`;
+  return `/api/orchestrator/artifacts/${encodeURIComponent(id)}/download`;
 }
 
 // --- Permission queue ---
 
-export async function fetchPendingPermissions(taskId: string): Promise<PermissionRequest[]> {
-  const response = await fetch(`/api/agent/tasks/${encodeURIComponent(taskId)}/permissions`);
+export async function fetchPendingPermissions(taskId: string): Promise<OrchestratorPermissionRequest[]> {
+  const response = await fetch(`/api/orchestrator/tasks/${encodeURIComponent(taskId)}/permissions`);
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
     throw new Error(data.detail || `permissions ${response.status}`);
   }
-  return (data.permissions ?? []) as PermissionRequest[];
+  return (data.permissions ?? []) as OrchestratorPermissionRequest[];
 }
 
 export async function approvePermission(
   permissionId: string,
   reason?: string
-): Promise<PermissionRequest> {
-  const response = await fetch(`/api/agent/permissions/${encodeURIComponent(permissionId)}/approve`, {
+): Promise<OrchestratorPermissionRequest> {
+  const response = await fetch(`/api/orchestrator/permissions/${encodeURIComponent(permissionId)}/approve`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ reason: reason ?? "" })
@@ -872,14 +874,14 @@ export async function approvePermission(
   if (!response.ok) {
     throw new Error(data.detail || `approve ${response.status}`);
   }
-  return data as PermissionRequest;
+  return data as OrchestratorPermissionRequest;
 }
 
 export async function rejectPermission(
   permissionId: string,
   reason?: string
-): Promise<PermissionRequest> {
-  const response = await fetch(`/api/agent/permissions/${encodeURIComponent(permissionId)}/reject`, {
+): Promise<OrchestratorPermissionRequest> {
+  const response = await fetch(`/api/orchestrator/permissions/${encodeURIComponent(permissionId)}/reject`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ reason: reason ?? "" })
@@ -888,7 +890,7 @@ export async function rejectPermission(
   if (!response.ok) {
     throw new Error(data.detail || `reject ${response.status}`);
   }
-  return data as PermissionRequest;
+  return data as OrchestratorPermissionRequest;
 }
 
 function drainSseBuffer<TEvent>(

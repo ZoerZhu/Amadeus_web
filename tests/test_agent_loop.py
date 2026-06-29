@@ -754,3 +754,63 @@ def test_trim_context_no_trimming_needed():
     ]
     trimmed = trim_context(msgs, max_tokens=10000, system_prompt="system")
     assert len(trimmed) == len(msgs)
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_trims_context_on_many_rounds(agent_storage):
+    """Test that context is trimmed when messages grow large."""
+    from unittest.mock import patch
+
+    async def mock_call_model(*, loop_ctx, task_model, mode, emit):
+        # Add a large message each round to force trimming
+        loop_ctx.messages.append({
+            "role": "assistant",
+            "content": "x" * 3000,
+            "tool_calls": [],
+        })
+        loop_ctx.messages.append({
+            "role": "tool",
+            "tool_call_id": f"tc_{loop_ctx.rounds}",
+            "name": "file_read",
+            "content": "y" * 3000,
+        })
+        if loop_ctx.rounds >= 5:
+            return {
+                "content": "",
+                "tool_calls": [{"id": "fin", "name": "finish", "arguments": {"summary": "Done"}}],
+                "tool_calls_raw": [],
+                "finish_reason": "stop",
+            }
+        return {
+            "content": "",
+            "tool_calls": [{
+                "id": f"call_{loop_ctx.rounds}",
+                "name": "file_read",
+                "arguments": {"action": "list", "path": "."},
+            }],
+            "tool_calls_raw": [],
+            "finish_reason": "tool_calls",
+        }
+
+    with tempfile.TemporaryDirectory() as tmp:
+        task = await orch_storage.create_task(
+            agent_storage,
+            user_id="test-user",
+            title="test trim",
+            prompt="test",
+            workspace_path=tmp,
+            conversation_id=None,
+            active_skill_ids=[],
+            settings=OrchestratorSettings(agent_loop_enabled=True, max_rounds=6).model_dump(by_alias=True),
+            context={},
+            budget={},
+        )
+        runner = OrchestratorRunner()
+        with patch.object(runner.agent_loop_runner, "_call_model", side_effect=mock_call_model):
+            request = OrchestratorTaskCreateRequest(prompt="test", workspace_path=tmp, max_rounds=6)
+            settings = OrchestratorSettings(agent_loop_enabled=True, max_rounds=6)
+            await runner.run(storage=agent_storage, task_id=task["id"], request=request, settings=settings)
+
+    # Verify the task completed without error
+    stored_task = await orch_storage.get_task(agent_storage, task["id"])
+    assert stored_task["status"] == "done"

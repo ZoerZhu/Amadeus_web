@@ -25,6 +25,7 @@ from .capability_adapters import (
 from .capabilities import CapabilityGateway
 from .domain import OrchestratorSettings, OrchestratorTaskCreateRequest
 from . import storage as orchestrator_storage
+from .context_window import estimate_token_count, trim_context
 from .shell_exec_policy import classify_shell_command
 from ..orchestrator_integrations.mcp_client import mcp_manager
 
@@ -323,6 +324,14 @@ class AgentLoopRunner:
                 return False
 
             budget.rounds += 1
+
+            # Trim context to fit within token budget before calling the model
+            max_context_tokens = int(task_model.get("maxContextTokens") or 120000)
+            loop_ctx.messages = trim_context(
+                loop_ctx.messages,
+                max_tokens=max_context_tokens,
+                system_prompt=loop_ctx.system_prompt,
+            )
 
             turn = await self._call_model(
                 loop_ctx=loop_ctx,

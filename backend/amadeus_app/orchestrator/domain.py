@@ -5,6 +5,8 @@ from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from ..domain import ChatAttachment
+
 
 RoutingMatchType = Literal["keyword", "regex"]
 RoutingDecisionMethod = Literal["force_allow", "force_deny", "rule", "llm_rejudge"]
@@ -22,6 +24,7 @@ OrchestratorTaskStatus = Literal[
 OrchestratorControlAction = Literal["pause", "resume", "cancel", "rollback"]
 
 OrchestratorEventKind = Literal[
+    "message",
     "status",
     "plan",
     "step",
@@ -108,6 +111,7 @@ class OrchestratorTaskCreateRequest(BaseModel):
 
     title: str = ""
     prompt: str
+    attachments: list[ChatAttachment] = Field(default_factory=list)
     workspace_path: str = Field(default="", alias="workspacePath")
     conversation_id: UUID | None = Field(default=None, alias="conversationId")
     skill_ids: list[str] = Field(default_factory=list, alias="skillIds")
@@ -117,6 +121,17 @@ class OrchestratorTaskCreateRequest(BaseModel):
     max_rounds: int | None = Field(default=None, alias="maxRounds")
     max_tool_calls: int | None = Field(default=None, alias="maxToolCalls")
     max_runtime_seconds: int | None = Field(default=None, alias="maxRuntimeSeconds")
+
+
+class OrchestratorTaskMessageRequest(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    prompt: str
+    attachments: list[ChatAttachment] = Field(default_factory=list)
+    skill_ids: list[str] = Field(default_factory=list, alias="skillIds")
+    model: dict[str, Any] = Field(default_factory=dict)
+    mode: str = "fast"
+    trust_mode: bool | None = Field(default=None, alias="trustMode")
 
 
 class OrchestratorTaskControlRequest(BaseModel):

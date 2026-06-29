@@ -520,7 +520,7 @@ export function OrchestratorSettingsPanel({
         }}
       >
         <label className="switch-row">
-          <span>启用任务 Agent</span>
+          <span>启用任务编排</span>
           <input
             checked={normalizedOrchestrator.enabled}
             onChange={(event) => updateOrchestrator({ enabled: event.target.checked })}

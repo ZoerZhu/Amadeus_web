@@ -1,4 +1,4 @@
-import { PointerEvent as ReactPointerEvent, useEffect, useMemo, useRef, useState } from "react";
+﻿import { PointerEvent as ReactPointerEvent, useEffect, useMemo, useRef, useState } from "react";
 import type { ChangeEvent, CSSProperties, DragEvent as ReactDragEvent, FormEvent } from "react";
 import {
   Bell,
@@ -31,17 +31,14 @@ import {
   deleteConversation,
   fetchConversation,
   fetchMcpServers,
+  fetchOrchestratorTasks,
   fetchProviders,
   fetchSettings,
   fetchSkills,
   listConversations,
   observeDesktop,
-  replyCodeTaskQuestion,
   saveSettings,
-  streamCodeTask,
   streamChat,
-  streamTaskSummaryVoice,
-  syncCodeTaskHistory,
   synthesizeVoice,
   transcribeVoiceInput,
   uploadWorkspaceFile
@@ -62,25 +59,24 @@ import { normalizeOrchestratorSettings } from "./agentDefaults";
 import { BootLoader } from "./components/BootLoader";
 import { ChatMessageBubble } from "./components/ChatMessageBubble";
 import { OrchestratorSettingsPanel } from "./components/OrchestratorSettingsPanel";
-import { OrchestratorTaskPanel } from "./components/OrchestratorTaskPanel";
 import { LeftDock } from "./components/LeftDock";
 import { Live2DStage, type Live2DStageHandle } from "./components/Live2DStage";
 import { Live2DModelHistory, Live2DQuickControls } from "./components/Live2DControls";
 import { MemoryPanel } from "./components/MemoryPanel";
 import { SettingsPage, type SettingsPageSection, type SettingsSectionKey } from "./components/SettingsPage";
-import { TaskPanel } from "./components/TaskPanel";
+import { TaskWorkspace } from "./components/TaskWorkspace";
 import { TopBar } from "./components/TopBar";
 import { UploadAttachmentTray, UploadPopover } from "./components/UploadControls";
 import type {
   OrchestratorSettings,
   ChatMessage,
   ChatMode,
-  CodeTaskEvent,
   ConversationDetail,
   ConversationSummary,
   DesktopAssistantSettings,
   McpServerConfig,
   ModelSettings,
+  OrchestratorTaskSummary,
   ProviderPreset,
   SkillPackageInfo,
   SpeechInputSettings,
@@ -95,12 +91,6 @@ import type {
 
 import {
   CHAT_MIN_WIDTH,
-  CODE_TASK_FLUSH_INTERVAL_MS,
-  CODE_TASK_HISTORY_STORAGE_KEY,
-  CODE_TASK_MAX_ASSISTANT_TEXT,
-  CODE_TASK_MAX_DETAIL_TEXT,
-  CODE_TASK_MAX_HISTORY,
-  DEFAULT_CODE_TASK_WORKSPACE,
   DEFAULT_MODEL_SETTINGS,
   DEFAULT_SPEECH_INPUT_SETTINGS,
   DEFAULT_VISION_SETTINGS,
@@ -111,20 +101,13 @@ import {
   MIN_BOOT_DURATION_MS,
   PERSONA_ID,
   STORAGE_KEY,
-  appendLimitedCodeTaskText,
-  buildCodeTaskPhases,
-  buildCodeTaskSummaryText,
-  buildCodeTaskVoiceSummarySource,
   buildConversationTitle,
   clamp,
-  codeTaskToMarkdown,
   composeMessageText,
   conversationToMarkdown,
   createId,
   downloadText,
   getChatMaxWidth,
-  limitCodeTaskText,
-  loadStoredCodeTasks,
   loadStoredSettings,
   normalizeDisplayEmotion,
   normalizeAssistantVoice,
@@ -136,15 +119,17 @@ import {
   sanitizeFilename,
   toApiMessages,
   toChatMessages,
-  trimCodeTaskMessages,
   type AudioQueueItem,
-  type CodeTaskMessage,
-  type CodeTaskRecord,
   type RightPanelTab
 } from "./app/appSupport";
+
+type PendingAssistantDelta = {
+  content: string;
+  thinking: string;
+};
+
 export default function App() {
   const stored = useMemo(loadStoredSettings, []);
-  const storedCodeTasks = useMemo(loadStoredCodeTasks, []);
   const launchedAsDesktopAssistant = useMemo(() => {
     return new URLSearchParams(window.location.search).get("desktopAssistant") === "1";
   }, []);
@@ -170,15 +155,6 @@ export default function App() {
   const [chatOpen, setChatOpen] = useState(false);
   const [chatWidth, setChatWidth] = useState(430);
   const [rightPanelTab, setRightPanelTab] = useState<RightPanelTab>("chat");
-  const [codeTasks, setCodeTasks] = useState<CodeTaskRecord[]>(storedCodeTasks);
-  const [activeCodeTaskId, setActiveCodeTaskId] = useState<string | null>(storedCodeTasks[0]?.id ?? null);
-  const [codeTaskWorkspace, setCodeTaskWorkspace] = useState(storedCodeTasks[0]?.workspacePath ?? DEFAULT_CODE_TASK_WORKSPACE);
-  const [codeTaskInput, setCodeTaskInput] = useState("");
-  const [codeTaskAutoApprove, setCodeTaskAutoApprove] = useState(false);
-  const [codeTaskRunning, setCodeTaskRunning] = useState(false);
-  const [codeTaskStatus, setCodeTaskStatus] = useState(storedCodeTasks[0]?.status ?? "idle");
-  const [codeTaskMessages, setCodeTaskMessages] = useState<CodeTaskMessage[]>(storedCodeTasks[0]?.messages ?? []);
-  const [codeTaskQuestionBusyIds, setCodeTaskQuestionBusyIds] = useState<string[]>([]);
   const [status, setStatus] = useState("idle");
   const [currentEmotion, setCurrentEmotion] = useState("neutral");
   const [live2dModels, setLive2dModels] = useState<Live2DModelRecord[]>([DEFAULT_LIVE2D_MODEL]);
@@ -205,6 +181,7 @@ export default function App() {
   );
   const [skills, setSkills] = useState<SkillPackageInfo[]>([]);
   const [orchestratorTaskId, setOrchestratorTaskId] = useState<string | null>(null);
+  const [orchestratorTasks, setOrchestratorTasks] = useState<OrchestratorTaskSummary[]>([]);
   const [orchestratorTaskByMessage, setOrchestratorTaskByMessage] = useState<
     Record<string, { taskId: string; title: string; reason: string; skillIds: string[] }>
   >({});
@@ -223,25 +200,9 @@ export default function App() {
   const activeLive2DModelRef = useRef<Live2DModelRecord>(DEFAULT_LIVE2D_MODEL);
   const abortRef = useRef<AbortController | null>(null);
   const isStreamingRef = useRef(false);
+  const assistantDeltaFrameRef = useRef<number | null>(null);
+  const pendingAssistantDeltaRef = useRef<Map<string, PendingAssistantDelta>>(new Map());
   const voiceInputBusyRef = useRef(false);
-  const codeTaskAbortRef = useRef<AbortController | null>(null);
-  const codeTaskAssistantMessageIdRef = useRef<string | null>(null);
-  const codeTaskFlushTimerRef = useRef<number | null>(null);
-  const pendingCodeTaskAssistantDeltaRef = useRef("");
-  const pendingCodeTaskMessagesRef = useRef<Array<Omit<CodeTaskMessage, "id" | "createdAt">>>([]);
-  const lastCodeTaskStatusMessageRef = useRef("");
-  const codeTasksRef = useRef<CodeTaskRecord[]>(storedCodeTasks);
-  const codeTaskMessagesRef = useRef<CodeTaskMessage[]>(storedCodeTasks[0]?.messages ?? []);
-  const activeCodeTaskIdRef = useRef<string | null>(storedCodeTasks[0]?.id ?? null);
-  const codeTaskStatusRef = useRef(storedCodeTasks[0]?.status ?? "idle");
-  const codeTaskWorkspaceRef = useRef(storedCodeTasks[0]?.workspacePath ?? DEFAULT_CODE_TASK_WORKSPACE);
-  const codeTaskRunningRef = useRef(false);
-  const codeTaskCompletedRef = useRef(false);
-  const codeTaskFinalStatusRef = useRef("");
-  const codeTaskServerUrlRef = useRef("");
-  const codeTaskPersistTimerRef = useRef<number | null>(null);
-  const codeTaskHistorySyncTimerRef = useRef<number | null>(null);
-  const handledCodeTaskEventKeysRef = useRef<Set<string>>(new Set());
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const audioQueueRef = useRef<AudioQueueItem[]>([]);
   const audioPlayingRef = useRef(false);
@@ -255,7 +216,7 @@ export default function App() {
   const textRevealTokenRef = useRef(0);
   const floatingMessageRef = useRef<HTMLDivElement | null>(null);
   const chatMessageRef = useRef<HTMLDivElement | null>(null);
-  const taskMessageRef = useRef<HTMLDivElement | null>(null);
+  const chatScrollFrameRef = useRef<number | null>(null);
   const saveSettingsTimerRef = useRef<number | null>(null);
   const voiceMediaRecorderRef = useRef<MediaRecorder | null>(null);
   const voiceMediaStreamRef = useRef<MediaStream | null>(null);
@@ -293,8 +254,6 @@ export default function App() {
   const desktopAssistantLaunchInitializedRef = useRef(false);
   const cleanupDesktopAssistantRuntimeRef = useRef<() => void>(() => undefined);
   const createDesktopAssistantConversationRef = useRef<() => Promise<string | null>>(async () => null);
-  const ensureIncomingCodeTaskVisibleRef = useRef<(taskId: string, event: CodeTaskEvent) => boolean>(() => false);
-  const handleCodeTaskEventOnceRef = useRef<(event: CodeTaskEvent, taskId?: string | null) => void>(() => undefined);
   const runDesktopAutoObservationRef = useRef<() => Promise<void>>(async () => undefined);
   const startDesktopAssistantListeningRef = useRef<() => Promise<void>>(async () => undefined);
   const stopAudioPlaybackRef = useRef<() => void>(() => undefined);
@@ -303,20 +262,10 @@ export default function App() {
   const selectedProvider = providers.find((provider) => provider.name === modelSettings.providerName);
   const desktopAssistantAvailable = Boolean(window.amadeusDesktop?.setDesktopAssistantMode);
   const canSend = (input.trim().length > 0 || uploadedFiles.length > 0) && !isStreaming && !voiceRecording && !voiceInputBusy;
-  const canStartCodeTask = codeTaskInput.trim().length > 0 && !codeTaskRunning;
   const visibleMessages = messages
     .filter((message) => message.content || message.streaming || (message.attachments?.length ?? 0) > 0)
     .slice(-8);
-  const activeCodeTask = codeTasks.find((task) => task.id === activeCodeTaskId) ?? null;
-  const visibleCodeTasks = useMemo(
-    () => [...codeTasks].sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime()),
-    [codeTasks]
-  );
-  const codeTaskPhases = useMemo(
-    () => buildCodeTaskPhases(codeTaskMessages, codeTaskRunning),
-    [codeTaskMessages, codeTaskRunning]
-  );
-  const codeTaskMessageCount = codeTaskMessages.length;
+  const activeOrchestratorTask = orchestratorTasks.find((task) => task.id === orchestratorTaskId) ?? null;
   const filteredConversations = useMemo(() => {
     const keyword = historySearch.trim().toLowerCase();
     if (!keyword) {
@@ -365,8 +314,6 @@ export default function App() {
 
   cleanupDesktopAssistantRuntimeRef.current = cleanupDesktopAssistantRuntime;
   createDesktopAssistantConversationRef.current = createDesktopAssistantConversation;
-  ensureIncomingCodeTaskVisibleRef.current = ensureIncomingCodeTaskVisible;
-  handleCodeTaskEventOnceRef.current = handleCodeTaskEventOnce;
   runDesktopAutoObservationRef.current = runDesktopAutoObservation;
   startDesktopAssistantListeningRef.current = startDesktopAssistantListening;
   stopAudioPlaybackRef.current = stopAudioPlayback;
@@ -477,6 +424,14 @@ export default function App() {
         } catch {
           // non-fatal: orchestrator integrations may be offline
         }
+        try {
+          const taskItems = await fetchOrchestratorTasks(null, false);
+          if (!cancelled) {
+            setOrchestratorTasks(taskItems);
+          }
+        } catch {
+          // non-fatal: task ledger may be offline during startup
+        }
         setConversations(conversationItems);
         if (conversationItems.length > 0) {
           const firstConversation = await fetchConversation(conversationItems[0].id);
@@ -535,20 +490,6 @@ export default function App() {
       });
     }, 350);
   }, [modelSettings, visionSettings, speechInputSettingsForPersistence, voiceSettings, desktopAssistantSettings, mode, orchestratorSettings, persistedMcpServers, storageOnline]);
-
-  useEffect(() => {
-    const payload = codeTasks.slice(0, CODE_TASK_MAX_HISTORY);
-    codeTasksRef.current = payload;
-    localStorage.setItem(CODE_TASK_HISTORY_STORAGE_KEY, JSON.stringify(payload));
-
-    if (codeTaskHistorySyncTimerRef.current !== null) {
-      window.clearTimeout(codeTaskHistorySyncTimerRef.current);
-    }
-    codeTaskHistorySyncTimerRef.current = window.setTimeout(() => {
-      codeTaskHistorySyncTimerRef.current = null;
-      syncCodeTaskHistory(payload).catch(() => undefined);
-    }, 500);
-  }, [codeTasks]);
 
   useEffect(() => {
     isStreamingRef.current = isStreaming;
@@ -707,100 +648,25 @@ export default function App() {
   ]);
 
   useEffect(() => {
-    const syncCurrentCodeTasks = () => {
-      const payload = codeTasksRef.current.slice(0, CODE_TASK_MAX_HISTORY);
-      syncCodeTaskHistory(payload).catch(() => undefined);
-    };
-    const syncTimer = window.setInterval(syncCurrentCodeTasks, 30000);
-    window.addEventListener("focus", syncCurrentCodeTasks);
-    document.addEventListener("visibilitychange", syncCurrentCodeTasks);
-    syncCurrentCodeTasks();
-    return () => {
-      window.clearInterval(syncTimer);
-      window.removeEventListener("focus", syncCurrentCodeTasks);
-      document.removeEventListener("visibilitychange", syncCurrentCodeTasks);
-    };
-  }, []);
-
-  useEffect(() => {
-    codeTaskMessagesRef.current = codeTaskMessages;
-  }, [codeTaskMessages]);
-
-  useEffect(() => {
-    activeCodeTaskIdRef.current = activeCodeTaskId;
-  }, [activeCodeTaskId]);
-
-  useEffect(() => {
-    codeTaskStatusRef.current = codeTaskStatus;
-  }, [codeTaskStatus]);
-
-  useEffect(() => {
-    codeTaskWorkspaceRef.current = codeTaskWorkspace;
-  }, [codeTaskWorkspace]);
-
-  useEffect(() => {
-    codeTaskRunningRef.current = codeTaskRunning;
-  }, [codeTaskRunning]);
-
-  useEffect(() => {
-    handledCodeTaskEventKeysRef.current.clear();
-  }, [activeCodeTaskId]);
-
-  useEffect(() => {
-    if (!activeCodeTaskId) {
-      if (codeTaskPersistTimerRef.current !== null) {
-        window.clearTimeout(codeTaskPersistTimerRef.current);
-        codeTaskPersistTimerRef.current = null;
-      }
-      return;
-    }
-    if (codeTaskPersistTimerRef.current !== null) {
-      window.clearTimeout(codeTaskPersistTimerRef.current);
-    }
-    codeTaskPersistTimerRef.current = window.setTimeout(
-      () => {
-        codeTaskPersistTimerRef.current = null;
-        const now = new Date().toISOString();
-        setCodeTasks((prev) =>
-          prev
-            .map((task) =>
-              task.id === activeCodeTaskId
-                ? {
-                    ...task,
-                    workspacePath: codeTaskWorkspace,
-                    status: codeTaskStatus,
-                    messages: trimCodeTaskMessages(codeTaskMessages),
-                    updatedAt: now
-                  }
-                : task
-            )
-            .sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime())
-            .slice(0, CODE_TASK_MAX_HISTORY)
-        );
-      },
-      codeTaskRunning ? 700 : 0
-    );
-  }, [activeCodeTaskId, codeTaskMessages, codeTaskStatus, codeTaskWorkspace, codeTaskRunning]);
-
-  useEffect(() => {
+    const pendingAssistantDeltas = pendingAssistantDeltaRef.current;
     return () => {
       if (saveSettingsTimerRef.current !== null) {
         window.clearTimeout(saveSettingsTimerRef.current);
       }
-      if (codeTaskFlushTimerRef.current !== null) {
-        window.clearTimeout(codeTaskFlushTimerRef.current);
+      if (assistantDeltaFrameRef.current !== null) {
+        window.cancelAnimationFrame(assistantDeltaFrameRef.current);
+        assistantDeltaFrameRef.current = null;
       }
-      if (codeTaskPersistTimerRef.current !== null) {
-        window.clearTimeout(codeTaskPersistTimerRef.current);
-      }
-      if (codeTaskHistorySyncTimerRef.current !== null) {
-        window.clearTimeout(codeTaskHistorySyncTimerRef.current);
-      }
+      pendingAssistantDeltas.clear();
       if (desktopSubtitleTimerRef.current !== null) {
         window.clearTimeout(desktopSubtitleTimerRef.current);
       }
       if (desktopDragFrameRef.current !== null) {
         window.cancelAnimationFrame(desktopDragFrameRef.current);
+      }
+      if (chatScrollFrameRef.current !== null) {
+        window.cancelAnimationFrame(chatScrollFrameRef.current);
+        chatScrollFrameRef.current = null;
       }
       stopAudioPlaybackRef.current();
       cleanupVoiceRecordingResources();
@@ -818,18 +684,27 @@ export default function App() {
   }, [menuOpen]);
 
   useEffect(() => {
-    floatingMessageRef.current?.scrollTo({ top: floatingMessageRef.current.scrollHeight, behavior: "smooth" });
-    chatMessageRef.current?.scrollTo({ top: chatMessageRef.current.scrollHeight, behavior: "smooth" });
-  }, [messages, chatOpen]);
+    if (chatScrollFrameRef.current !== null) {
+      window.cancelAnimationFrame(chatScrollFrameRef.current);
+    }
+    chatScrollFrameRef.current = window.requestAnimationFrame(() => {
+      chatScrollFrameRef.current = null;
+      const behavior: ScrollBehavior = isStreaming ? "auto" : "smooth";
+      floatingMessageRef.current?.scrollTo({ top: floatingMessageRef.current.scrollHeight, behavior });
+      chatMessageRef.current?.scrollTo({ top: chatMessageRef.current.scrollHeight, behavior });
+    });
+    return () => {
+      if (chatScrollFrameRef.current !== null) {
+        window.cancelAnimationFrame(chatScrollFrameRef.current);
+        chatScrollFrameRef.current = null;
+      }
+    };
+  }, [messages, chatOpen, isStreaming]);
 
   useEffect(() => {
     resizeComposerTextarea(floatingComposerInputRef.current);
     resizeComposerTextarea(panelComposerInputRef.current);
   }, [input, chatOpen, voiceRecording]);
-
-  useEffect(() => {
-    taskMessageRef.current?.scrollTo({ top: taskMessageRef.current.scrollHeight, behavior: "auto" });
-  }, [codeTaskMessageCount, rightPanelTab, chatOpen]);
 
   function applyProvider(name: string) {
     const provider = providers.find((item) => item.name === name);
@@ -1350,25 +1225,64 @@ export default function App() {
     }
   }
 
-  function appendAssistantDelta(id: string, delta: Partial<ChatMessage>) {
+  function applyAssistantDeltaBatch(updates: Map<string, PendingAssistantDelta>) {
+    if (updates.size === 0) {
+      return;
+    }
     setMessages((prev) =>
-      prev.map((message) =>
-        message.id === id
-          ? {
-              ...message,
-              ...delta,
-              content:
-                delta.content !== undefined
-                  ? normalizeMessageContent(message.content + delta.content, message.role)
-                  : message.content,
-              thinking: delta.thinking !== undefined ? `${message.thinking ?? ""}${delta.thinking}` : message.thinking
-            }
-          : message
-      )
+      prev.map((message) => {
+        const delta = updates.get(message.id);
+        if (!delta) {
+          return message;
+        }
+        return {
+          ...message,
+          content: delta.content
+            ? normalizeMessageContent(message.content + delta.content, message.role)
+            : message.content,
+          thinking: delta.thinking ? `${message.thinking ?? ""}${delta.thinking}` : message.thinking
+        };
+      })
     );
   }
 
+  function flushAssistantDeltaQueue() {
+    if (assistantDeltaFrameRef.current !== null) {
+      window.cancelAnimationFrame(assistantDeltaFrameRef.current);
+      assistantDeltaFrameRef.current = null;
+    }
+    const pending = pendingAssistantDeltaRef.current;
+    if (pending.size === 0) {
+      return;
+    }
+    const updates = new Map(pending);
+    pending.clear();
+    applyAssistantDeltaBatch(updates);
+  }
+
+  function appendAssistantDelta(id: string, delta: Partial<ChatMessage>) {
+    const content = delta.content ?? "";
+    const thinking = delta.thinking ?? "";
+    if (!content && !thinking) {
+      return;
+    }
+    const pending = pendingAssistantDeltaRef.current.get(id) ?? { content: "", thinking: "" };
+    pendingAssistantDeltaRef.current.set(id, {
+      content: pending.content + content,
+      thinking: pending.thinking + thinking
+    });
+    if (assistantDeltaFrameRef.current === null) {
+      assistantDeltaFrameRef.current = window.requestAnimationFrame(() => {
+        assistantDeltaFrameRef.current = null;
+        const updates = new Map(pendingAssistantDeltaRef.current);
+        pendingAssistantDeltaRef.current.clear();
+        applyAssistantDeltaBatch(updates);
+      });
+    }
+  }
+
   function appendAssistantToolEvent(id: string, toolEvent: ToolTraceEvent) {
+    flushAssistantDeltaQueue();
     setMessages((prev) =>
       prev.map((message) => {
         if (message.id !== id) {
@@ -1387,6 +1301,7 @@ export default function App() {
   }
 
   function finalizeAssistant(id: string) {
+    flushAssistantDeltaQueue();
     setMessages((prev) =>
       prev.map((message) => (message.id === id ? { ...message, streaming: false } : message))
     );
@@ -1402,6 +1317,7 @@ export default function App() {
     if (!voice) {
       return;
     }
+    flushAssistantDeltaQueue();
     setMessages((prev) =>
       prev.map((message) => (message.id === id ? { ...message, assistantVoice: voice } : message))
     );
@@ -1411,6 +1327,7 @@ export default function App() {
     if (!url) {
       return;
     }
+    flushAssistantDeltaQueue();
     setMessages((prev) =>
       prev.map((message) => {
         if (message.id !== id) {
@@ -2598,7 +2515,7 @@ export default function App() {
         [assistantId]: { taskId, title, reason, skillIds }
       }));
       setOrchestratorTaskId(taskId);
-      setRightPanelTab("orchestrator");
+      setRightPanelTab("tasks");
       setStatus(`orchestrator: ${title}`);
       return;
     }
@@ -2768,6 +2685,7 @@ export default function App() {
   function stopStreaming() {
     abortRef.current?.abort();
     stopAudioPlayback();
+    flushAssistantDeltaQueue();
     setIsStreaming(false);
     setStatus("stopped");
     setMessages((prev) => prev.map((message) => ({ ...message, streaming: false })));
@@ -2776,692 +2694,6 @@ export default function App() {
   function openTaskPanel() {
     setRightPanelTab("tasks");
     setChatOpen(true);
-  }
-
-  function ensureIncomingCodeTaskVisible(taskId: string, event: CodeTaskEvent): boolean {
-    if (taskId === activeCodeTaskIdRef.current) {
-      return true;
-    }
-    const payload = event.payload as Record<string, unknown>;
-    const existing = codeTasksRef.current.find((task) => task.id === taskId) ?? null;
-    const shouldSwitch = !activeCodeTaskIdRef.current || !existing;
-    if (!shouldSwitch) {
-      return false;
-    }
-    const now = new Date().toISOString();
-    const prompt = typeof payload.text === "string" && payload.text.trim()
-      ? payload.text.trim()
-      : typeof payload.message === "string"
-        ? payload.message.trim()
-        : "OpenCode 任务";
-    const workspacePath = typeof payload.workspacePath === "string" ? payload.workspacePath : existing?.workspacePath ?? "";
-    const nextTask: CodeTaskRecord = existing ?? {
-      id: taskId,
-      title: buildConversationTitle(prompt),
-      prompt,
-      workspacePath,
-      status: "running",
-      messages: [],
-      createdAt: now,
-      updatedAt: now
-    };
-    const nextMessages = existing?.messages ?? [];
-    activeCodeTaskIdRef.current = taskId;
-    codeTaskMessagesRef.current = nextMessages;
-    codeTaskStatusRef.current = nextTask.status;
-    codeTaskWorkspaceRef.current = nextTask.workspacePath;
-    codeTaskRunningRef.current = true;
-    codeTaskAssistantMessageIdRef.current = null;
-    codeTaskServerUrlRef.current = "";
-    setActiveCodeTaskId(taskId);
-    setCodeTaskMessages(nextMessages);
-    setCodeTaskWorkspace(nextTask.workspacePath);
-    setCodeTaskStatus(nextTask.status);
-    setCodeTaskRunning(true);
-    setCodeTaskQuestionBusyIds([]);
-    if (!existing) {
-      codeTasksRef.current = [nextTask, ...codeTasksRef.current].slice(0, CODE_TASK_MAX_HISTORY);
-    }
-    setCodeTasks((prev) => {
-      if (prev.some((task) => task.id === taskId)) {
-        return prev;
-      }
-      return [nextTask, ...prev].slice(0, CODE_TASK_MAX_HISTORY);
-    });
-    openTaskPanel();
-    return true;
-  }
-
-  function updateCodeTaskRecord(taskId: string, updater: (task: CodeTaskRecord) => CodeTaskRecord) {
-    setCodeTasks((prev) =>
-      prev
-        .map((task) => (task.id === taskId ? updater(task) : task))
-        .sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime())
-        .slice(0, CODE_TASK_MAX_HISTORY)
-    );
-  }
-
-  function openCodeTaskRecord(task: CodeTaskRecord) {
-    if (codeTaskRunning && task.id !== activeCodeTaskId) {
-      return;
-    }
-    clearPendingCodeTaskFlush();
-    activeCodeTaskIdRef.current = task.id;
-    setActiveCodeTaskId(task.id);
-    setCodeTaskWorkspace(task.workspacePath);
-    setCodeTaskStatus(task.status);
-    setCodeTaskMessages(task.messages);
-    codeTaskMessagesRef.current = task.messages;
-    setCodeTaskInput("");
-    codeTaskAssistantMessageIdRef.current = null;
-    codeTaskServerUrlRef.current = "";
-    setCodeTaskQuestionBusyIds([]);
-    openTaskPanel();
-  }
-
-  function startNewCodeTaskDraft() {
-    codeTaskAbortRef.current?.abort();
-    clearPendingCodeTaskFlush();
-    codeTaskAssistantMessageIdRef.current = null;
-    codeTaskServerUrlRef.current = "";
-    setCodeTaskQuestionBusyIds([]);
-    activeCodeTaskIdRef.current = null;
-    setActiveCodeTaskId(null);
-    setCodeTaskMessages([]);
-    codeTaskMessagesRef.current = [];
-    setCodeTaskInput("");
-    setCodeTaskStatus("idle");
-    setCodeTaskRunning(false);
-    openTaskPanel();
-  }
-
-  function exportCodeTaskRecord(task: CodeTaskRecord) {
-    const stamp = new Date().toISOString().slice(0, 16).replace(/[:T]/g, "-");
-    downloadText(`${sanitizeFilename(task.title)}-${stamp}.md`, codeTaskToMarkdown(task));
-  }
-
-  function deleteCodeTaskRecord(task: CodeTaskRecord) {
-    if (codeTaskRunning && task.id === activeCodeTaskId) {
-      setCodeTaskStatus("请先停止当前任务");
-      return;
-    }
-    const confirmed = window.confirm(`删除任务「${task.title}」？`);
-    if (!confirmed) {
-      return;
-    }
-    setCodeTasks((prev) => prev.filter((item) => item.id !== task.id));
-    if (task.id === activeCodeTaskId) {
-      const nextTask = codeTasks.find((item) => item.id !== task.id) ?? null;
-      activeCodeTaskIdRef.current = nextTask?.id ?? null;
-      setActiveCodeTaskId(nextTask?.id ?? null);
-      setCodeTaskMessages(nextTask?.messages ?? []);
-      codeTaskMessagesRef.current = nextTask?.messages ?? [];
-      setCodeTaskWorkspace(nextTask?.workspacePath ?? DEFAULT_CODE_TASK_WORKSPACE);
-      setCodeTaskStatus(nextTask?.status ?? "idle");
-      codeTaskServerUrlRef.current = "";
-      setCodeTaskQuestionBusyIds([]);
-    }
-  }
-
-  async function chooseCodeTaskFolder() {
-    try {
-      const selected = await window.amadeusDesktop?.selectFolder?.();
-      if (selected) {
-        setCodeTaskWorkspace(selected);
-        return;
-      }
-    } catch (error) {
-      setCodeTaskStatus(error instanceof Error ? error.message : "folder picker failed");
-      return;
-    }
-    const manualPath = window.prompt("输入要交给 OpenCode 的文件夹路径", codeTaskWorkspace);
-    if (manualPath !== null) {
-      setCodeTaskWorkspace(manualPath.trim());
-    }
-  }
-
-  function appendCodeTaskMessage(message: Omit<CodeTaskMessage, "id" | "createdAt">) {
-    pendingCodeTaskMessagesRef.current.push({
-      ...message,
-      text: limitCodeTaskText(message.text, message.kind === "user" ? CODE_TASK_MAX_ASSISTANT_TEXT : CODE_TASK_MAX_DETAIL_TEXT),
-      detail: message.detail ? limitCodeTaskText(message.detail) : undefined
-    });
-    scheduleCodeTaskFlush();
-  }
-
-  function appendCodeTaskAssistantDelta(text: string) {
-    if (!text) {
-      return;
-    }
-    pendingCodeTaskAssistantDeltaRef.current += text;
-    scheduleCodeTaskFlush();
-  }
-
-  function clearPendingCodeTaskFlush() {
-    pendingCodeTaskAssistantDeltaRef.current = "";
-    pendingCodeTaskMessagesRef.current = [];
-    lastCodeTaskStatusMessageRef.current = "";
-    if (codeTaskFlushTimerRef.current !== null) {
-      window.clearTimeout(codeTaskFlushTimerRef.current);
-      codeTaskFlushTimerRef.current = null;
-    }
-  }
-
-  function scheduleCodeTaskFlush() {
-    if (codeTaskFlushTimerRef.current !== null) {
-      return;
-    }
-    codeTaskFlushTimerRef.current = window.setTimeout(flushCodeTaskUpdates, CODE_TASK_FLUSH_INTERVAL_MS);
-  }
-
-  function flushCodeTaskUpdates() {
-    codeTaskFlushTimerRef.current = null;
-    const assistantDelta = pendingCodeTaskAssistantDeltaRef.current;
-    const queuedMessages = pendingCodeTaskMessagesRef.current;
-    pendingCodeTaskAssistantDeltaRef.current = "";
-    pendingCodeTaskMessagesRef.current = [];
-    if (!assistantDelta && queuedMessages.length === 0) {
-      return;
-    }
-    let next = codeTaskMessagesRef.current;
-    const targetId = codeTaskAssistantMessageIdRef.current;
-    if (assistantDelta) {
-      if (targetId && next.some((message) => message.id === targetId)) {
-        next = next.map((message) =>
-          message.id === targetId
-            ? {
-                ...message,
-                text: appendLimitedCodeTaskText(message.text, assistantDelta)
-              }
-            : message
-        );
-      } else {
-        const id = createId();
-        codeTaskAssistantMessageIdRef.current = id;
-        next = [
-          ...next,
-          {
-            id,
-            kind: "assistant",
-            title: "OpenCode",
-            text: appendLimitedCodeTaskText("", assistantDelta),
-            createdAt: new Date().toISOString()
-          }
-        ];
-      }
-    }
-    if (queuedMessages.length > 0) {
-      const createdAt = new Date().toISOString();
-      next = [
-        ...next,
-        ...queuedMessages.map((message) => ({
-          ...message,
-          id: createId(),
-          createdAt
-        }))
-      ];
-    }
-    const trimmed = trimCodeTaskMessages(next);
-    codeTaskMessagesRef.current = trimmed;
-    setCodeTaskMessages(trimmed);
-  }
-
-  function updateCodeTaskMessage(messageId: string, updater: (message: CodeTaskMessage) => CodeTaskMessage) {
-    flushCodeTaskUpdates();
-    const next = codeTaskMessagesRef.current.map((message) => (message.id === messageId ? updater(message) : message));
-    codeTaskMessagesRef.current = next;
-    setCodeTaskMessages(next);
-  }
-
-  function handleCodeTaskEventOnce(event: CodeTaskEvent, taskId = activeCodeTaskId) {
-    if (taskId && taskId !== activeCodeTaskIdRef.current && !ensureIncomingCodeTaskVisible(taskId, event)) {
-      return;
-    }
-    const payload = event.payload as Record<string, unknown>;
-    const eventId = payload.eventId;
-    const key = taskId && (typeof eventId === "number" || typeof eventId === "string")
-      ? `${taskId}:${event.event}:${eventId}`
-      : "";
-    if (key) {
-      if (handledCodeTaskEventKeysRef.current.has(key)) {
-        return;
-      }
-      handledCodeTaskEventKeysRef.current.add(key);
-      if (handledCodeTaskEventKeysRef.current.size > 1200) {
-        handledCodeTaskEventKeysRef.current.clear();
-      }
-    }
-    handleCodeTaskEvent(event, taskId);
-  }
-
-  function handleCodeTaskEvent(event: CodeTaskEvent, taskId = activeCodeTaskId) {
-    if (event.event === "input") {
-      setCodeTaskRunning(true);
-      setCodeTaskStatus("running");
-      return;
-    }
-    if (event.event === "output") {
-      appendCodeTaskAssistantDelta(event.payload.text);
-      return;
-    }
-    if (event.event === "status") {
-      setCodeTaskRunning(true);
-      const nextStatus = event.payload.status || event.payload.message || "running";
-      const statusMessage = event.payload.message || `OpenCode 状态：${nextStatus}`;
-      setCodeTaskStatus(nextStatus);
-      if (statusMessage !== lastCodeTaskStatusMessageRef.current) {
-        lastCodeTaskStatusMessageRef.current = statusMessage;
-        appendCodeTaskMessage({ kind: "status", title: "状态", text: statusMessage });
-      }
-      return;
-    }
-    if (event.event === "session") {
-      setCodeTaskRunning(true);
-      setCodeTaskStatus("session");
-      codeTaskServerUrlRef.current = event.payload.serverUrl || "";
-      if (taskId) {
-        updateCodeTaskRecord(taskId, (task) => ({
-          ...task,
-          sessionId: event.payload.sessionId,
-          workspacePath: event.payload.workspacePath || task.workspacePath,
-          updatedAt: new Date().toISOString()
-        }));
-      }
-      appendCodeTaskMessage({
-        kind: "status",
-        title: "会话",
-        text: `OpenCode 会话已创建：${event.payload.sessionId}`,
-        detail: event.payload.workspacePath
-      });
-      return;
-    }
-    if (event.event === "question") {
-      const requestId = event.payload.requestId || "";
-      const questions = event.payload.questions ?? [];
-      setCodeTaskStatus("waiting_input");
-      setCodeTaskRunning(true);
-      appendCodeTaskMessage({
-        kind: "question",
-        title: "需要选择",
-        text: event.payload.message || "OpenCode 请求你选择或补充信息。",
-        detail: event.payload.tool ? JSON.stringify(event.payload.tool, null, 2) : undefined,
-        question: {
-          requestId,
-          sessionId: event.payload.sessionId || activeCodeTask?.sessionId || "",
-          serverUrl: codeTaskServerUrlRef.current,
-          questions,
-          v2: event.payload.v2 ?? true
-        }
-      });
-      return;
-    }
-    if (event.event === "question_result") {
-      const requestId = event.payload.requestId || "";
-      if (requestId) {
-        flushCodeTaskUpdates();
-        const next = codeTaskMessagesRef.current.map((message) =>
-          message.question?.requestId === requestId
-            ? {
-                ...message,
-                question: {
-                  ...message.question,
-                  answered: !event.payload.rejected,
-                  rejected: Boolean(event.payload.rejected),
-                  answers: event.payload.answers ?? message.question.answers
-                }
-              }
-            : message
-        );
-        codeTaskMessagesRef.current = next;
-        setCodeTaskMessages(next);
-      }
-      appendCodeTaskMessage({
-        kind: "status",
-        title: event.payload.rejected ? "已拒绝选择" : "已提交选择",
-        text: event.payload.message || (event.payload.rejected ? "已拒绝 OpenCode 的选择请求。" : "OpenCode 已收到选择。")
-      });
-      setCodeTaskRunning(true);
-      return;
-    }
-    if (event.event === "tool") {
-      appendCodeTaskMessage({
-        kind: "tool",
-        title: event.payload.name || "工具",
-        text: event.payload.message || `工具状态：${event.payload.status || "running"}`,
-        detail: event.payload.detail
-      });
-      return;
-    }
-    if (event.event === "command") {
-      appendCodeTaskMessage({
-        kind: "command",
-        title: event.payload.status === "started" ? "命令开始" : "命令完成",
-        text: event.payload.message || event.payload.command || "命令事件",
-        detail: event.payload.output
-      });
-      return;
-    }
-    if (event.event === "file") {
-      appendCodeTaskMessage({
-        kind: "file",
-        title: "文件",
-        text: event.payload.message || event.payload.path || "文件变更"
-      });
-      return;
-    }
-    if (event.event === "permission") {
-      appendCodeTaskMessage({
-        kind: "permission",
-        title: event.payload.approved ? "权限已批准" : "权限请求",
-        text: event.payload.message || event.payload.action || "OpenCode 请求权限",
-        detail: Array.isArray(event.payload.resources) ? event.payload.resources.map(String).join("\n") : undefined
-      });
-      return;
-    }
-    if (event.event === "diff") {
-      appendCodeTaskMessage({
-        kind: "file",
-        title: "Diff",
-        text: event.payload.message || "OpenCode 生成了文件差异。",
-        detail: event.payload.diff ? JSON.stringify(event.payload.diff, null, 2) : undefined
-      });
-      return;
-    }
-    if (event.event === "log") {
-      appendCodeTaskMessage({
-        kind: "status",
-        title: event.payload.kind || "日志",
-        text: event.payload.message || ""
-      });
-      return;
-    }
-    if (event.event === "error") {
-      setCodeTaskStatus("error");
-      setCodeTaskRunning(false);
-      appendCodeTaskMessage({ kind: "error", title: "错误", text: event.payload.message });
-      return;
-    }
-    if (event.event === "done") {
-      codeTaskCompletedRef.current = true;
-      codeTaskFinalStatusRef.current = event.payload.status || "done";
-      setCodeTaskRunning(false);
-      if (taskId && event.payload.sessionId) {
-        updateCodeTaskRecord(taskId, (task) => ({
-          ...task,
-          sessionId: event.payload.sessionId,
-          workspacePath: event.payload.workspacePath || task.workspacePath,
-          updatedAt: new Date().toISOString()
-        }));
-      }
-      setCodeTaskStatus(event.payload.status || "done");
-      appendCodeTaskMessage({
-        kind: "done",
-        title: "完成",
-        text: event.payload.message || "OpenCode 任务已结束。"
-      });
-    }
-  }
-
-  async function answerCodeTaskQuestion(message: CodeTaskMessage, answers: string[][], reject = false) {
-    const question = message.question;
-    if (!question) {
-      return;
-    }
-    const busyId = question.requestId || message.id;
-    if (codeTaskQuestionBusyIds.includes(busyId)) {
-      return;
-    }
-    const serverUrl = codeTaskServerUrlRef.current || question.serverUrl;
-    const sessionId = question.sessionId || activeCodeTask?.sessionId || "";
-    if (!serverUrl || !sessionId || !question.requestId) {
-      appendCodeTaskMessage({
-        kind: "error",
-        title: "选择提交失败",
-        text: "OpenCode question 缺少 serverUrl、sessionId 或 requestId，无法提交选择。"
-      });
-      return;
-    }
-    setCodeTaskQuestionBusyIds((prev) => (prev.includes(busyId) ? prev : [...prev, busyId]));
-    try {
-      await replyCodeTaskQuestion({
-        serverUrl,
-        sessionId,
-        requestId: question.requestId,
-        answers,
-        v2: question.v2 ?? true,
-        reject
-      });
-      updateCodeTaskMessage(message.id, (current) => ({
-        ...current,
-        question: current.question
-          ? {
-              ...current.question,
-              sessionId,
-              serverUrl,
-              answered: !reject,
-              rejected: reject,
-              answers: reject ? current.question.answers : answers
-            }
-          : current.question
-      }));
-      setCodeTaskStatus("running");
-      appendCodeTaskMessage({
-        kind: "status",
-        title: reject ? "已拒绝选择" : "已提交选择",
-        text: reject
-          ? "已拒绝 OpenCode 的选择请求。"
-          : `已提交选择：${answers.map((items) => items.join(", ")).filter(Boolean).join("；") || "已回答"}`
-      });
-    } catch (error) {
-      appendCodeTaskMessage({
-        kind: "error",
-        title: "选择提交失败",
-        text: error instanceof Error ? error.message : "OpenCode question reply failed"
-      });
-    } finally {
-      setCodeTaskQuestionBusyIds((prev) => prev.filter((item) => item !== busyId));
-    }
-  }
-
-  function latestCodeTaskTurnMessages(messages: CodeTaskMessage[]): CodeTaskMessage[] {
-    const lastUserIndex = messages.reduce(
-      (latestIndex, message, index) => (message.kind === "user" ? index : latestIndex),
-      -1
-    );
-    return lastUserIndex >= 0 ? messages.slice(lastUserIndex) : messages;
-  }
-
-  async function finalizeCodeTaskSummary(taskId: string, finalStatus: string) {
-    flushCodeTaskUpdates();
-    const messages = codeTaskMessagesRef.current;
-    const turnMessages = latestCodeTaskTurnMessages(messages);
-    const turnPrompt = turnMessages.find((message) => message.kind === "user")?.text ?? "";
-    const task =
-      codeTasks.find((item) => item.id === taskId) ??
-      ({
-        id: taskId,
-        title: buildConversationTitle(turnPrompt || "OpenCode 任务"),
-        prompt: turnPrompt,
-        workspacePath: codeTaskWorkspace,
-        status: finalStatus,
-        messages: turnMessages,
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString()
-      } satisfies CodeTaskRecord);
-    const summaryTask = {
-      ...task,
-      prompt: turnPrompt || task.prompt,
-      status: finalStatus || task.status,
-      messages: turnMessages
-    };
-    const summary = buildCodeTaskSummaryText(summaryTask, turnMessages);
-    const voiceSummarySource = buildCodeTaskVoiceSummarySource(summaryTask, turnMessages);
-    const createdAt = new Date().toISOString();
-    const summaryMessage: CodeTaskMessage = {
-      id: createId(),
-      kind: "done",
-      title: "任务总结",
-      text: summary,
-      createdAt
-    };
-    const nextMessages = trimCodeTaskMessages([...messages, summaryMessage]);
-    codeTaskMessagesRef.current = nextMessages;
-    setCodeTaskMessages(nextMessages);
-    updateCodeTaskRecord(taskId, (current) => ({
-      ...current,
-      status: finalStatus || current.status,
-      messages: nextMessages,
-      summary,
-      updatedAt: createdAt
-    }));
-
-    try {
-      const audioUrls: string[] = [];
-      const voiceErrors: string[] = [];
-      let speechText = "";
-      await streamTaskSummaryVoice({
-        summary: voiceSummarySource,
-        model: modelSettings,
-        voice: voiceSettings,
-        onEvent: (event) => {
-          if (event.event === "audio") {
-            audioUrls.push(event.payload.url);
-            enqueueAudio({
-              url: event.payload.url,
-              displayText: event.payload.text,
-              index: event.payload.index
-            });
-            return;
-          }
-          if (event.event === "voice_error") {
-            voiceErrors.push(event.payload.message);
-            return;
-          }
-          if (event.event === "error") {
-            voiceErrors.push(event.payload.message);
-            return;
-          }
-          if (event.event === "done") {
-            speechText = event.payload.speechText;
-          }
-        }
-      });
-      if (audioUrls.length === 0 && voiceErrors.length > 0) {
-        throw new Error(voiceErrors[0]);
-      }
-      updateCodeTaskRecord(taskId, (current) => ({
-        ...current,
-        summarySpeechText: speechText || current.summarySpeechText,
-        summaryAudioUrl: audioUrls[0] || current.summaryAudioUrl,
-        updatedAt: new Date().toISOString()
-      }));
-    } catch (error) {
-      appendCodeTaskMessage({
-        kind: "status",
-        title: "语音",
-        text: `任务总结语音生成失败：${error instanceof Error ? error.message : "voice error"}`
-      });
-    }
-  }
-
-  async function sendCodeTask(event?: FormEvent) {
-    event?.preventDefault();
-    const prompt = codeTaskInput.trim();
-    if (!prompt || codeTaskRunning) {
-      return;
-    }
-
-    const existingTask = activeCodeTaskId ? codeTasks.find((task) => task.id === activeCodeTaskId) ?? null : null;
-    const shouldCreateTask = !existingTask || codeTaskMessages.length === 0;
-    const taskId = shouldCreateTask ? createId() : existingTask.id;
-    const title = shouldCreateTask ? buildConversationTitle(prompt) : existingTask.title;
-    const sessionId = shouldCreateTask ? undefined : existingTask.sessionId;
-    const workspacePath = codeTaskWorkspace.trim();
-    const now = new Date().toISOString();
-
-    codeTaskAbortRef.current?.abort();
-    clearPendingCodeTaskFlush();
-    codeTaskAssistantMessageIdRef.current = null;
-    codeTaskCompletedRef.current = false;
-    codeTaskFinalStatusRef.current = "";
-    codeTaskServerUrlRef.current = "";
-    setCodeTaskQuestionBusyIds([]);
-    const controller = new AbortController();
-    codeTaskAbortRef.current = controller;
-    if (shouldCreateTask) {
-      const newTask: CodeTaskRecord = {
-        id: taskId,
-        title,
-        prompt,
-        workspacePath,
-        status: "connecting",
-        messages: [],
-        createdAt: now,
-        updatedAt: now
-      };
-      setCodeTasks((prev) => [newTask, ...prev].slice(0, CODE_TASK_MAX_HISTORY));
-      setCodeTaskMessages([]);
-      codeTaskMessagesRef.current = [];
-    } else {
-      updateCodeTaskRecord(taskId, (task) => ({
-        ...task,
-        workspacePath,
-        status: "connecting",
-        updatedAt: now
-      }));
-    }
-    setActiveCodeTaskId(taskId);
-    activeCodeTaskIdRef.current = taskId;
-    setCodeTaskRunning(true);
-    setCodeTaskStatus("connecting");
-    openTaskPanel();
-    appendCodeTaskMessage({
-      kind: "user",
-      title: "任务",
-      text: prompt,
-      detail: codeTaskWorkspace.trim() || "当前后端工作区"
-    });
-    setCodeTaskInput("");
-
-    try {
-      await streamCodeTask({
-        taskId,
-        title,
-        prompt,
-        workspacePath,
-        sessionId,
-        autoApprove: codeTaskAutoApprove,
-        timeoutSeconds: 1800,
-        signal: controller.signal,
-        onEvent: (streamEvent) => handleCodeTaskEventOnce(streamEvent, taskId)
-      });
-    } catch (error) {
-      if (!controller.signal.aborted) {
-        appendCodeTaskMessage({
-          kind: "error",
-          title: "错误",
-          text: error instanceof Error ? error.message : "OpenCode task failed"
-        });
-        setCodeTaskStatus("error");
-      }
-    } finally {
-      flushCodeTaskUpdates();
-      setCodeTaskRunning(false);
-      codeTaskAbortRef.current = null;
-      codeTaskAssistantMessageIdRef.current = null;
-      if (codeTaskCompletedRef.current && !controller.signal.aborted) {
-        await finalizeCodeTaskSummary(taskId, codeTaskFinalStatusRef.current || "done");
-      }
-      codeTaskCompletedRef.current = false;
-      codeTaskFinalStatusRef.current = "";
-    }
-  }
-
-  function stopCodeTask() {
-    codeTaskAbortRef.current?.abort();
-    setCodeTaskRunning(false);
-    setCodeTaskStatus("stopped");
-    appendCodeTaskMessage({ kind: "status", title: "停止", text: "已停止等待 OpenCode 任务。" });
   }
 
   async function testVoice() {
@@ -3919,7 +3151,7 @@ export default function App() {
     },
     {
       key: "orchestrator",
-      label: "任务 Agent",
+      label: "任务编排",
       icon: <Boxes size={16} />,
       content: (
         <OrchestratorSettingsPanel
@@ -3996,7 +3228,7 @@ export default function App() {
                 className="text-icon-button"
                 onClick={() => {
                   setOrchestratorTaskId(orchestratorTask.taskId);
-                  setRightPanelTab("orchestrator");
+                  setRightPanelTab("tasks");
                   if (!chatOpen) {
                     setChatOpen(true);
                   }
@@ -4014,27 +3246,13 @@ export default function App() {
 
   function renderTaskPanel() {
     return (
-      <TaskPanel
-        activeTask={activeCodeTask ?? undefined}
-        workspace={codeTaskWorkspace}
-        autoApprove={codeTaskAutoApprove}
-        messagesCount={codeTaskMessages.length}
-        messages={codeTaskMessages}
-        phases={codeTaskPhases}
-        messageRef={taskMessageRef}
-        questionBusyIds={codeTaskQuestionBusyIds}
-        input={codeTaskInput}
-        running={codeTaskRunning}
-        status={codeTaskStatus}
-        canStart={canStartCodeTask}
-        onWorkspaceChange={setCodeTaskWorkspace}
-        onChooseFolder={chooseCodeTaskFolder}
-        onAutoApproveChange={setCodeTaskAutoApprove}
-        onAnswerQuestion={answerCodeTaskQuestion}
-        onInputChange={setCodeTaskInput}
-        onSend={sendCodeTask}
-        onNewDraft={startNewCodeTaskDraft}
-        onStop={stopCodeTask}
+      <TaskWorkspace
+        model={modelSettings}
+        mode={mode}
+        orchestratorSettings={orchestratorSettings}
+        selectedTaskId={orchestratorTaskId}
+        onSelectTask={setOrchestratorTaskId}
+        onTasksChange={setOrchestratorTasks}
       />
     );
   }
@@ -4258,10 +3476,9 @@ export default function App() {
         chatStatus={status}
         streaming={isStreaming}
         historySearch={historySearch}
-        visibleCodeTasks={visibleCodeTasks}
-        activeCodeTaskId={activeCodeTaskId}
-        codeTaskRunning={codeTaskRunning}
-        codeTaskStatus={codeTaskStatus}
+        visibleTasks={orchestratorTasks}
+        activeTaskId={orchestratorTaskId}
+        taskStatus={activeOrchestratorTask?.status ?? "idle"}
         onCollapse={collapsePrimaryPanel}
         onNewConversation={startNewConversation}
         onOpenTaskPanel={openTaskPanel}
@@ -4270,10 +3487,14 @@ export default function App() {
         onOpenConversation={openConversation}
         onExportConversation={exportConversationItem}
         onDeleteConversation={deleteConversationItem}
-        onNewCodeTask={startNewCodeTaskDraft}
-        onOpenCodeTask={openCodeTaskRecord}
-        onExportCodeTask={exportCodeTaskRecord}
-        onDeleteCodeTask={deleteCodeTaskRecord}
+        onNewTask={() => {
+          setOrchestratorTaskId(null);
+          openTaskPanel();
+        }}
+        onOpenTask={(task) => {
+          setOrchestratorTaskId(task.id);
+          openTaskPanel();
+        }}
       />
 
       <SettingsPage
@@ -4387,14 +3608,12 @@ export default function App() {
         <div className="chat-head">
           <div>
             <span className="eyebrow">
-              {rightPanelTab === "chat" ? "Session" : rightPanelTab === "orchestrator" ? "Orchestrator" : "Task"}
+              {rightPanelTab === "chat" ? "Session" : "Task"}
             </span>
             <h2>
               {rightPanelTab === "chat"
                 ? currentConversation?.title ?? "Kurisu"
-                : rightPanelTab === "orchestrator"
-                  ? "任务 Agent"
-                  : "OpenCode 任务"}
+                : "任务"}
             </h2>
           </div>
           <div className="right-panel-tabs" aria-label="右侧面板">
@@ -4414,17 +3633,9 @@ export default function App() {
               <Bell size={14} />
               任务
             </button>
-            <button
-              className={rightPanelTab === "orchestrator" ? "is-active" : ""}
-              onClick={() => setRightPanelTab("orchestrator")}
-              type="button"
-            >
-              <Boxes size={14} />
-              任务 Agent
-            </button>
           </div>
-          <div className={`status-pill ${rightPanelTab === "chat" ? (isStreaming ? "is-live" : "") : rightPanelTab === "orchestrator" ? (orchestratorTaskId ? "is-live" : "") : codeTaskRunning ? "is-live" : ""}`}>
-            {rightPanelTab === "chat" ? status : rightPanelTab === "orchestrator" ? (orchestratorTaskId ? "orchestrator" : "idle") : codeTaskStatus}
+          <div className={`status-pill ${rightPanelTab === "chat" ? (isStreaming ? "is-live" : "") : activeOrchestratorTask?.status === "running" ? "is-live" : ""}`}>
+            {rightPanelTab === "chat" ? status : activeOrchestratorTask?.status ?? "idle"}
           </div>
           <button className="icon-button" onClick={() => setChatOpen(false)} type="button" aria-label="收起对话栏">
             <ChevronRight size={18} />
@@ -4518,12 +3729,6 @@ export default function App() {
               </div>
             </form>
           </>
-        ) : rightPanelTab === "orchestrator" ? (
-          <OrchestratorTaskPanel
-            conversationId={currentConversationId}
-            selectedTaskId={orchestratorTaskId}
-            onSelectTask={setOrchestratorTaskId}
-          />
         ) : (
           renderTaskPanel()
         )}

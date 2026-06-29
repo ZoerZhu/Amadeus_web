@@ -172,7 +172,7 @@ type MarkdownBlock =
   | { type: "heading"; level: number; text: string }
   | { type: "orderedList" | "unorderedList"; items: string[] }
   | { type: "code"; text: string };
-type RightPanelTab = "chat" | "tasks" | "orchestrator";
+type RightPanelTab = "chat" | "tasks";
 type CodeTaskMessageKind =
   | "user"
   | "assistant"

@@ -60,6 +60,7 @@ const STATUS_LABELS: Record<OrchestratorTaskStatus, string> = {
 };
 
 const EVENT_KIND_LABELS: Record<OrchestratorEventKind, string> = {
+  message: "消息",
   status: "状态",
   plan: "计划",
   step: "步骤",

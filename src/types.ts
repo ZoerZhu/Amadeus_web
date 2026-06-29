@@ -418,6 +418,7 @@ export type OrchestratorTaskStatus =
 export type OrchestratorTaskControlAction = "pause" | "resume" | "cancel" | "rollback";
 
 export type OrchestratorEventKind =
+  | "message"
   | "status"
   | "plan"
   | "step"
@@ -462,6 +463,7 @@ export interface OrchestratorTaskSummary {
   artifactCount?: number;
   eventCount?: number;
   settings?: Record<string, unknown>;
+  context?: Record<string, unknown>;
 }
 
 export type OrchestratorArtifactKind =
@@ -507,6 +509,7 @@ export interface OrchestratorTaskDetail {
 export interface OrchestratorTaskCreateRequest {
   title?: string;
   prompt: string;
+  attachments?: ChatAttachment[];
   workspacePath?: string;
   conversationId?: string | null;
   skillIds?: string[];
@@ -516,6 +519,15 @@ export interface OrchestratorTaskCreateRequest {
   maxRounds?: number | null;
   maxToolCalls?: number | null;
   maxRuntimeSeconds?: number | null;
+}
+
+export interface OrchestratorTaskMessageRequest {
+  prompt: string;
+  attachments?: ChatAttachment[];
+  skillIds?: string[];
+  model?: Record<string, unknown>;
+  mode?: string;
+  trustMode?: boolean | null;
 }
 
 export type PermissionRiskLevel = "safe" | "confirm" | "dangerous";

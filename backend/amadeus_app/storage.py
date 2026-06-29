@@ -457,7 +457,7 @@ class SQLiteStorage:
                 task_id         TEXT NOT NULL REFERENCES orchestrator_tasks(id) ON DELETE CASCADE,
                 seq             INTEGER NOT NULL,
                 kind            TEXT NOT NULL
-                                CHECK (kind IN ('status','plan','step','tool','mcp','browser','artifact','question','sampling','opencode_routing','error','done')),
+                                CHECK (kind IN ('message','status','plan','step','tool','mcp','browser','artifact','question','sampling','opencode_routing','error','done')),
                 role            TEXT NOT NULL DEFAULT '',
                 name            TEXT NOT NULL DEFAULT '',
                 status          TEXT NOT NULL DEFAULT '',
@@ -534,6 +534,43 @@ class SQLiteStorage:
         if "payload_json" not in orchestrator_permission_columns:
             conn.execute(
                 "ALTER TABLE orchestrator_permission_requests ADD COLUMN payload_json TEXT NOT NULL DEFAULT '{}'"
+            )
+        ledger_schema = conn.execute(
+            """
+            SELECT sql FROM sqlite_master
+            WHERE type = 'table' AND name = 'orchestrator_ledger_events'
+            """
+        ).fetchone()
+        if ledger_schema and "'message'" not in str(ledger_schema["sql"] or ""):
+            conn.executescript(
+                """
+                ALTER TABLE orchestrator_ledger_events RENAME TO orchestrator_ledger_events_old;
+
+                CREATE TABLE orchestrator_ledger_events (
+                    task_id         TEXT NOT NULL REFERENCES orchestrator_tasks(id) ON DELETE CASCADE,
+                    seq             INTEGER NOT NULL,
+                    kind            TEXT NOT NULL
+                                    CHECK (kind IN ('message','status','plan','step','tool','mcp','browser','artifact','question','sampling','opencode_routing','error','done')),
+                    role            TEXT NOT NULL DEFAULT '',
+                    name            TEXT NOT NULL DEFAULT '',
+                    status          TEXT NOT NULL DEFAULT '',
+                    summary         TEXT NOT NULL DEFAULT '',
+                    payload_json    TEXT NOT NULL DEFAULT '{}',
+                    artifact_ids_json TEXT NOT NULL DEFAULT '[]',
+                    created_at      TEXT NOT NULL,
+                    PRIMARY KEY (task_id, seq)
+                );
+
+                INSERT INTO orchestrator_ledger_events
+                (task_id, seq, kind, role, name, status, summary, payload_json, artifact_ids_json, created_at)
+                SELECT task_id, seq, kind, role, name, status, summary, payload_json, artifact_ids_json, created_at
+                FROM orchestrator_ledger_events_old;
+
+                DROP TABLE orchestrator_ledger_events_old;
+
+                CREATE INDEX IF NOT EXISTS orchestrator_ledger_task_seq_idx
+                    ON orchestrator_ledger_events (task_id, seq ASC);
+                """
             )
 
         # ----- Memory: FTS5 + sqlite-vec -----

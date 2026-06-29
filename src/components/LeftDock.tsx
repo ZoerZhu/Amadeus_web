@@ -11,8 +11,7 @@ import {
   Trash2
 } from "lucide-react";
 import { formatHistoryTime } from "../app/appSupport";
-import type { CodeTaskRecord } from "../app/appSupport";
-import type { ConversationSummary } from "../types";
+import type { ConversationSummary, OrchestratorTaskSummary } from "../types";
 
 type LeftDockProps = {
   open: boolean;
@@ -23,10 +22,9 @@ type LeftDockProps = {
   chatStatus: string;
   streaming: boolean;
   historySearch: string;
-  visibleCodeTasks: CodeTaskRecord[];
-  activeCodeTaskId: string | null;
-  codeTaskRunning: boolean;
-  codeTaskStatus: string;
+  visibleTasks: OrchestratorTaskSummary[];
+  activeTaskId: string | null;
+  taskStatus: string;
   onCollapse: () => void;
   onNewConversation: () => void;
   onOpenTaskPanel: () => void;
@@ -35,10 +33,8 @@ type LeftDockProps = {
   onOpenConversation: (conversationId: string) => void | Promise<void>;
   onExportConversation: (conversation: ConversationSummary) => void | Promise<void>;
   onDeleteConversation: (conversation: ConversationSummary) => void | Promise<void>;
-  onNewCodeTask: () => void;
-  onOpenCodeTask: (task: CodeTaskRecord) => void;
-  onExportCodeTask: (task: CodeTaskRecord) => void;
-  onDeleteCodeTask: (task: CodeTaskRecord) => void;
+  onNewTask: () => void;
+  onOpenTask: (task: OrchestratorTaskSummary) => void;
 };
 
 export function LeftDock({
@@ -50,10 +46,9 @@ export function LeftDock({
   chatStatus,
   streaming,
   historySearch,
-  visibleCodeTasks,
-  activeCodeTaskId,
-  codeTaskRunning,
-  codeTaskStatus,
+  visibleTasks,
+  activeTaskId,
+  taskStatus,
   onCollapse,
   onNewConversation,
   onOpenTaskPanel,
@@ -62,10 +57,8 @@ export function LeftDock({
   onOpenConversation,
   onExportConversation,
   onDeleteConversation,
-  onNewCodeTask,
-  onOpenCodeTask,
-  onExportCodeTask,
-  onDeleteCodeTask
+  onNewTask,
+  onOpenTask
 }: LeftDockProps) {
   return (
     <aside className={`left-dock glass-panel ${open ? "is-open" : ""}`} aria-hidden={!open}>
@@ -170,48 +163,26 @@ export function LeftDock({
             <BookOpenText size={14} />
             任务
           </div>
-          <button className="dock-action" onClick={onNewCodeTask} type="button">
+          <button className="dock-action" onClick={onNewTask} type="button">
             <Plus size={16} />
             新建任务
           </button>
-          {visibleCodeTasks.length === 0 && (
+          {visibleTasks.length === 0 && (
             <button className="task-item" onClick={onOpenTaskPanel} type="button">
               <span>暂无历史任务</span>
               <small>new</small>
             </button>
           )}
-          {visibleCodeTasks.map((task) => (
-            <div className={`history-row ${task.id === activeCodeTaskId ? "is-current" : ""}`} key={task.id}>
+          {visibleTasks.map((task) => (
+            <div className={`history-row ${task.id === activeTaskId ? "is-current" : ""}`} key={task.id}>
               <button
-                className={`task-item ${task.id === activeCodeTaskId ? "is-current" : ""}`}
-                disabled={codeTaskRunning && task.id !== activeCodeTaskId}
-                onClick={() => onOpenCodeTask(task)}
+                className={`task-item ${task.id === activeTaskId ? "is-current" : ""}`}
+                onClick={() => onOpenTask(task)}
                 type="button"
               >
                 <span>{task.title}</span>
-                <small>{task.id === activeCodeTaskId ? codeTaskStatus : formatHistoryTime(task.updatedAt)}</small>
+                <small>{task.id === activeTaskId ? taskStatus : formatHistoryTime(task.updatedAt)}</small>
               </button>
-              <div className="history-actions" aria-label={`${task.title} 操作`}>
-                <button
-                  className="history-icon-button"
-                  onClick={() => onExportCodeTask(task)}
-                  title="导出"
-                  type="button"
-                  aria-label={`导出 ${task.title}`}
-                >
-                  <Download size={14} />
-                </button>
-                <button
-                  className="history-icon-button is-danger"
-                  disabled={codeTaskRunning && task.id === activeCodeTaskId}
-                  onClick={() => onDeleteCodeTask(task)}
-                  title="删除"
-                  type="button"
-                  aria-label={`删除 ${task.title}`}
-                >
-                  <Trash2 size={14} />
-                </button>
-              </div>
             </div>
           ))}
         </section>

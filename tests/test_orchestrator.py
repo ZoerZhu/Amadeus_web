@@ -4,6 +4,7 @@ import asyncio
 import json
 import re
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import pytest_asyncio
@@ -23,7 +24,11 @@ from backend.amadeus_app.orchestrator import invoke_service
 from backend.amadeus_app.orchestrator import storage as orchestrator_storage
 from backend.amadeus_app.orchestrator.capability_adapters import CapabilityExecutionContext, CapabilityRegistry
 from backend.amadeus_app.orchestrator.capabilities import CapabilityGateway, prompt_requires_code_agent
-from backend.amadeus_app.orchestrator.domain import OrchestratorSettings, OrchestratorTaskCreateRequest
+from backend.amadeus_app.orchestrator.domain import (
+    OrchestratorSettings,
+    OrchestratorTaskCreateRequest,
+    OrchestratorTaskMessageRequest,
+)
 from backend.amadeus_app.orchestrator.planner import OrchestratorPlanner
 from backend.amadeus_app.orchestrator.runner import OrchestratorRunner, default_orchestrator_runner
 from backend.amadeus_app.personas import build_system_prompt, get_persona
@@ -193,6 +198,59 @@ async def test_orchestrator_runner_writes_v2_ledger(memory_storage: SQLiteStorag
     assert "code_search" in plan_event["payload"]["planner"]["availableCapabilities"]
     assert any(event["name"] == "code_agent" and event["status"] == "done" for event in detail["events"])
     assert any(event["name"] == "code_search" and event["summary"] == "searched code" for event in detail["events"])
+    assert any(event["kind"] == "message" and event["role"] == "user" for event in detail["events"])
+    assert any(event["kind"] == "message" and event["name"] == "final_answer" for event in detail["events"])
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_runner_stops_when_task_is_cancelled(memory_storage: SQLiteStorage):
+    calls: list[str] = []
+
+    async def fake_first(args, context):
+        calls.append("first")
+        await orchestrator_storage.update_task_status(context.storage, context.task_id, status="cancelled")
+        return {"ok": True, "summary": "first step cancelled task", "data": {}}
+
+    async def fake_second(args, context):
+        calls.append("second")
+        return {"ok": True, "summary": "second step should not run", "data": {}}
+
+    class FakePlanner:
+        def build_plan(self, prompt, settings):
+            return SimpleNamespace(
+                steps=[
+                    {"id": "first", "worker": "worker", "capability": "web_search", "args": {}, "goal": "first"},
+                    {"id": "second", "worker": "worker", "capability": "todo_task", "args": {}, "goal": "second"},
+                ],
+                context={"plannerVersion": "test_planner", "availableCapabilities": ["web_search", "todo_task"]},
+            )
+
+    registry = CapabilityRegistry()
+    registry.register("web_search", fake_first)
+    registry.register("todo_task", fake_second)
+    runner = OrchestratorRunner(capability_registry=registry, planner=FakePlanner())
+    request = OrchestratorTaskCreateRequest(prompt="执行两步任务", workspacePath="E:/Amadeus/Amadeus_web")
+    settings = OrchestratorSettings(defaultWorkspace="E:/Amadeus/Amadeus_web", trustMode=True)
+    task = await orchestrator_storage.create_task(
+        memory_storage,
+        user_id=DEFAULT_USER_ID,
+        title="取消任务",
+        prompt=request.prompt,
+        workspace_path=request.workspace_path or settings.default_workspace,
+        conversation_id=None,
+        active_skill_ids=[],
+        settings=settings.model_dump(by_alias=True),
+        budget={"maxRounds": 20, "maxToolCalls": 80, "maxRuntimeSeconds": 1800, "maxSamplingDepth": 3},
+    )
+
+    await runner.run(storage=memory_storage, task_id=task["id"], request=request, settings=settings)
+
+    detail = await orchestrator_storage.get_detail(memory_storage, task["id"])
+    assert detail is not None
+    assert detail["task"]["status"] == "cancelled"
+    assert calls == ["first"]
+    assert not any(event["kind"] == "done" for event in detail["events"])
+    assert not any(event["kind"] == "message" and event["role"] == "assistant" for event in detail["events"])
 
 
 def test_capability_gateway_keeps_raw_mcp_explicit():
@@ -856,6 +914,127 @@ async def test_orchestrator_permission_queue_blocks_and_approves(monkeypatch, me
     assert any(event["name"] == "code_agent" and event["summary"] == "code agent resumed" for event in resumed_detail["events"])
     duplicate = client.post(f"/api/orchestrator/permissions/{permissions[0]['id']}/approve", json={})
     assert duplicate.status_code == 409
+
+
+def test_orchestrator_create_task_persists_attachments_in_context(monkeypatch, tmp_path: Path):
+    memory_storage = create_memory_storage_sync()
+    asyncio.run(
+        memory_storage.save_settings(
+            user_id=DEFAULT_USER_ID,
+            model={},
+            vision={},
+            speech_input={},
+            voice={},
+            desktop_assistant={},
+            mode="fast",
+            orchestrator={"enabled": True, "defaultWorkspace": str(tmp_path), "trustMode": True},
+        )
+    )
+    monkeypatch.setattr(orchestrator, "require_storage", lambda: memory_storage)
+
+    scheduled: list[str] = []
+
+    def fake_create_task(coro, name=None):
+        scheduled.append(str(name or ""))
+        coro.close()
+        return SimpleNamespace(cancel=lambda: None)
+
+    monkeypatch.setattr(orchestrator.asyncio, "create_task", fake_create_task)
+    app = FastAPI()
+    app.include_router(orchestrator.router)
+    client = TestClient(app)
+
+    response = client.post(
+        "/api/orchestrator/tasks",
+        json={
+            "prompt": "分析附件并写总结",
+            "attachments": [
+                {
+                    "path": "agent_uploads/host/2026-06-29/document/report.md",
+                    "originalFilename": "report.md",
+                    "filename": "report.md",
+                    "mediaType": "document",
+                    "contentType": "text/markdown",
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    assert scheduled
+    task = asyncio.run(orchestrator_storage.get_task(memory_storage, response.json()["taskId"]))
+    assert task is not None
+    assert task["context"]["attachments"][0]["path"].endswith("report.md")
+    assert task["context"]["threadHistory"][0]["role"] == "user"
+    assert task["context"]["threadHistory"][0]["attachments"][0]["mediaType"] == "document"
+    asyncio.run(memory_storage.close())
+
+
+@pytest.mark.asyncio
+async def test_orchestrator_task_message_endpoint_appends_user_message(monkeypatch, memory_storage: SQLiteStorage, tmp_path: Path):
+    monkeypatch.setattr(orchestrator, "require_storage", lambda: memory_storage)
+
+    async def fake_run_task(task_id: str, request: OrchestratorTaskCreateRequest, settings: OrchestratorSettings):
+        await default_orchestrator_runner._append_user_message(storage=memory_storage, task_id=task_id, request=request)
+        await orchestrator_storage.append_event(
+            memory_storage,
+            task_id=task_id,
+            kind="message",
+            role="assistant",
+            name="final_answer",
+            status="done",
+            summary="续聊完成",
+            payload={"text": "续聊完成", "completedItems": ["done"], "artifacts": [], "verification": [], "risks": []},
+        )
+        await orchestrator_storage.update_task_status(memory_storage, task_id, status="done", finished=True)
+
+    monkeypatch.setattr(orchestrator, "_run_task", fake_run_task)
+    settings_payload = OrchestratorSettings(defaultWorkspace=str(tmp_path), trustMode=True).model_dump(by_alias=True)
+    task = await orchestrator_storage.create_task(
+        memory_storage,
+        user_id=DEFAULT_USER_ID,
+        title="任务续聊",
+        prompt="初始任务",
+        workspace_path=str(tmp_path),
+        conversation_id=None,
+        active_skill_ids=[],
+        settings=settings_payload,
+        context={
+            "mode": "fast",
+            "model": {"providerName": "demo"},
+            "attachments": [],
+            "threadHistory": [{"role": "user", "text": "初始任务", "attachments": []}],
+        },
+        budget={"maxRounds": 20, "maxToolCalls": 80, "maxRuntimeSeconds": 1800, "maxSamplingDepth": 3},
+    )
+    await orchestrator_storage.update_task_status(memory_storage, task["id"], status="done", finished=True)
+
+    response = await orchestrator.append_orchestrator_task_message(
+        task["id"],
+        OrchestratorTaskMessageRequest(
+            prompt="继续补充测试验证",
+            attachments=[
+                {
+                    "path": "agent_uploads/host/2026-06-29/document/checklist.md",
+                    "originalFilename": "checklist.md",
+                    "filename": "checklist.md",
+                    "mediaType": "document",
+                    "contentType": "text/markdown",
+                }
+            ],
+            trustMode=True,
+        ),
+    )
+    await asyncio.sleep(0)
+
+    assert response["taskId"] == task["id"]
+    updated = await orchestrator_storage.get_task(memory_storage, task["id"])
+    assert updated is not None
+    assert updated["context"]["threadHistory"][-1]["text"] == "继续补充测试验证"
+    assert updated["context"]["attachments"][-1]["filename"] == "checklist.md"
+    events = await orchestrator_storage.list_events(memory_storage, task["id"])
+    assert any(event["kind"] == "message" and event["role"] == "user" and event["summary"] == "继续补充测试验证" for event in events)
+    assert any(event["kind"] == "message" and event["role"] == "assistant" and event["name"] == "final_answer" for event in events)
 
 
 def test_orchestrator_api_and_deprecated_agent_api(monkeypatch):

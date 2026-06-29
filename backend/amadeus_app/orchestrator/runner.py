@@ -63,6 +63,7 @@ class OrchestratorRunner:
         )
         try:
             await orchestrator_storage.update_task_status(storage, task_id, status="running")
+            await self._append_user_message(storage=storage, task_id=task_id, request=request)
             await orchestrator_storage.append_event(
                 storage,
                 task_id=task_id,
@@ -85,7 +86,7 @@ class OrchestratorRunner:
                 summary="Created orchestrator execution plan.",
                 payload={"steps": plan, "planner": plan_result.context},
             )
-            await self._run_steps(
+            completed = await self._run_steps(
                 storage=storage,
                 task_id=task_id,
                 plan=plan,
@@ -93,7 +94,8 @@ class OrchestratorRunner:
                 gateway=gateway,
                 context=context,
             )
-            await self._finish_task(storage=storage, task_id=task_id, started=started, rounds=len(plan))
+            if completed:
+                await self._finish_task(storage=storage, task_id=task_id, started=started, rounds=len(plan))
         except PermissionBlocked as blocked:
             await orchestrator_storage.append_event(
                 storage,
@@ -170,7 +172,7 @@ class OrchestratorRunner:
                 summary=f"Resuming task after approving {permission['toolName']}.",
                 payload={"permissionId": permission_id, "resumeStepIndex": start_index},
             )
-            await self._run_steps(
+            completed = await self._run_steps(
                 storage=storage,
                 task_id=permission["taskId"],
                 plan=plan,
@@ -179,12 +181,13 @@ class OrchestratorRunner:
                 context=context,
                 approved_permission=permission,
             )
-            await self._finish_task(
-                storage=storage,
-                task_id=permission["taskId"],
-                started=started,
-                rounds=max(0, len(plan) - start_index),
-            )
+            if completed:
+                await self._finish_task(
+                    storage=storage,
+                    task_id=permission["taskId"],
+                    started=started,
+                    rounds=max(0, len(plan) - start_index),
+                )
         except PermissionBlocked as blocked:
             await orchestrator_storage.append_event(
                 storage,
@@ -247,8 +250,13 @@ class OrchestratorRunner:
         gateway: CapabilityGateway,
         context: CapabilityExecutionContext,
         approved_permission: dict[str, Any] | None = None,
-    ) -> None:
+    ) -> bool:
         for step_index, step in enumerate(plan[start_index:], start=start_index):
+            task = await orchestrator_storage.get_task(storage, task_id)
+            if task is None:
+                return False
+            if task.get("status") in {"paused", "cancelled", "rolled_back"}:
+                return False
             await self._run_step(
                 storage=storage,
                 task_id=task_id,
@@ -259,9 +267,22 @@ class OrchestratorRunner:
                 context=context,
                 approved_permission=approved_permission if step_index == start_index else None,
             )
+        task = await orchestrator_storage.get_task(storage, task_id)
+        return bool(task and task.get("status") not in {"paused", "cancelled", "rolled_back"})
 
     async def _finish_task(self, *, storage: SQLiteStorage, task_id: str, started: float, rounds: int) -> None:
         elapsed = int(time.monotonic() - started)
+        final_answer = await self._build_final_answer(storage=storage, task_id=task_id, elapsed=elapsed)
+        await orchestrator_storage.append_event(
+            storage,
+            task_id=task_id,
+            kind="message",
+            role="assistant",
+            name="final_answer",
+            status="done",
+            summary=final_answer["summary"],
+            payload=final_answer,
+        )
         await orchestrator_storage.append_event(
             storage,
             task_id=task_id,
@@ -279,6 +300,90 @@ class OrchestratorRunner:
             finished=True,
             budget={"elapsedSeconds": elapsed, "rounds": rounds, "toolCalls": 0},
         )
+
+    async def _append_user_message(
+        self,
+        *,
+        storage: SQLiteStorage,
+        task_id: str,
+        request: OrchestratorTaskCreateRequest,
+    ) -> None:
+        attachments = [item.model_dump(by_alias=True) for item in request.attachments]
+        await orchestrator_storage.append_event(
+            storage,
+            task_id=task_id,
+            kind="message",
+            role="user",
+            name="user_request",
+            status="done",
+            summary=request.prompt[:160],
+            payload={
+                "text": request.prompt,
+                "attachments": attachments,
+                "mode": request.mode,
+            },
+        )
+
+    async def _build_final_answer(
+        self,
+        *,
+        storage: SQLiteStorage,
+        task_id: str,
+        elapsed: int,
+    ) -> dict[str, Any]:
+        events = await orchestrator_storage.list_events(storage, task_id)
+        artifacts = await orchestrator_storage.list_artifacts(storage, task_id)
+        completed_tools = [
+            event for event in events
+            if event.get("kind") in {"tool", "mcp", "browser"} and event.get("status") in {"done", "completed"}
+        ]
+        errors = [event for event in events if event.get("kind") == "error" or event.get("status") == "error"]
+        completed_items = [
+            str(event.get("summary") or event.get("name") or "完成一项能力调用").strip()
+            for event in completed_tools[-6:]
+            if str(event.get("summary") or event.get("name") or "").strip()
+        ]
+        artifact_items = [
+            {
+                "id": artifact.get("id", ""),
+                "name": artifact.get("name", ""),
+                "kind": artifact.get("kind", ""),
+                "description": artifact.get("description", ""),
+            }
+            for artifact in artifacts[-6:]
+        ]
+        risk_items = [
+            str(event.get("summary") or event.get("name") or "存在未处理风险").strip()
+            for event in errors[-4:]
+            if str(event.get("summary") or event.get("name") or "").strip()
+        ]
+        if not completed_items:
+            completed_items = ["已完成任务编排和可用能力执行。"]
+        summary = "任务已完成。" if not risk_items else "任务执行结束，但存在需要关注的问题。"
+        flat_lines = [
+            summary,
+            "",
+            "完成事项：",
+            *[f"- {item}" for item in completed_items],
+            "",
+            "产物：",
+            *[f"- {item['name'] or item['id']}" for item in artifact_items],
+        ]
+        if not artifact_items:
+            flat_lines.append("- 本轮没有生成可下载产物。")
+        flat_lines.extend(["", "验证：", f"- Orchestrator 运行耗时约 {elapsed}s。"])
+        flat_lines.extend(["", "剩余风险："])
+        flat_lines.extend([f"- {item}" for item in risk_items] or ["- 暂无明显剩余风险。"])
+        text = "\n".join(flat_lines).strip()
+        return {
+            "text": text,
+            "summary": summary,
+            "completedItems": completed_items,
+            "artifacts": artifact_items,
+            "verification": [f"Orchestrator 运行耗时约 {elapsed}s。"],
+            "risks": risk_items,
+            "elapsedSeconds": elapsed,
+        }
 
     async def _run_step(
         self,

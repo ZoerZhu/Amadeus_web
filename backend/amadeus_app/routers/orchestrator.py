@@ -20,6 +20,7 @@ from ..orchestrator.domain import (
     OrchestratorSettings,
     OrchestratorTaskControlRequest,
     OrchestratorTaskCreateRequest,
+    OrchestratorTaskMessageRequest,
 )
 from ..orchestrator.invoke_service import invoke_orchestrator_request, orchestrator_capabilities_response
 from ..orchestrator.runner import default_orchestrator_runner
@@ -66,6 +67,40 @@ def _budget_from_request(request: OrchestratorTaskCreateRequest, settings: Orche
     }
 
 
+def _attachment_payload(request: OrchestratorTaskCreateRequest | OrchestratorTaskMessageRequest) -> list[dict[str, Any]]:
+    return [attachment.model_dump(by_alias=True) for attachment in request.attachments]
+
+
+def _task_context_from_request(
+    request: OrchestratorTaskCreateRequest,
+    *,
+    existing_context: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    context = dict(existing_context or {})
+    attachments = _attachment_payload(request)
+    all_attachments = [
+        item for item in context.get("attachments", [])
+        if isinstance(item, dict)
+    ]
+    all_attachments.extend(attachments)
+    context.update({
+        "mode": request.mode,
+        "model": request.model,
+        "attachments": all_attachments,
+    })
+    thread_history = [
+        item for item in context.get("threadHistory", [])
+        if isinstance(item, dict)
+    ]
+    thread_history.append({
+        "role": "user",
+        "text": request.prompt,
+        "attachments": attachments,
+    })
+    context["threadHistory"] = thread_history[-20:]
+    return context
+
+
 async def _create_task_record(request: OrchestratorTaskCreateRequest) -> tuple[dict[str, Any], OrchestratorSettings]:
     settings = await _get_orchestrator_settings()
     if not settings.enabled:
@@ -85,7 +120,7 @@ async def _create_task_record(request: OrchestratorTaskCreateRequest) -> tuple[d
         conversation_id=str(request.conversation_id) if request.conversation_id else None,
         active_skill_ids=request.skill_ids,
         settings=settings_payload,
-        context={"mode": request.mode, "model": request.model},
+        context=_task_context_from_request(request),
         budget=_budget_from_request(request, settings),
     )
     return task, settings.model_copy(update={"trust_mode": bool(trust_mode)})
@@ -128,6 +163,42 @@ async def stream_orchestrator_task(request: OrchestratorTaskCreateRequest) -> St
             "X-Task-Id": task["id"],
         },
     )
+
+
+@router.post("/tasks/{task_id}/messages")
+async def append_orchestrator_task_message(task_id: str, request: OrchestratorTaskMessageRequest) -> dict[str, Any]:
+    storage = require_storage()
+    task = await orchestrator_storage.get_task(storage, task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="task not found")
+    if task.get("status") in {"running", "paused"}:
+        raise HTTPException(status_code=409, detail=f"task is {task.get('status')}")
+    if task.get("status") in {"cancelled", "rolled_back"}:
+        raise HTTPException(status_code=409, detail=f"task cannot continue from {task.get('status')}")
+
+    settings_payload = task.get("settings") if isinstance(task.get("settings"), dict) else {}
+    settings = OrchestratorSettings.model_validate(settings_payload or (await _get_orchestrator_settings()).model_dump(by_alias=True))
+    trust_mode = request.trust_mode if request.trust_mode is not None else settings.trust_mode
+    settings = settings.model_copy(update={"trust_mode": bool(trust_mode)})
+
+    task_request = OrchestratorTaskCreateRequest(
+        title=str(task.get("title") or ""),
+        prompt=request.prompt,
+        attachments=request.attachments,
+        workspacePath=str(task.get("workspacePath") or settings.default_workspace or ""),
+        conversationId=task.get("conversationId") or None,
+        skillIds=request.skill_ids or list(task.get("activeSkillIds") or []),
+        model=request.model or (task.get("context") or {}).get("model", {}),
+        mode=request.mode or str((task.get("context") or {}).get("mode") or "fast"),
+        trustMode=trust_mode,
+    )
+    context = _task_context_from_request(
+        task_request,
+        existing_context=task.get("context") if isinstance(task.get("context"), dict) else {},
+    )
+    await orchestrator_storage.update_task_context(storage, task_id, context)
+    asyncio.create_task(_run_task(task_id, task_request, settings), name=f"orchestrator-task-message-{task_id}")
+    return {"ok": True, "taskId": task_id, "id": task_id}
 
 
 @router.get("/tasks")

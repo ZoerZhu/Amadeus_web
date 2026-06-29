@@ -272,6 +272,22 @@ async def update_task_status(
     await storage.run_in_thread(_exec)
 
 
+async def update_task_context(storage: SQLiteStorage, task_id: str, context: dict[str, Any]) -> None:
+    now = _now_iso()
+
+    def _exec(conn) -> None:
+        conn.execute(
+            """
+            UPDATE orchestrator_tasks
+            SET context_json = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (_json_dumps(context), now, task_id),
+        )
+
+    await storage.run_in_thread(_exec)
+
+
 async def append_event(
     storage: SQLiteStorage,
     *,

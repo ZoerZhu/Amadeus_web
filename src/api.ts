@@ -30,6 +30,7 @@ import type {
   OrchestratorTaskCreateRequest,
   OrchestratorTaskDetail,
   OrchestratorTaskEvent,
+  OrchestratorTaskMessageRequest,
   OrchestratorTaskSummary,
   ProviderPreset,
   SkillPackageInfo,
@@ -568,8 +569,16 @@ export async function cloneVoice(options: {
 // Orchestrator / MCP / skills API
 // ---------------------------------------------------------------------------
 
-export async function fetchOrchestratorTasks(conversationId?: string | null): Promise<OrchestratorTaskSummary[]> {
-  const query = conversationId ? `?conversationId=${encodeURIComponent(conversationId)}` : "";
+export async function fetchOrchestratorTasks(
+  conversationId?: string | null,
+  includeLegacy = false
+): Promise<OrchestratorTaskSummary[]> {
+  const params = new URLSearchParams();
+  if (conversationId) {
+    params.set("conversationId", conversationId);
+  }
+  params.set("includeLegacy", includeLegacy ? "true" : "false");
+  const query = params.toString() ? `?${params.toString()}` : "";
   const response = await fetch(`/api/orchestrator/tasks${query}`);
   const data = await response.json().catch(() => ({}));
   if (!response.ok) {
@@ -658,6 +667,22 @@ export async function createOrchestratorTask(
     throw new Error(data.detail || `orchestrator task create ${response.status}`);
   }
   return { taskId: String(data.taskId ?? data.id ?? "") };
+}
+
+export async function appendOrchestratorTaskMessage(
+  taskId: string,
+  request: OrchestratorTaskMessageRequest
+): Promise<{ taskId: string }> {
+  const response = await fetch(`/api/orchestrator/tasks/${encodeURIComponent(taskId)}/messages`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(request)
+  });
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    throw new Error(data.detail || `orchestrator task message ${response.status}`);
+  }
+  return { taskId: String(data.taskId ?? data.id ?? taskId) };
 }
 
 export async function streamOrchestratorTask(options: {

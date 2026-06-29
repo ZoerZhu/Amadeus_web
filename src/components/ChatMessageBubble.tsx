@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import {
   BookOpenText,
   CheckCircle2,
@@ -194,6 +194,14 @@ export function ChatMessageBubble({ message, surface, voiceBusy, onCopy, onPlay 
   const showTextContent = content.trim().length > 0 && !(message.role === "user" && message.voiceInput);
   const previewUrl = previewImage ? `/api/files/download?path=${encodeURIComponent(previewImage.path)}` : "";
   const previewLabel = previewImage?.originalFilename || previewImage?.filename || "图片预览";
+  const thinkingPanel = useMemo(
+    () => (isAssistant ? renderThinkingPanel(message) : null),
+    [isAssistant, message]
+  );
+  const markdownContent = useMemo(
+    () => (showTextContent ? renderMarkdownContent(content) : null),
+    [content, showTextContent]
+  );
 
   async function playUserVoiceInput() {
     if (!message.voiceInput?.audioUrl || voicePlaying) {
@@ -251,9 +259,9 @@ export function ChatMessageBubble({ message, surface, voiceBusy, onCopy, onPlay 
       {isAssistant && <div className="bubble-agent-name">Kurisu Amadeus</div>}
       {renderMessageAttachments(message, setPreviewImage)}
       <div className={`${surface === "floating" ? "float-bubble" : "message-bubble"} ${isAssistant ? "is-assistant" : "is-user"}`}>
-        {isAssistant && renderThinkingPanel(message)}
+        {thinkingPanel}
         {renderVoiceInputBubble()}
-        {showTextContent && renderMarkdownContent(content)}
+        {markdownContent}
       </div>
       <div className="bubble-meta">
         <time dateTime={message.createdAt}>{formatMessageTime(message.createdAt)}</time>

@@ -72,3 +72,125 @@ def test_gateway_classifies_desktop_screenshot_as_safe():
     gateway = CapabilityGateway(trust_mode=False)
     risk = gateway.classify("desktop_screenshot")
     assert risk == "safe"
+
+
+# ---------------------------------------------------------------------------
+# Task 3: shell_exec policy tests
+# ---------------------------------------------------------------------------
+
+
+from backend.amadeus_app.orchestrator.shell_exec_policy import (
+    classify_shell_command,
+    ShellCommandRisk,
+)
+
+
+def test_shell_exec_low_risk_npm_test():
+    result = classify_shell_command("npm test")
+    assert result.risk == "safe"
+    assert result.auto_approved is True
+
+
+def test_shell_exec_low_risk_python_pytest():
+    result = classify_shell_command("python -m pytest")
+    assert result.risk == "safe"
+    assert result.auto_approved is True
+
+
+def test_shell_exec_low_risk_git_status():
+    result = classify_shell_command("git status")
+    assert result.risk == "safe"
+    assert result.auto_approved is True
+
+
+def test_shell_exec_low_risk_rg():
+    result = classify_shell_command("rg 'import' src/")
+    assert result.risk == "safe"
+    assert result.auto_approved is True
+
+
+def test_shell_exec_high_risk_npm_install():
+    result = classify_shell_command("npm install")
+    assert result.risk == "confirm"
+    assert result.auto_approved is False
+
+
+def test_shell_exec_high_risk_git_push():
+    result = classify_shell_command("git push origin main")
+    assert result.risk == "dangerous"
+    assert result.auto_approved is False
+
+
+def test_shell_exec_high_risk_rm():
+    result = classify_shell_command("rm -rf /")
+    assert result.risk == "dangerous"
+    assert result.auto_approved is False
+
+
+def test_shell_exec_high_risk_unknown_script():
+    result = classify_shell_command("node suspicious_script.js")
+    assert result.risk == "confirm"
+    assert result.auto_approved is False
+
+
+# ---------------------------------------------------------------------------
+# Task 4-5: shell_exec and desktop_screenshot handler tests
+# ---------------------------------------------------------------------------
+
+from backend.amadeus_app.orchestrator.capability_adapters import (
+    CapabilityExecutionContext,
+    CapabilityRegistry,
+    build_default_capability_registry,
+)
+from backend.amadeus_app.orchestrator.domain import OrchestratorSettings
+
+
+def _make_context(workspace: str) -> CapabilityExecutionContext:
+    return CapabilityExecutionContext(
+        task_id="test-task",
+        prompt="test",
+        workspace_path=workspace,
+        settings=OrchestratorSettings(),
+        metadata={},
+        storage=None,
+        emit_event=None,
+    )
+
+
+def test_shell_exec_echo():
+    with tempfile.TemporaryDirectory() as tmp:
+        ctx = _make_context(tmp)
+        registry = build_default_capability_registry()
+        result = asyncio.run(registry.execute("shell_exec", {"command": "echo hello"}, ctx))
+        assert result["ok"] is True
+        assert "hello" in str(result.get("data", {}).get("stdout", ""))
+
+
+def test_shell_exec_rejects_out_of_workspace_cwd():
+    with tempfile.TemporaryDirectory() as tmp:
+        ctx = _make_context(tmp)
+        registry = build_default_capability_registry()
+        result = asyncio.run(registry.execute(
+            "shell_exec", {"command": "echo hi", "cwd": "/etc"}, ctx
+        ))
+        assert result["ok"] is False
+        assert "workspace" in result["summary"].lower()
+
+
+def test_shell_exec_returns_exit_code():
+    with tempfile.TemporaryDirectory() as tmp:
+        ctx = _make_context(tmp)
+        registry = build_default_capability_registry()
+        result = asyncio.run(registry.execute(
+            "shell_exec", {"command": "python -c \"import sys; sys.exit(1)\""}, ctx
+        ))
+        assert result["data"]["exitCode"] == 1
+
+
+def test_desktop_screenshot_returns_error_when_not_electron():
+    with tempfile.TemporaryDirectory() as tmp:
+        ctx = _make_context(tmp)
+        registry = build_default_capability_registry()
+        result = asyncio.run(registry.execute("desktop_screenshot", {}, ctx))
+        assert result["ok"] is False
+        assert "not available" in result["summary"].lower() or "electron" in result["summary"].lower()

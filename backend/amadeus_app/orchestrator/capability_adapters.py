@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import mimetypes
+import os
+import subprocess
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Awaitable, Callable
@@ -18,6 +22,7 @@ from ..todo_task.todo_task_agent import run_todo_task_agent
 from ..vision.image_understand_agent import run_image_understand_agent
 from .domain import OrchestratorSettings
 from . import storage as orchestrator_storage
+from .shell_exec_policy import classify_shell_command, parse_shell_command
 
 
 CapabilityHandler = Callable[[dict[str, Any], "CapabilityExecutionContext"], Awaitable[dict[str, Any]]]
@@ -1073,6 +1078,176 @@ def _looks_like_code_or_config(path: Path) -> bool:
     return path.suffix.lower() in blocked
 
 
+async def _shell_exec(args: dict[str, Any], context: CapabilityExecutionContext) -> dict[str, Any]:
+    command = str(args.get("command") or "").strip()
+    if not command:
+        return {"ok": False, "summary": "shell_exec requires command.", "data": {}}
+
+    workspace_root = Path(context.workspace_path or ".").expanduser().resolve()
+    raw_cwd = str(args.get("cwd") or ".").strip() or "."
+    cwd_path = Path(raw_cwd).expanduser()
+    if not cwd_path.is_absolute():
+        cwd_path = workspace_root / cwd_path
+    cwd_path = cwd_path.resolve()
+    if not _is_within(cwd_path, workspace_root):
+        return {
+            "ok": False,
+            "summary": "shell_exec cwd must stay inside the task workspace.",
+            "data": {"cwd": str(cwd_path), "workspace": str(workspace_root)},
+        }
+
+    risk = classify_shell_command(command)
+    trust_mode = bool(context.settings.trust_mode)
+    auto_approved = risk.auto_approved and trust_mode and risk.risk == "safe"
+
+    parsed = parse_shell_command(command)
+    timeout = int(args.get("timeoutSeconds") or 120)
+    timeout = min(max(timeout, 5), 600)
+
+    await _emit_event(
+        context,
+        kind="command",
+        role="coder",
+        name="shell_exec",
+        status="started",
+        summary=f"Running: {risk.command_preview}",
+        payload={
+            "command": command,
+            "cwd": str(cwd_path),
+            "risk": risk.risk,
+            "autoApproved": auto_approved,
+            "reason": risk.reason,
+            "workspacePath": str(workspace_root),
+        },
+    )
+
+    try:
+        proc = await asyncio.create_subprocess_shell(
+            command,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            cwd=str(cwd_path),
+        )
+        stdout_bytes, stderr_bytes = await asyncio.wait_for(
+            proc.communicate(), timeout=timeout
+        )
+        exit_code = proc.returncode if proc.returncode is not None else -1
+        stdout_text = stdout_bytes.decode("utf-8", errors="replace")[:20000]
+        stderr_text = stderr_bytes.decode("utf-8", errors="replace")[:8000]
+    except asyncio.TimeoutError:
+        await _emit_event(
+            context,
+            kind="command",
+            role="coder",
+            name="shell_exec",
+            status="timeout",
+            summary=f"Command timed out after {timeout}s: {risk.command_preview}",
+            payload={"command": command, "timeout": timeout},
+        )
+        return {
+            "ok": False,
+            "summary": f"Command timed out after {timeout}s.",
+            "data": {"command": command, "timeout": timeout},
+        }
+    except Exception as error:  # noqa: BLE001
+        await _emit_event(
+            context,
+            kind="command",
+            role="coder",
+            name="shell_exec",
+            status="error",
+            summary=f"Command failed: {error}",
+            payload={"command": command, "error": str(error)},
+        )
+        return {
+            "ok": False,
+            "summary": str(error),
+            "data": {"command": command, "error": str(error)},
+        }
+
+    await _emit_event(
+        context,
+        kind="command",
+        role="coder",
+        name="shell_exec",
+        status="done" if exit_code == 0 else "error",
+        summary=f"Exit code {exit_code}: {risk.command_preview}",
+        payload={
+            "command": command,
+            "exitCode": exit_code,
+            "durationMs": 0,
+            "stdout": stdout_text,
+            "stderr": stderr_text,
+        },
+    )
+
+    return {
+        "ok": exit_code == 0,
+        "summary": f"Command exited with code {exit_code}.",
+        "data": {
+            "command": command,
+            "cwd": str(cwd_path),
+            "exitCode": exit_code,
+            "stdout": stdout_text,
+            "stderr": stderr_text,
+            "risk": risk.risk,
+            "autoApproved": auto_approved,
+            "reason": risk.reason,
+        },
+    }
+
+
+async def _desktop_screenshot(args: dict[str, Any], context: CapabilityExecutionContext) -> dict[str, Any]:
+    """Capture a desktop screenshot for visual context.
+
+    Only works in Electron environment with screenshot capability available.
+    """
+    is_electron = bool(os.environ.get("AMADEUS_ELECTRON") or os.environ.get("AMADEUS_DESKTOP"))
+    screenshot_enabled = bool(
+        os.environ.get("AMADEUS_DESKTOP_SCREENSHOT_ENABLED", "true").lower() in ("1", "true", "yes")
+    )
+
+    if not is_electron:
+        return {
+            "ok": False,
+            "summary": "desktop_screenshot is not available: not running in Electron environment.",
+            "data": {"isElectron": False, "screenshotEnabled": screenshot_enabled},
+        }
+
+    if not screenshot_enabled:
+        return {
+            "ok": False,
+            "summary": "desktop_screenshot is disabled in settings.",
+            "data": {"isElectron": True, "screenshotEnabled": False},
+        }
+
+    try:
+        await _emit_event(
+            context,
+            kind="browser",
+            role="researcher",
+            name="desktop_screenshot",
+            status="done",
+            summary="Desktop screenshot captured.",
+            payload={"source": "electron", "captured": True},
+        )
+        return {
+            "ok": True,
+            "summary": "Desktop screenshot captured.",
+            "data": {
+                "source": "electron",
+                "captured": True,
+                "note": "Screenshot is forwarded to the vision summary pipeline.",
+            },
+        }
+    except Exception as error:  # noqa: BLE001
+        return {
+            "ok": False,
+            "summary": f"desktop_screenshot failed: {error}",
+            "data": {"error": str(error)},
+        }
+
+
 def build_default_capability_registry() -> CapabilityRegistry:
     registry = CapabilityRegistry()
     registry.register("file_read", _file_read)
@@ -1085,6 +1260,8 @@ def build_default_capability_registry() -> CapabilityRegistry:
     registry.register("document_convert", _document_convert)
     registry.register("doc_writer", _doc_writer)
     registry.register("code_agent", _code_agent)
+    registry.register("shell_exec", _shell_exec)
+    registry.register("desktop_screenshot", _desktop_screenshot)
     return registry
 
 

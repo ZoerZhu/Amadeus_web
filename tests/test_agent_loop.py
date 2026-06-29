@@ -1017,3 +1017,91 @@ async def test_agent_loop_falls_back_to_fallback_model(agent_storage):
     stored_task = await orch_storage.get_task(agent_storage, task["id"])
     assert stored_task["status"] == "done"
     assert fallback_call_count[0] > 0
+
+
+# ---------------------------------------------------------------------------
+# ToolCache tests
+# ---------------------------------------------------------------------------
+
+from backend.amadeus_app.orchestrator.tool_executor import ToolCache, CacheEntry
+
+
+def test_tool_cache_hit_miss():
+    """Same args hit, different args miss."""
+    cache = ToolCache()
+    result1 = {"ok": True, "summary": "found", "data": {"content": "hello"}}
+    cache.set("file_read", {"path": "src/app.tsx"}, result1)
+
+    # Same args → hit
+    hit = cache.get("file_read", {"path": "src/app.tsx"})
+    assert hit is not None
+    assert hit["data"]["content"] == "hello"
+
+    # Different args → miss
+    miss = cache.get("file_read", {"path": "src/other.tsx"})
+    assert miss is None
+
+    # Stats
+    assert cache.stats["hits"] == 1
+    assert cache.stats["misses"] == 1
+
+
+def test_tool_cache_invalidate_by_path():
+    """file_write to a.py invalidates file_read cache for a.py."""
+    cache = ToolCache()
+    cache.set("file_read", {"path": "src/a.py"}, {"ok": True, "summary": "x", "data": {}})
+    cache.set("file_read", {"path": "src/b.py"}, {"ok": True, "summary": "y", "data": {}})
+
+    count = cache.invalidate_paths(["src/a.py"])
+    assert count == 1
+
+    # a.py cache gone, b.py still cached
+    assert cache.get("file_read", {"path": "src/a.py"}) is None
+    assert cache.get("file_read", {"path": "src/b.py"}) is not None
+
+
+def test_tool_cache_invalidate_all_on_shell_exec():
+    """invalidate_all clears everything."""
+    cache = ToolCache()
+    cache.set("file_read", {"path": "a.py"}, {"ok": True, "summary": "x", "data": {}})
+    cache.set("code_search", {"query": "auth", "scope": "src/"}, {"ok": True, "summary": "y", "data": {}})
+
+    count = cache.invalidate_all()
+    assert count == 2
+
+    assert cache.get("file_read", {"path": "a.py"}) is None
+    assert cache.get("code_search", {"query": "auth", "scope": "src/"}) is None
+
+
+def test_tool_cache_path_prefix_match():
+    """Writing src/a.py invalidates code_search cached under scope src/."""
+    cache = ToolCache()
+    # code_search with scope "src/" is indexed under "src/"
+    cache.set("code_search", {"query": "auth", "scope": "src/"}, {"ok": True, "summary": "y", "data": {}})
+    # file_read for src/a.py is indexed under "src/a.py"
+    cache.set("file_read", {"path": "src/a.py"}, {"ok": True, "summary": "x", "data": {}})
+
+    # Invalidate by path "src/a.py" should also hit the "src/" directory prefix
+    count = cache.invalidate_paths(["src/a.py"])
+    assert count == 2  # both the exact match and the directory-prefix match
+
+
+def test_tool_cache_stats():
+    """Hits and misses are tracked correctly."""
+    cache = ToolCache()
+    cache.set("file_read", {"path": "a.py"}, {"ok": True, "summary": "x", "data": {}})
+
+    cache.get("file_read", {"path": "a.py"})   # hit
+    cache.get("file_read", {"path": "a.py"})   # hit
+    cache.get("file_read", {"path": "b.py"})   # miss
+
+    assert cache.stats["hits"] == 2
+    assert cache.stats["misses"] == 1
+
+
+def test_tool_cache_invalidate_empty_paths():
+    """invalidate_paths with empty list returns 0."""
+    cache = ToolCache()
+    cache.set("file_read", {"path": "a.py"}, {"ok": True, "summary": "x", "data": {}})
+    assert cache.invalidate_paths([]) == 0
+    assert cache.get("file_read", {"path": "a.py"}) is not None

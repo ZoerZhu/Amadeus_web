@@ -1572,3 +1572,43 @@ async def test_run_loop_cache_hit_on_second_round(agent_storage):
 
     # file_read was executed only once (first round); second round hit cache
     assert execute_count[0] == 1
+
+
+# ---------------------------------------------------------------------------
+# Task 4 (parallel-tools plan): file_write modified_paths test
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_file_write_returns_modified_paths():
+    """file_write result includes modified_paths for cache invalidation."""
+    import tempfile
+    from pathlib import Path
+    from backend.amadeus_app.orchestrator.capability_adapters import (
+        CapabilityExecutionContext,
+        default_capability_registry,
+    )
+    from backend.amadeus_app.orchestrator.domain import OrchestratorSettings
+
+    with tempfile.TemporaryDirectory() as tmp:
+        settings = OrchestratorSettings(default_workspace=tmp)
+        context = CapabilityExecutionContext(
+            task_id="test",
+            prompt="test",
+            workspace_path=tmp,
+            settings=settings,
+            metadata={},
+            storage=None,
+            emit_event=None,  # type: ignore
+        )
+        registry = default_capability_registry
+
+        result = await registry.execute(
+            "file_write",
+            {"path": "output.txt", "content": "hello world"},
+            context,
+        )
+
+        assert result["ok"] is True
+        assert "modified_paths" in result
+        assert "output.txt" in result["modified_paths"]

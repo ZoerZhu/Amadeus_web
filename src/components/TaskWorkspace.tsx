@@ -505,6 +505,7 @@ export function TaskWorkspace({
   const messageEvents = events.filter((event) => event.kind === "message");
   const processEvents = events.filter((event) => event.kind !== "message" && event.kind !== "done");
   const finalEvent = [...events].reverse().find((event) => event.kind === "message" && event.role === "assistant" && event.name === "final_answer");
+  const doneEvent = [...events].reverse().find((event) => event.kind === "done");
 
   return (
     <div className="task-workspace">
@@ -657,6 +658,12 @@ export function TaskWorkspace({
                     <div>
                       <div className="task-process-head">
                         <strong>{event.name || EVENT_LABELS[event.kind]}</strong>
+                        {Boolean(event.payload?.cached) && (
+                          <span className="text-xs text-green-600 ml-1">cached</span>
+                        )}
+                        {Boolean(event.payload?.fromCache) && (
+                          <span className="text-xs text-green-600 ml-1">from cache</span>
+                        )}
                         <small>{EVENT_LABELS[event.kind]}</small>
                         {cmdPayload?.exitCode !== undefined && (
                           <span className={`command-exit-code ${Number(cmdPayload.exitCode) === 0 ? "ok" : "err"}`}>
@@ -675,6 +682,25 @@ export function TaskWorkspace({
                 })}
               </div>
             </details>
+          )}
+
+          {doneEvent && (
+            <div className="task-done-card">
+              <div className={`task-process-event is-${doneEvent.kind}`}>
+                <span className="task-process-icon">{eventIcon(doneEvent.kind)}</span>
+                <div>
+                  <div className="task-process-head">
+                    <strong>{doneEvent.name || EVENT_LABELS[doneEvent.kind]}</strong>
+                    {Boolean(doneEvent.payload?.cacheStats) && (
+                      <span className="text-xs text-gray-500 ml-2">
+                        缓存 {Number((doneEvent.payload.cacheStats as Record<string, number>).hits)} 命中 / {Number((doneEvent.payload.cacheStats as Record<string, number>).misses)} 未命中
+                      </span>
+                    )}
+                  </div>
+                  {doneEvent.summary && <p>{doneEvent.summary}</p>}
+                </div>
+              </div>
+            </div>
           )}
 
           {artifacts.length > 0 && (

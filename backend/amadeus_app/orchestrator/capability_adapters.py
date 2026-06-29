@@ -244,11 +244,17 @@ async def _file_write(args: dict[str, Any], context: CapabilityExecutionContext)
         meta={"capability": "file_write"},
     )
     artifact_ids = [artifact["id"]] if artifact else []
+    # Compute relative path for cache invalidation
+    try:
+        rel_path = str(target_path.relative_to(workspace_root))
+    except ValueError:
+        rel_path = str(target_path)
     return {
         "ok": True,
         "summary": f"已写入文件 {target_path.name}。",
         "data": {"path": str(target_path), "artifact": artifact},
         "artifactIds": artifact_ids,
+        "modified_paths": [rel_path],
     }
 
 

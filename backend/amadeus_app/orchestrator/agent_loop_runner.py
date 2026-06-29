@@ -133,10 +133,16 @@ class AgentLoopRunner:
                 }],
                 tool_schemas=build_tool_schemas(
                     enabled_capabilities=set(settings.enabled_capabilities) if settings.enabled_capabilities else None,
-                    include_raw_mcp=False,
+                    include_raw_mcp=True,
                 ),
                 mcp_snapshot=build_mcp_snapshot(),
             )
+            loop_ctx.working_set = {
+                "workspacePath": workspace_path,
+                "toolCount": len(loop_ctx.tool_schemas),
+                "mcpSnapshot": loop_ctx.mcp_snapshot,
+                "rawMcpExposed": True,
+            }
 
             await _emit(
                 kind="working_set",
@@ -761,7 +767,7 @@ class AgentLoopRunner:
             ),
             tool_schemas=build_tool_schemas(
                 enabled_capabilities=set(settings.enabled_capabilities) if settings.enabled_capabilities else None,
-                include_raw_mcp=False,
+                include_raw_mcp=True,
             ),
             mcp_snapshot=build_mcp_snapshot(),
         )

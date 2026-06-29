@@ -1200,7 +1200,9 @@ async def _shell_exec(args: dict[str, Any], context: CapabilityExecutionContext)
 async def _desktop_screenshot(args: dict[str, Any], context: CapabilityExecutionContext) -> dict[str, Any]:
     """Capture a desktop screenshot for visual context.
 
-    Only works in Electron environment with screenshot capability available.
+    Uses the `mss` library to capture the primary monitor. The captured image
+    is converted to a base64 PNG data URL and optionally sent through the vision
+    summary pipeline. Only works in Electron environment with screenshot enabled.
     """
     is_electron = bool(os.environ.get("AMADEUS_ELECTRON") or os.environ.get("AMADEUS_DESKTOP"))
     screenshot_enabled = bool(
@@ -1222,23 +1224,134 @@ async def _desktop_screenshot(args: dict[str, Any], context: CapabilityExecution
         }
 
     try:
+        import base64
+        import io
+
+        import mss
+
+        # Capture the primary monitor in a thread (mss is synchronous)
+        def _capture() -> str:
+            with mss.mss() as sct:
+                monitor = sct.monitors[1] if len(sct.monitors) > 1 else sct.monitors[0]
+                raw = sct.grab(monitor)
+                # Convert to PNG via mss.tools
+                png_bytes = mss.tools.to_png(raw.rgb, raw.size)
+                b64 = base64.b64encode(png_bytes).decode("ascii")
+                return f"data:image/png;base64,{b64}"
+
+        data_url = await asyncio.to_thread(_capture)
+
+        if not data_url:
+            return {
+                "ok": False,
+                "summary": "desktop_screenshot failed: no image data returned.",
+                "data": {"isElectron": True, "screenshotEnabled": True},
+            }
+
+        # Truncate for display in event (full data URL is in the vision pipeline)
+        preview_url = data_url[:120] + "..." if len(data_url) > 120 else data_url
+
         await _emit_event(
             context,
             kind="browser",
             role="researcher",
             name="desktop_screenshot",
             status="done",
-            summary="Desktop screenshot captured.",
-            payload={"source": "electron", "captured": True},
+            summary=f"Desktop screenshot captured ({len(data_url)} bytes).",
+            payload={
+                "source": "mss",
+                "captured": True,
+                "dataUrlPreview": preview_url,
+                "width": "auto",
+                "height": "auto",
+            },
         )
+
+        # Optionally run vision understanding on the screenshot if model/vision settings are available
+        vision_summary = ""
+        vision_config = {}
+        try:
+            settings_dict = context.settings.model_dump(by_alias=True) if hasattr(context.settings, "model_dump") else {}
+            role_models = settings_dict.get("roleModels") or {}
+            researcher_model = role_models.get("researcher") or {}
+            # Try to get vision settings from environment or context metadata
+            from ..domain import ModelSettings, VisionSettings
+            from ..runtime_config import effective_vision_settings, effective_model_settings
+            from ..providers import get_provider
+
+            model_override = researcher_model or context.metadata.get("model") or {}
+            provider_name = model_override.get("providerName") or "OpenAI"
+            provider = get_provider(provider_name)
+            model_settings = ModelSettings(
+                providerName=provider_name,
+                baseUrl=model_override.get("baseUrl") or provider.base_url,
+                model=model_override.get("model") or provider.default_model,
+                apiKey=model_override.get("apiKey") or "",
+                useRemote=bool(model_override.get("useRemote", True)),
+            )
+            vision_settings = effective_vision_settings(VisionSettings(), model_settings, provider)
+
+            if vision_settings.vision_model:
+                vision_result = await run_image_understand_agent({
+                    "prompt": "Describe what you see on this desktop screenshot. Focus on the main application windows, any error messages, and the general state of the screen.",
+                    "attachments": [{
+                        "mediaType": "image",
+                        "fileName": "desktop_screenshot.png",
+                        "mimeType": "image/png",
+                        "dataUrl": data_url,
+                    }],
+                    "model": model_settings.model_dump(by_alias=True),
+                    "vision": vision_settings.model_dump(by_alias=True),
+                })
+                if isinstance(vision_result, dict):
+                    vision_summary = str(vision_result.get("summary") or vision_result.get("text") or "")[:2000]
+                    vision_config = {
+                        "model": model_settings.model,
+                        "visionModel": vision_settings.vision_model,
+                    }
+        except Exception as vision_error:  # noqa: BLE001
+            # Vision summary is optional; screenshot capture itself succeeded
+            vision_summary = ""
+            vision_config = {"visionError": str(vision_error)[:200]}
+
+        # Save screenshot as an artifact if storage is available
+        artifact_id = ""
+        try:
+            if context.storage is not None:
+                import time as _time
+
+                artifact = await orchestrator_storage.create_artifact(
+                    context.storage,
+                    task_id=context.task_id,
+                    name=f"desktop_screenshot_{int(_time.time())}.png",
+                    kind="screenshot",
+                    mime_type="image/png",
+                    content=data_url,
+                    metadata={"source": "mss", "visionSummary": vision_summary[:500]},
+                )
+                artifact_id = artifact.get("id", "")
+        except Exception:  # noqa: BLE001
+            pass
+
         return {
             "ok": True,
-            "summary": "Desktop screenshot captured.",
+            "summary": f"Desktop screenshot captured. {vision_summary[:200] if vision_summary else 'Vision summary not available.'}",
             "data": {
-                "source": "electron",
+                "source": "mss",
                 "captured": True,
-                "note": "Screenshot is forwarded to the vision summary pipeline.",
+                "dataUrl": data_url,
+                "dataUrlPreview": preview_url,
+                "visionSummary": vision_summary,
+                "visionConfig": vision_config,
+                "artifactId": artifact_id,
             },
+            "artifactIds": [artifact_id] if artifact_id else [],
+        }
+    except ImportError:
+        return {
+            "ok": False,
+            "summary": "desktop_screenshot failed: 'mss' library not installed. Install with: pip install mss",
+            "data": {"error": "mss not installed", "isElectron": True, "screenshotEnabled": True},
         }
     except Exception as error:  # noqa: BLE001
         return {

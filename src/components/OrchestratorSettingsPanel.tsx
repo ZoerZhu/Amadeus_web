@@ -637,6 +637,88 @@ export function OrchestratorSettingsPanel({
             ))}
           </div>
         </div>
+        <div className="agent-loop-config">
+          <label className="switch-row">
+            <span>启用 Agent Loop（Codex 风格单主循环，关闭则用规则型 Planner）</span>
+            <input
+              checked={normalizedOrchestrator.agentLoopEnabled ?? true}
+              onChange={(event) => updateOrchestrator({ agentLoopEnabled: event.target.checked })}
+              type="checkbox"
+            />
+          </label>
+          {normalizedOrchestrator.agentLoopEnabled !== false && (
+            <div className="task-model-config">
+              <div className="task-model-head">
+                <strong>任务专用模型</strong>
+                <small>
+                  {(normalizedOrchestrator.taskModel as Record<string, unknown> | undefined)?.model
+                    ? `当前: ${String((normalizedOrchestrator.taskModel as Record<string, unknown>).model)}`
+                    : "空则继承基础模型"}
+                </small>
+              </div>
+              <label className="field">
+                <span>Provider</span>
+                <input
+                  value={String((normalizedOrchestrator.taskModel as Record<string, unknown> | undefined)?.providerName ?? "")}
+                  onChange={(event) => updateOrchestrator({
+                    taskModel: {
+                      ...(normalizedOrchestrator.taskModel as Record<string, unknown> ?? {}),
+                      providerName: event.target.value,
+                    },
+                  })}
+                  placeholder="留空继承基础 Provider"
+                />
+              </label>
+              <label className="field">
+                <span>Base URL</span>
+                <input
+                  value={String((normalizedOrchestrator.taskModel as Record<string, unknown> | undefined)?.baseUrl ?? "")}
+                  onChange={(event) => updateOrchestrator({
+                    taskModel: {
+                      ...(normalizedOrchestrator.taskModel as Record<string, unknown> ?? {}),
+                      baseUrl: event.target.value,
+                    },
+                  })}
+                  placeholder="留空继承基础 Base URL"
+                />
+              </label>
+              <label className="field">
+                <span>模型名称</span>
+                <input
+                  value={String((normalizedOrchestrator.taskModel as Record<string, unknown> | undefined)?.model ?? "")}
+                  onChange={(event) => updateOrchestrator({
+                    taskModel: {
+                      ...(normalizedOrchestrator.taskModel as Record<string, unknown> ?? {}),
+                      model: event.target.value,
+                    },
+                  })}
+                  placeholder="如 gpt-4.1, deepseek-chat"
+                />
+              </label>
+              <label className="field">
+                <span>API Key</span>
+                <input
+                  type="password"
+                  value={String((normalizedOrchestrator.taskModel as Record<string, unknown> | undefined)?.apiKey ?? "")}
+                  onChange={(event) => updateOrchestrator({
+                    taskModel: {
+                      ...(normalizedOrchestrator.taskModel as Record<string, unknown> ?? {}),
+                      apiKey: event.target.value,
+                    },
+                  })}
+                  placeholder="留空继承基础 API Key"
+                />
+              </label>
+              <button
+                className="text-icon-button"
+                onClick={() => updateOrchestrator({ taskModel: {} })}
+                type="button"
+              >
+                清空（继承基础模型）
+              </button>
+            </div>
+          )}
+        </div>
         {normalizedOrchestrator.opencodeEnabled && (
           <div className="opencode-routing-config">
             <label className="switch-row">

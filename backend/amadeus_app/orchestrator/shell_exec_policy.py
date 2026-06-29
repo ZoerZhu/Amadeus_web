@@ -16,7 +16,15 @@ class ShellCommandRisk:
     matched_pattern: str = ""
 
 
+# Shell metacharacters that allow command chaining, redirection, or subshell injection.
+# If any of these appear in the command, we cannot trust a simple prefix match.
+# We must split the command into individual commands and classify each part.
+_SHELL_METACHARS: re.Pattern[str] = re.compile(
+    r"(?:;|\|\||&&|\||>|<|`|\$\(|\$\{)"  # chain, pipe, redirect, backtick, command sub
+)
+
 # Low-risk command patterns (auto-approved in trust mode)
+# These are matched against a SINGLE command segment (no metachars).
 _LOW_RISK_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ("npm test/build/lint/typecheck", re.compile(
         r"^(?:npm|pnpm|yarn)\s+(?:run\s+)?(?:test|build|lint|typecheck|tsc|check)\b",
@@ -77,18 +85,60 @@ _CONFIRM_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
 ]
 
 
-def classify_shell_command(command: str) -> ShellCommandRisk:
-    """Classify a shell command's risk level."""
-    raw = command.strip()
-    preview = raw[:200]
-    if not raw:
+def _split_command_segments(command: str) -> list[str]:
+    """Split a command string into individual segments by shell chaining operators.
+
+    Returns the segments in order. If splitting fails or produces empty results,
+    returns a list containing the original command.
+    """
+    # Split on ; || && | but not inside quotes
+    segments: list[str] = []
+    current: list[str] = []
+    in_single_quote = False
+    in_double_quote = False
+    i = 0
+    while i < len(command):
+        ch = command[i]
+        # Handle quote tracking
+        if ch == "'" and not in_double_quote:
+            in_single_quote = not in_single_quote
+            current.append(ch)
+        elif ch == '"' and not in_single_quote:
+            in_double_quote = not in_double_quote
+            current.append(ch)
+        elif not in_single_quote and not in_double_quote:
+            # Check for multi-char operators
+            two_char = command[i : i + 2]
+            if two_char in ("||", "&&"):
+                segments.append("".join(current))
+                current = []
+                i += 2
+                continue
+            if ch in (";", "|"):
+                segments.append("".join(current))
+                current = []
+                i += 1
+                continue
+            current.append(ch)
+        else:
+            current.append(ch)
+        i += 1
+    if current:
+        segments.append("".join(current))
+    return [s.strip() for s in segments if s.strip()]
+
+
+def _classify_segment(segment: str) -> ShellCommandRisk:
+    """Classify a single command segment (no chaining operators)."""
+    preview = segment[:200]
+    if not segment:
         return ShellCommandRisk(
-            risk="dangerous", reason="empty command", auto_approved=False, command_preview=""
+            risk="dangerous", reason="empty command segment", auto_approved=False, command_preview=""
         )
 
     # Check dangerous first (highest priority)
     for name, pattern in _DANGEROUS_PATTERNS:
-        if pattern.search(raw):
+        if pattern.search(segment):
             return ShellCommandRisk(
                 risk="dangerous",
                 reason=f"dangerous pattern matched: {name}",
@@ -99,7 +149,7 @@ def classify_shell_command(command: str) -> ShellCommandRisk:
 
     # Check low-risk (auto-approved)
     for name, pattern in _LOW_RISK_PATTERNS:
-        if pattern.match(raw):
+        if pattern.match(segment):
             return ShellCommandRisk(
                 risk="safe",
                 reason=f"low-risk command: {name}",
@@ -110,7 +160,7 @@ def classify_shell_command(command: str) -> ShellCommandRisk:
 
     # Check confirm-level
     for name, pattern in _CONFIRM_PATTERNS:
-        if pattern.search(raw):
+        if pattern.search(segment):
             return ShellCommandRisk(
                 risk="confirm",
                 reason=f"requires confirmation: {name}",
@@ -127,6 +177,70 @@ def classify_shell_command(command: str) -> ShellCommandRisk:
         command_preview=preview,
         matched_pattern="unknown",
     )
+
+
+def classify_shell_command(command: str) -> ShellCommandRisk:
+    """Classify a shell command's risk level.
+
+    This function handles command chaining by splitting on shell metacharacters
+    (; | || &&) and classifying each segment. The overall risk is the maximum
+    risk level across all segments. If any segment is dangerous, the whole
+    command is dangerous. If any segment requires confirmation, the whole
+    command requires confirmation. Only if ALL segments are safe will the
+    command be auto-approved.
+    """
+    raw = command.strip()
+    preview = raw[:200]
+    if not raw:
+        return ShellCommandRisk(
+            risk="dangerous", reason="empty command", auto_approved=False, command_preview=""
+        )
+
+    # Check for backtick and $(...) command substitution (always dangerous)
+    if "`" in raw or "$(" in raw or "${" in raw:
+        return ShellCommandRisk(
+            risk="dangerous",
+            reason="command substitution detected (backtick or $())",
+            auto_approved=False,
+            command_preview=preview,
+            matched_pattern="command_substitution",
+        )
+
+    # Check for file redirection (>, <) - escalate to confirm
+    has_redirect = bool(re.search(r"(?<!\d)[<>]", raw))
+
+    # Split into segments if chaining operators are present
+    has_chain = bool(_SHELL_METACHARS.search(raw))
+
+    if has_chain or has_redirect:
+        segments = _split_command_segments(raw)
+        if len(segments) > 1 or has_redirect:
+            # Classify each segment, take the highest risk
+            worst = ShellCommandRisk(
+                risk="safe", reason="all segments safe", auto_approved=True,
+                command_preview=preview, matched_pattern="multi_segment",
+            )
+            for seg in segments:
+                seg_risk = _classify_segment(seg)
+                if seg_risk.risk == "dangerous":
+                    return seg_risk
+                if seg_risk.risk == "confirm" and worst.risk == "safe":
+                    worst = seg_risk
+                elif seg_risk.risk == "confirm" and worst.risk == "confirm":
+                    worst = seg_risk
+            # If we had a redirect, escalate safe to confirm
+            if has_redirect and worst.risk == "safe":
+                return ShellCommandRisk(
+                    risk="confirm",
+                    reason="command contains file redirection",
+                    auto_approved=False,
+                    command_preview=preview,
+                    matched_pattern="redirect",
+                )
+            return worst
+
+    # No chaining or redirect - classify the single command
+    return _classify_segment(raw)
 
 
 def parse_shell_command(command: str) -> dict[str, Any]:

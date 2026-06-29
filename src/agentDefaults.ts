@@ -198,6 +198,8 @@ export function normalizeOrchestratorSettings(value?: Partial<OrchestratorSettin
       forceAllowKeywords,
       forceDenyKeywords,
       rules
-    }
+    },
+    agentLoopEnabled: value?.agentLoopEnabled ?? DEFAULT_ORCHESTRATOR_SETTINGS.agentLoopEnabled,
+    taskModel: value?.taskModel ?? DEFAULT_ORCHESTRATOR_SETTINGS.taskModel
   };
 }

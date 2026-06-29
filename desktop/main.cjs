@@ -55,6 +55,8 @@ function startBackend() {
       AMADEUS_TODO_TASK_STORE: "agent_state/todo_tasks.json",
       AMADEUS_AUDIO_DIR: path.join(runtimeDir, "audio"),
       AMADEUS_USER_VOICE_DIR: "user_voice",
+      AMADEUS_DESKTOP: "1",
+      AMADEUS_ELECTRON: "1",
     },
   });
 

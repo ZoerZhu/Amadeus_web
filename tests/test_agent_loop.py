@@ -134,6 +134,66 @@ def test_shell_exec_high_risk_unknown_script():
     assert result.auto_approved is False
 
 
+# --- Injection bypass prevention tests ---
+
+def test_shell_exec_redirect_blocks_auto_approve():
+    """rg with file redirect should NOT auto-approve."""
+    result = classify_shell_command("rg 'import' src/ > out.txt")
+    assert result.auto_approved is False
+
+
+def test_shell_exec_chained_del_escalates():
+    """rg ; del should be dangerous."""
+    result = classify_shell_command("rg 'import' src/ ; del file.txt")
+    assert result.risk == "dangerous"
+
+
+def test_shell_exec_pipe_to_del_escalates():
+    """cat | del should be dangerous."""
+    result = classify_shell_command("cat file.txt | del other.txt")
+    assert result.risk == "dangerous"
+
+
+def test_shell_exec_backtick_substitution_is_dangerous():
+    """Backtick command substitution is always dangerous."""
+    result = classify_shell_command("echo `whoami`")
+    assert result.risk == "dangerous"
+    assert result.auto_approved is False
+
+
+def test_shell_exec_dollar_paren_substitution_is_dangerous():
+    """$() command substitution is always dangerous."""
+    result = classify_shell_command("echo $(whoami)")
+    assert result.risk == "dangerous"
+    assert result.auto_approved is False
+
+
+def test_shell_exec_chained_two_safe_commands_stays_safe():
+    """git status && git diff should remain safe if both segments are safe."""
+    result = classify_shell_command("git status && git diff")
+    assert result.risk == "safe"
+    assert result.auto_approved is True
+
+
+def test_shell_exec_pipe_to_safe_command_stays_safe():
+    """echo hello | cat should remain safe."""
+    result = classify_shell_command("echo hello | cat")
+    assert result.risk == "safe"
+    assert result.auto_approved is True
+
+
+def test_shell_exec_safe_then_dangerous_segment():
+    """git status ; git push should be dangerous."""
+    result = classify_shell_command("git status ; git push origin main")
+    assert result.risk == "dangerous"
+
+
+def test_shell_exec_safe_then_confirm_segment():
+    """ls ; npm install should be confirm."""
+    result = classify_shell_command("ls ; npm install")
+    assert result.risk == "confirm"
+
+
 # ---------------------------------------------------------------------------
 # Task 4-5: shell_exec and desktop_screenshot handler tests
 # ---------------------------------------------------------------------------

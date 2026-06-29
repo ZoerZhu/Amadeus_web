@@ -691,11 +691,14 @@ export function TaskWorkspace({
                 <div>
                   <div className="task-process-head">
                     <strong>{doneEvent.name || EVENT_LABELS[doneEvent.kind]}</strong>
-                    {Boolean(doneEvent.payload?.cacheStats) && (
-                      <span className="text-xs text-gray-500 ml-2">
-                        缓存 {Number((doneEvent.payload.cacheStats as Record<string, number>).hits)} 命中 / {Number((doneEvent.payload.cacheStats as Record<string, number>).misses)} 未命中
-                      </span>
-                    )}
+                    {Boolean(doneEvent.payload?.cacheStats) && (() => {
+                      const cs = doneEvent.payload!.cacheStats as Record<string, number>;
+                      return (
+                        <span className="text-xs text-gray-500 ml-2">
+                          缓存 {Number(cs.hits)} 命中 / {Number(cs.misses)} 未命中
+                        </span>
+                      );
+                    })()}
                   </div>
                   {doneEvent.summary && <p>{doneEvent.summary}</p>}
                 </div>

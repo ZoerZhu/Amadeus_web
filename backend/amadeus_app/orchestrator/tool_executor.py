@@ -1,9 +1,10 @@
 """Tool execution: caching + parallel dispatch for the agent loop."""
 from __future__ import annotations
 
+import asyncio
 import json
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any
 
 
@@ -65,7 +66,10 @@ class ToolCache:
                     keys_to_remove.update(key_set)
         for key in keys_to_remove:
             self._entries.pop(key, None)
-        # Clean up path_index
+        # Clean up stale keys from path_index sets
+        for path_keys in self._path_index.values():
+            path_keys.difference_update(keys_to_remove)
+        # Drop empty sets
         self._path_index = {p: s for p, s in self._path_index.items() if s}
         return len(keys_to_remove)
 
@@ -86,14 +90,15 @@ def _extract_read_paths(tool_name: str, tool_args: dict[str, Any]) -> list[str]:
         path = str(tool_args.get("path") or "")
         return [path] if path else []
     if tool_name == "code_search":
-        scope = str(tool_args.get("scope") or "")
-        return [scope] if scope else []
+        path = str(tool_args.get("path") or "")
+        if not path:
+            return []
+        # Normalize directory scopes to trailing slash for prefix matching
+        if not path.endswith("/"):
+            path = path + "/"
+        return [path]
     # web_search and others: no path index
     return []
-
-
-import asyncio
-from dataclasses import dataclass, field
 
 
 _READ_ONLY_TOOLS = frozenset({"file_read", "code_search", "web_search"})
@@ -127,6 +132,8 @@ class ToolExecutor:
         storage=None,
         task_id: str = "",
     ) -> list[ToolCallResult]:
+        from .agent_loop_runner import AgentLoopPermissionBlocked
+
         # Classify
         read_calls = [tc for tc in tool_calls if tc["name"] in _READ_ONLY_TOOLS]
         write_calls = [tc for tc in tool_calls if tc["name"] not in _READ_ONLY_TOOLS]
@@ -145,12 +152,9 @@ class ToolExecutor:
         # Process read results, handling exceptions
         read_results: list[ToolCallResult] = []
         for i, result in enumerate(read_results_raw):
-            if isinstance(result, type(None)):
-                continue
             tc = read_calls[i]
             if isinstance(result, Exception):
                 # Check if it's a permission block
-                from .agent_loop_runner import AgentLoopPermissionBlocked
                 if isinstance(result, AgentLoopPermissionBlocked):
                     raise result
                 # Other exception: isolate, emit error event

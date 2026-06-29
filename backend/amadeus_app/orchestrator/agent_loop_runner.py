@@ -114,6 +114,8 @@ class AgentLoopRunner:
         )
 
         try:
+            # Reset the task-level tool result cache so entries never leak across tasks.
+            self.tool_executor.cache = ToolCache()
             await orchestrator_storage.update_task_status(storage, task_id, status="running")
             await self._append_user_message(storage=storage, task_id=task_id, request=request)
 
@@ -437,7 +439,7 @@ class AgentLoopRunner:
         mode: str,
         emit,
     ) -> dict[str, Any] | None:
-        """Call the task model and return the turn result."""
+        """Call the task model with streaming and return the turn result."""
         provider_name = task_model.get("providerName") or "OpenAI"
         provider = get_provider(provider_name)
         model_settings = ModelSettings(
@@ -461,22 +463,89 @@ class AgentLoopRunner:
             mode,
             messages,
             tools=loop_ctx.tool_schemas if loop_ctx.tool_schemas else None,
-            stream=False,
+            stream=True,
         )
 
+        content_parts: list[str] = []
+        tool_calls_map: dict[int, dict[str, Any]] = {}
+        finish_reason = ""
+        last_emit_time = 0.0
+        emit_interval = 0.5  # Emit at most every 500ms
+
         try:
-            async with httpx.AsyncClient(timeout=120.0) as client:
-                response = await client.post(endpoint, headers=headers, json=payload)
-                if response.status_code < 200 or response.status_code >= 300:
-                    return None
-                data = response.json()
+            async with httpx.AsyncClient(timeout=180.0) as client:
+                async with client.stream("POST", endpoint, headers=headers, json=payload) as response:
+                    if response.status_code < 200 or response.status_code >= 300:
+                        return None
+
+                    async for line in response.aiter_lines():
+                        if not line or not line.startswith("data: "):
+                            continue
+                        data_str = line[6:]
+                        if data_str.strip() == "[DONE]":
+                            break
+                        try:
+                            chunk = json.loads(data_str)
+                        except json.JSONDecodeError:
+                            continue
+
+                        choice = (chunk.get("choices") or [{}])[0]
+                        delta = choice.get("delta") or {}
+
+                        # Accumulate content
+                        if delta.get("content"):
+                            content_parts.append(delta["content"])
+                            now = time.monotonic()
+                            if now - last_emit_time >= emit_interval:
+                                last_emit_time = now
+                                partial = "".join(content_parts)
+                                if emit is not None:
+                                    try:
+                                        await emit(
+                                            kind="agent_thought_summary",
+                                            role="coordinator",
+                                            name="plan",
+                                            status="streaming",
+                                            summary=partial[:500],
+                                            payload={
+                                                "round": loop_ctx.rounds + 1,
+                                                "chunk": delta["content"],
+                                                "streaming": True,
+                                            },
+                                        )
+                                    except Exception:  # noqa: BLE001
+                                        pass
+
+                        # Accumulate tool calls
+                        if delta.get("tool_calls"):
+                            for tc in delta["tool_calls"]:
+                                idx = int(tc.get("index") or 0)
+                                if idx not in tool_calls_map:
+                                    tool_calls_map[idx] = {
+                                        "id": str(tc.get("id") or ""),
+                                        "function": {"name": "", "arguments": ""},
+                                    }
+                                func = tc.get("function") or {}
+                                if func.get("name"):
+                                    tool_calls_map[idx]["function"]["name"] += func["name"]
+                                if func.get("arguments"):
+                                    tool_calls_map[idx]["function"]["arguments"] += func["arguments"]
+
+                        if choice.get("finish_reason"):
+                            finish_reason = str(choice["finish_reason"])
+
         except Exception:  # noqa: BLE001
             return None
 
-        choice = (data.get("choices") or [{}])[0]
-        message = choice.get("message") or {}
-        content = str(message.get("content") or "")
-        raw_tool_calls = message.get("tool_calls") or []
+        content = "".join(content_parts)
+        raw_tool_calls = []
+        for idx in sorted(tool_calls_map.keys()):
+            tc = tool_calls_map[idx]
+            raw_tool_calls.append({
+                "id": tc["id"],
+                "type": "function",
+                "function": tc["function"],
+            })
 
         tool_calls: list[dict[str, Any]] = []
         for tc in raw_tool_calls:
@@ -497,7 +566,7 @@ class AgentLoopRunner:
             "content": content,
             "tool_calls": tool_calls,
             "tool_calls_raw": raw_tool_calls,
-            "finish_reason": str(choice.get("finish_reason") or ""),
+            "finish_reason": finish_reason,
         }
 
     async def _call_model_with_retry(

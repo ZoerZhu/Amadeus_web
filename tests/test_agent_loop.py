@@ -1023,7 +1023,7 @@ async def test_agent_loop_falls_back_to_fallback_model(agent_storage):
 # ToolCache tests
 # ---------------------------------------------------------------------------
 
-from backend.amadeus_app.orchestrator.tool_executor import ToolCache, CacheEntry
+from backend.amadeus_app.orchestrator.tool_executor import ToolCache
 
 
 def test_tool_cache_hit_miss():
@@ -1064,20 +1064,20 @@ def test_tool_cache_invalidate_all_on_shell_exec():
     """invalidate_all clears everything."""
     cache = ToolCache()
     cache.set("file_read", {"path": "a.py"}, {"ok": True, "summary": "x", "data": {}})
-    cache.set("code_search", {"query": "auth", "scope": "src/"}, {"ok": True, "summary": "y", "data": {}})
+    cache.set("code_search", {"query": "auth", "path": "src/"}, {"ok": True, "summary": "y", "data": {}})
 
     count = cache.invalidate_all()
     assert count == 2
 
     assert cache.get("file_read", {"path": "a.py"}) is None
-    assert cache.get("code_search", {"query": "auth", "scope": "src/"}) is None
+    assert cache.get("code_search", {"query": "auth", "path": "src/"}) is None
 
 
 def test_tool_cache_path_prefix_match():
     """Writing src/a.py invalidates code_search cached under scope src/."""
     cache = ToolCache()
     # code_search with scope "src/" is indexed under "src/"
-    cache.set("code_search", {"query": "auth", "scope": "src/"}, {"ok": True, "summary": "y", "data": {}})
+    cache.set("code_search", {"query": "auth", "path": "src/"}, {"ok": True, "summary": "y", "data": {}})
     # file_read for src/a.py is indexed under "src/a.py"
     cache.set("file_read", {"path": "src/a.py"}, {"ok": True, "summary": "x", "data": {}})
 
@@ -1583,7 +1583,6 @@ async def test_run_loop_cache_hit_on_second_round(agent_storage):
 async def test_file_write_returns_modified_paths():
     """file_write result includes modified_paths for cache invalidation."""
     import tempfile
-    from pathlib import Path
     from backend.amadeus_app.orchestrator.capability_adapters import (
         CapabilityExecutionContext,
         default_capability_registry,
@@ -1612,3 +1611,84 @@ async def test_file_write_returns_modified_paths():
         assert result["ok"] is True
         assert "modified_paths" in result
         assert "output.txt" in result["modified_paths"]
+
+
+@pytest.mark.asyncio
+async def test_run_loop_cache_invalidates_after_write(agent_storage):
+    """file_write invalidates cache so subsequent file_read re-executes."""
+    from unittest.mock import patch
+
+    execute_count = [0]
+
+    async def mock_call_model_with_retry(*, loop_ctx, task_model, fallback_model, mode, emit):
+        if execute_count[0] == 0:
+            # Round 1: read file
+            return {
+                "content": "Reading file.",
+                "tool_calls": [
+                    {"id": "tc_1", "name": "file_read", "arguments": {"path": "app.py"}},
+                ],
+                "tool_calls_raw": [],
+                "finish_reason": "stop",
+            }
+        elif execute_count[0] == 1:
+            # Round 2: write to same file
+            return {
+                "content": "Writing file.",
+                "tool_calls": [
+                    {"id": "tc_2", "name": "file_write", "arguments": {"path": "app.py", "content": "new"}},
+                ],
+                "tool_calls_raw": [],
+                "finish_reason": "stop",
+            }
+        else:
+            # Round 3: read same file again, then finish
+            return {
+                "content": "Reading same file again.",
+                "tool_calls": [
+                    {"id": "tc_3", "name": "file_read", "arguments": {"path": "app.py"}},
+                    {"id": "tc_4", "name": "finish", "arguments": {"summary": "Done"}},
+                ],
+                "tool_calls_raw": [],
+                "finish_reason": "stop",
+            }
+
+    async def mock_execute_tool_call(*, storage, task_id, tool_name, tool_args,
+                                      tool_call_id, gateway, context, loop_ctx,
+                                      emit, approved_permission=None):
+        execute_count[0] += 1
+        result = {"ok": True, "summary": f"{tool_name} done", "data": {}}
+        if tool_name == "file_write":
+            result["modified_paths"] = [tool_args["path"]]
+        return result
+
+    async def mock_emit(**kwargs):
+        return {"id": "evt_1"}
+
+    with tempfile.TemporaryDirectory() as tmp:
+        task = await orch_storage.create_task(
+            agent_storage,
+            user_id="test-user",
+            title="test cache invalidation",
+            prompt="test",
+            workspace_path=tmp,
+            conversation_id=None,
+            active_skill_ids=[],
+            settings=OrchestratorSettings(agent_loop_enabled=True).model_dump(by_alias=True),
+            context={},
+            budget={},
+        )
+        runner = OrchestratorRunner()
+
+        with patch.object(runner.agent_loop_runner, "_call_model_with_retry", new=mock_call_model_with_retry):
+            with patch.object(runner.agent_loop_runner, "_execute_tool_call", new=mock_execute_tool_call):
+                request = OrchestratorTaskCreateRequest(prompt="test", workspace_path=tmp)
+                settings = OrchestratorSettings(agent_loop_enabled=True)
+                await runner.run(storage=agent_storage, task_id=task["id"], request=request, settings=settings)
+
+    # file_read was executed twice (round 1 + round 3 after invalidation)
+    # file_write was executed once (round 2)
+    # finish doesn't go through _execute_tool_call
+    file_read_count = execute_count[0]  # Total calls through mock
+    # Should be 3: file_read, file_write, file_read (cache miss after write)
+    assert file_read_count == 3, f"Expected 3 tool executions, got {file_read_count}"

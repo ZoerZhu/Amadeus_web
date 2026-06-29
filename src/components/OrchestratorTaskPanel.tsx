@@ -72,7 +72,12 @@ const EVENT_KIND_LABELS: Record<OrchestratorEventKind, string> = {
   sampling: "采样",
   opencode_routing: "OpenCode 路由",
   error: "错误",
-  done: "完成"
+  done: "完成",
+  agent_thought_summary: "Agent 思考",
+  tool_call: "工具调用",
+  tool_result: "工具结果",
+  command: "命令",
+  working_set: "工作集"
 };
 
 const EVENT_GROUP_ORDER: OrchestratorEventKind[] = ["plan", "step", "tool", "mcp", "browser", "artifact", "error"];

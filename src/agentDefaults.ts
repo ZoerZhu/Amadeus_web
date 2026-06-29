@@ -158,6 +158,8 @@ export const DEFAULT_ORCHESTRATOR_SETTINGS: OrchestratorSettings = {
   opencodeEnabled: true,
   roleModels: {},
   enabledCapabilities: [],
+  agentLoopEnabled: true,
+  taskModel: {},
   opencodeRouting: {
     enabled: true,
     allowThreshold: 60,

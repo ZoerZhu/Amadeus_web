@@ -361,6 +361,8 @@ export interface OrchestratorSettings {
   opencodeRouting: OpencodeRoutingConfig;
   roleModels: Record<string, Record<string, unknown>>;
   enabledCapabilities: string[];
+  agentLoopEnabled?: boolean;
+  taskModel?: Record<string, unknown>;
 }
 
 export type McpTransport = "stdio" | "http";
@@ -430,7 +432,12 @@ export type OrchestratorEventKind =
   | "sampling"
   | "opencode_routing"
   | "error"
-  | "done";
+  | "done"
+  | "agent_thought_summary"
+  | "tool_call"
+  | "tool_result"
+  | "command"
+  | "working_set";
 
 export interface OrchestratorTaskBudget {
   maxRounds: number;
@@ -547,6 +554,17 @@ export interface OrchestratorPermissionRequest {
   reason: string;
   createdAt: string;
   resolvedAt: string | null;
+  payload?: {
+    toolName?: string;
+    toolArguments?: Record<string, unknown>;
+    toolArgumentsPreview?: string;
+    riskLevel?: PermissionRiskLevel;
+    autoApproved?: boolean;
+    reason?: string;
+    commandPreview?: string;
+    workspacePath?: string;
+    round?: number;
+  };
 }
 
 export type PermissionRequest = OrchestratorPermissionRequest;

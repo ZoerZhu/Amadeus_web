@@ -15,6 +15,7 @@ import {
   Send,
   Shield,
   Square,
+  Terminal,
   Trash2,
   Wrench,
   X
@@ -80,7 +81,12 @@ const EVENT_LABELS: Record<OrchestratorEventKind, string> = {
   sampling: "采样",
   opencode_routing: "OpenCode 路由",
   error: "错误",
-  done: "完成"
+  done: "完成",
+  agent_thought_summary: "Agent 思考",
+  tool_call: "工具调用",
+  tool_result: "工具结果",
+  command: "命令",
+  working_set: "工作集"
 };
 
 function toChatAttachments(files: UploadedFileInfo[]): ChatAttachment[] {
@@ -101,7 +107,7 @@ function eventIcon(kind: OrchestratorEventKind) {
   if (kind === "message") {
     return <BookOpen size={14} />;
   }
-  if (kind === "plan" || kind === "step") {
+  if (kind === "plan" || kind === "step" || kind === "agent_thought_summary") {
     return <CheckCircle2 size={14} />;
   }
   if (kind === "question") {
@@ -113,17 +119,64 @@ function eventIcon(kind: OrchestratorEventKind) {
   if (kind === "error") {
     return <AlertTriangle size={14} />;
   }
+  if (kind === "command") {
+    return <Terminal size={14} />;
+  }
+  if (kind === "working_set") {
+    return <FolderOpen size={14} />;
+  }
+  if (kind === "tool_call" || kind === "tool_result") {
+    return <Wrench size={14} />;
+  }
   return <Wrench size={14} />;
 }
 
 function eventDetail(event: OrchestratorTaskEvent): string {
-  if (!event.payload || Object.keys(event.payload).length === 0) {
+  const payload = event.payload;
+  if (!payload || Object.keys(payload).length === 0) {
     return "";
   }
-  try {
-    return JSON.stringify(event.payload, null, 2);
-  } catch {
-    return "";
+  switch (event.kind) {
+    case "agent_thought_summary":
+      return JSON.stringify(
+        { round: payload.round, preview: String(payload.preview || "").slice(0, 500) },
+        null,
+        2
+      );
+    case "tool_call":
+      return JSON.stringify({ tool: event.name, arguments: payload.arguments }, null, 2);
+    case "tool_result":
+      return JSON.stringify({ ok: payload.ok, data: payload.data }, null, 2);
+    case "command": {
+      const stdout = String(payload.stdout || "");
+      const stderr = String(payload.stderr || "");
+      return JSON.stringify(
+        {
+          command: payload.command,
+          exitCode: payload.exitCode,
+          stdout: stdout.slice(0, 500),
+          stderr: stderr.slice(0, 200)
+        },
+        null,
+        2
+      );
+    }
+    case "working_set":
+      return JSON.stringify(
+        {
+          workspacePath: payload.workspacePath,
+          toolCount: payload.toolCount,
+          mcpAvailable: (payload.mcpSnapshot as Record<string, unknown>)?.available
+        },
+        null,
+        2
+      );
+    default:
+      try {
+        return JSON.stringify(payload, null, 2);
+      } catch {
+        return "";
+      }
   }
 }
 
@@ -532,15 +585,31 @@ export function TaskWorkspace({
 
           {permissions.length > 0 && (
             <div className="task-permission-stack">
-              {permissions.map((permission) => (
+              {permissions.map((permission) => {
+                const permPayload = permission.payload;
+                return (
                 <div className={`orchestrator-permission-card is-${permission.riskLevel}`} key={permission.id}>
                   <div className="orchestrator-permission-card-head">
                     <span className="orchestrator-permission-tool">{permission.toolName}</span>
                     <span className={`orchestrator-permission-risk is-${permission.riskLevel}`}>
                       {permission.riskLevel === "dangerous" ? "高风险" : "需确认"}
                     </span>
+                    {permPayload?.autoApproved !== undefined && (
+                      <small className="orchestrator-permission-auto">
+                        {permPayload.autoApproved ? "自动批准" : "需手动确认"}
+                      </small>
+                    )}
                   </div>
+                  {permPayload?.reason && (
+                    <p className="orchestrator-permission-reason">{permPayload.reason}</p>
+                  )}
+                  {permPayload?.commandPreview && (
+                    <code className="orchestrator-permission-command">{permPayload.commandPreview}</code>
+                  )}
                   {permission.argumentsPreview && <pre className="orchestrator-permission-args">{permission.argumentsPreview}</pre>}
+                  {permPayload?.workspacePath && (
+                    <small className="orchestrator-permission-workspace">{permPayload.workspacePath}</small>
+                  )}
                   <div className="orchestrator-permission-actions">
                     <button
                       className="text-icon-button is-primary"
@@ -563,7 +632,8 @@ export function TaskWorkspace({
                     {permBusy[permission.id] && <Loader2 className="phase-spinner" size={14} />}
                   </div>
                 </div>
-              ))}
+                );
+              })}
             </div>
           )}
 
@@ -578,19 +648,31 @@ export function TaskWorkspace({
                 <ChevronDown size={14} />
               </summary>
               <div className="task-process-list">
-                {processEvents.slice(-40).map((event) => (
+                {processEvents.slice(-40).map((event) => {
+                  const detail = eventDetail(event);
+                  const cmdPayload = event.kind === "command" ? event.payload : null;
+                  return (
                   <div className={`task-process-event is-${event.kind}`} key={`${event.taskId}-${event.seq}`}>
                     <span className="task-process-icon">{eventIcon(event.kind)}</span>
                     <div>
                       <div className="task-process-head">
                         <strong>{event.name || EVENT_LABELS[event.kind]}</strong>
                         <small>{EVENT_LABELS[event.kind]}</small>
+                        {cmdPayload?.exitCode !== undefined && (
+                          <span className={`command-exit-code ${Number(cmdPayload.exitCode) === 0 ? "ok" : "err"}`}>
+                            exit {String(cmdPayload.exitCode)}
+                          </span>
+                        )}
                       </div>
                       {event.summary && <p>{event.summary}</p>}
-                      {eventDetail(event) && <pre>{eventDetail(event)}</pre>}
+                      {cmdPayload?.command != null && String(cmdPayload.command).length > 0 && (
+                        <code className="command-preview">{String(cmdPayload.command)}</code>
+                      )}
+                      {detail && <pre>{detail}</pre>}
                     </div>
                   </div>
-                ))}
+                  );
+                })}
               </div>
             </details>
           )}

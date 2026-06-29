@@ -814,3 +814,98 @@ async def test_agent_loop_trims_context_on_many_rounds(agent_storage):
     # Verify the task completed without error
     stored_task = await orch_storage.get_task(agent_storage, task["id"])
     assert stored_task["status"] == "done"
+
+
+# ---------------------------------------------------------------------------
+# Task 3 (reliability plan): Model retry tests
+# ---------------------------------------------------------------------------
+
+from backend.amadeus_app.orchestrator.model_retry import (
+    ModelRetryConfig,
+    retry_model_call,
+    classify_error,
+)
+
+
+def test_classify_error_timeout():
+    import httpx
+    err = httpx.TimeoutException("timed out")
+    assert classify_error(err) == "retryable"
+
+
+def test_classify_error_rate_limit():
+    import httpx
+    err = httpx.HTTPStatusError("429", request=httpx.Request("POST", "http://x"), response=httpx.Response(429))
+    assert classify_error(err) == "retryable"
+
+
+def test_classify_error_500():
+    import httpx
+    err = httpx.HTTPStatusError("500", request=httpx.Request("POST", "http://x"), response=httpx.Response(500))
+    assert classify_error(err) == "retryable"
+
+
+def test_classify_error_400():
+    import httpx
+    err = httpx.HTTPStatusError("400", request=httpx.Request("POST", "http://x"), response=httpx.Response(400))
+    assert classify_error(err) == "fatal"
+
+
+def test_classify_error_connection():
+    import httpx
+    err = httpx.ConnectError("connection refused")
+    assert classify_error(err) == "retryable"
+
+
+def test_retry_config_defaults():
+    config = ModelRetryConfig()
+    assert config.max_retries == 3
+    assert config.base_delay == 1.0
+    assert config.max_delay == 30.0
+
+
+@pytest.mark.asyncio
+async def test_retry_succeeds_on_second_attempt():
+    import httpx
+    call_count = [0]
+
+    async def factory():
+        call_count[0] += 1
+        if call_count[0] == 1:
+            raise httpx.TimeoutException("timeout")
+        return {"content": "success", "tool_calls": []}
+
+    config = ModelRetryConfig(max_retries=3, base_delay=0.01)
+    result = await retry_model_call(factory, config)
+    assert result["content"] == "success"
+    assert call_count[0] == 2
+
+
+@pytest.mark.asyncio
+async def test_retry_exhausted_returns_none():
+    async def factory():
+        raise httpx.TimeoutException("always timeout")
+
+    import httpx
+    config = ModelRetryConfig(max_retries=2, base_delay=0.01)
+    result = await retry_model_call(factory, config)
+    assert result is None
+
+
+@pytest.mark.asyncio
+async def test_retry_fatal_error_no_retry():
+    import httpx
+    call_count = [0]
+
+    async def factory():
+        call_count[0] += 1
+        raise httpx.HTTPStatusError(
+            "400 Bad Request",
+            request=httpx.Request("POST", "http://x"),
+            response=httpx.Response(400),
+        )
+
+    config = ModelRetryConfig(max_retries=3, base_delay=0.01)
+    result = await retry_model_call(factory, config)
+    assert result is None
+    assert call_count[0] == 1

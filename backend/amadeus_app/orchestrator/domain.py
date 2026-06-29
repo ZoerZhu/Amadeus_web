@@ -112,6 +112,7 @@ class OrchestratorSettings(BaseModel):
     enabled_capabilities: list[str] = Field(default_factory=list, alias="enabledCapabilities")
     agent_loop_enabled: bool = Field(default=True, alias="agentLoopEnabled")
     task_model: dict[str, Any] = Field(default_factory=dict, alias="taskModel")
+    fallback_model: dict[str, Any] = Field(default_factory=dict, alias="fallbackModel")
 
 
 class OrchestratorTaskCreateRequest(BaseModel):

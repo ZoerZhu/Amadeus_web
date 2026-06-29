@@ -37,6 +37,12 @@ OrchestratorEventKind = Literal[
     "opencode_routing",
     "error",
     "done",
+    # --- Agent Loop additions ---
+    "agent_thought_summary",
+    "tool_call",
+    "tool_result",
+    "command",
+    "working_set",
 ]
 
 CapabilityRisk = Literal["safe", "confirm", "dangerous"]
@@ -104,6 +110,8 @@ class OrchestratorSettings(BaseModel):
     opencode_routing: OpencodeRoutingConfig = Field(default_factory=OpencodeRoutingConfig, alias="opencodeRouting")
     role_models: RoleModelOverrides = Field(default_factory=RoleModelOverrides, alias="roleModels")
     enabled_capabilities: list[str] = Field(default_factory=list, alias="enabledCapabilities")
+    agent_loop_enabled: bool = Field(default=True, alias="agentLoopEnabled")
+    task_model: dict[str, Any] = Field(default_factory=dict, alias="taskModel")
 
 
 class OrchestratorTaskCreateRequest(BaseModel):
@@ -121,6 +129,7 @@ class OrchestratorTaskCreateRequest(BaseModel):
     max_rounds: int | None = Field(default=None, alias="maxRounds")
     max_tool_calls: int | None = Field(default=None, alias="maxToolCalls")
     max_runtime_seconds: int | None = Field(default=None, alias="maxRuntimeSeconds")
+    task_model_override: dict[str, Any] = Field(default_factory=dict, alias="taskModelOverride")
 
 
 class OrchestratorTaskMessageRequest(BaseModel):

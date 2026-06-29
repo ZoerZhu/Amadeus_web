@@ -15,12 +15,14 @@ READ_CAPABILITIES = {
     "document_convert",
     "code_search",
     "todo_task",
+    "desktop_screenshot",
 }
 
 WRITE_CAPABILITIES = {
     "file_write",
     "doc_writer",
     "code_agent",
+    "shell_exec",
 }
 
 DANGEROUS_CAPABILITIES = {
@@ -84,6 +86,8 @@ def capability_catalog() -> list[CapabilityDefinition]:
         CapabilityDefinition(name="todo_task", description="Manage structured local todo tasks through the task graph.", risk="safe", workerRoles=["coordinator"]),
         CapabilityDefinition(name="browser", description="Open, inspect, screenshot, or interact with web pages.", risk="dangerous", workerRoles=["browser"]),
         CapabilityDefinition(name="mcp_resource", description="Read MCP resources and prompts through adapters.", risk="safe", workerRoles=["researcher"]),
+        CapabilityDefinition(name="shell_exec", description="Execute shell commands in the task workspace. Low-risk commands auto-approve in trust mode; high-risk commands require permission.", risk="confirm", workerRoles=["coder"]),
+        CapabilityDefinition(name="desktop_screenshot", description="Capture a desktop screenshot for visual context. Only available in Electron environment with screenshot enabled.", risk="safe", workerRoles=["researcher"]),
     ]
 
 

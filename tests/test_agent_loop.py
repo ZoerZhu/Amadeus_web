@@ -909,3 +909,111 @@ async def test_retry_fatal_error_no_retry():
     result = await retry_model_call(factory, config)
     assert result is None
     assert call_count[0] == 1
+
+
+# ---------------------------------------------------------------------------
+# Task 4 (reliability plan): Agent loop retry and fallback integration tests
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_retries_on_timeout(agent_storage):
+    """Test that the agent loop retries on timeout and continues."""
+    from unittest.mock import patch
+    import httpx
+
+    call_count = [0]
+
+    async def mock_call_model(*, loop_ctx, task_model, mode, emit):
+        call_count[0] += 1
+        if call_count[0] == 1:
+            raise httpx.TimeoutException("timeout")
+        if call_count[0] == 2:
+            return {
+                "content": "",
+                "tool_calls": [{"id": "fin", "name": "finish", "arguments": {"summary": "Done"}}],
+                "tool_calls_raw": [],
+                "finish_reason": "stop",
+            }
+        return None
+
+    with tempfile.TemporaryDirectory() as tmp:
+        task = await orch_storage.create_task(
+            agent_storage,
+            user_id="test-user",
+            title="test retry",
+            prompt="test",
+            workspace_path=tmp,
+            conversation_id=None,
+            active_skill_ids=[],
+            settings=OrchestratorSettings(agent_loop_enabled=True).model_dump(by_alias=True),
+            context={},
+            budget={},
+        )
+        runner = OrchestratorRunner()
+        with patch.object(runner.agent_loop_runner, "_call_model", side_effect=mock_call_model):
+            request = OrchestratorTaskCreateRequest(prompt="test", workspace_path=tmp)
+            settings = OrchestratorSettings(agent_loop_enabled=True)
+            await runner.run(storage=agent_storage, task_id=task["id"], request=request, settings=settings)
+
+    stored_task = await orch_storage.get_task(agent_storage, task["id"])
+    assert stored_task["status"] == "done"
+    assert call_count[0] >= 2
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_falls_back_to_fallback_model(agent_storage):
+    """Test that the agent loop switches to fallback model on persistent failure."""
+    from unittest.mock import patch
+    import httpx
+
+    primary_call_count = [0]
+    fallback_call_count = [0]
+
+    async def mock_call_model_primary(*, loop_ctx, task_model, mode, emit):
+        primary_call_count[0] += 1
+        raise httpx.TimeoutException("primary always times out")
+
+    async def mock_call_model_fallback(*, loop_ctx, task_model, mode, emit):
+        fallback_call_count[0] += 1
+        return {
+            "content": "",
+            "tool_calls": [{"id": "fin", "name": "finish", "arguments": {"summary": "Done via fallback"}}],
+            "tool_calls_raw": [],
+            "finish_reason": "stop",
+        }
+
+    with tempfile.TemporaryDirectory() as tmp:
+        task = await orch_storage.create_task(
+            agent_storage,
+            user_id="test-user",
+            title="test fallback",
+            prompt="test",
+            workspace_path=tmp,
+            conversation_id=None,
+            active_skill_ids=[],
+            settings=OrchestratorSettings(
+                agent_loop_enabled=True,
+                fallback_model={"model": "fallback-model", "providerName": "OpenAI", "retryBaseDelay": 0.01},
+            ).model_dump(by_alias=True),
+            context={},
+            budget={},
+        )
+        runner = OrchestratorRunner()
+
+        async def patched_call_model(*, loop_ctx, task_model, mode, emit):
+            if "fallback" in str(task_model.get("model", "")):
+                return await mock_call_model_fallback(loop_ctx=loop_ctx, task_model=task_model, mode=mode, emit=emit)
+            return await mock_call_model_primary(loop_ctx=loop_ctx, task_model=task_model, mode=mode, emit=emit)
+
+        with patch.object(runner.agent_loop_runner, "_call_model", side_effect=patched_call_model):
+            request = OrchestratorTaskCreateRequest(prompt="test", workspace_path=tmp)
+            settings = OrchestratorSettings(
+                agent_loop_enabled=True,
+                fallback_model={"model": "fallback-model", "providerName": "OpenAI", "retryBaseDelay": 0.01},
+            )
+            await runner.run(storage=agent_storage, task_id=task["id"], request=request, settings=settings)
+
+    stored_task = await orch_storage.get_task(agent_storage, task["id"])
+    assert stored_task["status"] == "done"
+    assert fallback_call_count[0] > 0

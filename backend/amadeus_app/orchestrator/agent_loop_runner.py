@@ -26,6 +26,7 @@ from .capabilities import CapabilityGateway
 from .domain import OrchestratorSettings, OrchestratorTaskCreateRequest
 from . import storage as orchestrator_storage
 from .context_window import estimate_token_count, trim_context
+from .model_retry import ModelRetryConfig, retry_model_call, classify_error
 from .shell_exec_policy import classify_shell_command
 from ..orchestrator_integrations.mcp_client import mcp_manager
 
@@ -333,9 +334,10 @@ class AgentLoopRunner:
                 system_prompt=loop_ctx.system_prompt,
             )
 
-            turn = await self._call_model(
+            turn = await self._call_model_with_retry(
                 loop_ctx=loop_ctx,
                 task_model=task_model,
+                fallback_model=context.settings.fallback_model if hasattr(context, 'settings') and context.settings else None,
                 mode=mode,
                 emit=emit,
             )
@@ -493,6 +495,58 @@ class AgentLoopRunner:
             "tool_calls_raw": raw_tool_calls,
             "finish_reason": str(choice.get("finish_reason") or ""),
         }
+
+    async def _call_model_with_retry(
+        self,
+        *,
+        loop_ctx: AgentLoopContext,
+        task_model: dict[str, Any],
+        fallback_model: dict[str, Any] | None,
+        mode: str,
+        emit,
+    ) -> dict[str, Any] | None:
+        """Call the model with retry and fallback support."""
+        retry_config = ModelRetryConfig(
+            max_retries=int(task_model.get("maxRetries") or 3),
+            base_delay=float(task_model.get("retryBaseDelay") or 1.0),
+            max_delay=float(task_model.get("retryMaxDelay") or 30.0),
+        )
+
+        async def primary_factory():
+            return await self._call_model(
+                loop_ctx=loop_ctx, task_model=task_model, mode=mode, emit=emit,
+            )
+
+        result = await retry_model_call(primary_factory, retry_config)
+        if result is not None:
+            return result
+
+        # Primary model failed after retries — try fallback if configured
+        if fallback_model and fallback_model.get("model"):
+            await emit(
+                kind="status",
+                role="coordinator",
+                name="model_fallback",
+                status="running",
+                summary=f"Primary model failed, switching to fallback: {fallback_model.get('model')}",
+                payload={"primaryModel": task_model.get("model", ""), "fallbackModel": fallback_model.get("model", "")},
+            )
+            fallback_config = ModelRetryConfig(
+                max_retries=int(fallback_model.get("maxRetries") or 2),
+                base_delay=float(fallback_model.get("retryBaseDelay") or 1.0),
+                max_delay=float(fallback_model.get("retryMaxDelay") or 30.0),
+            )
+
+            async def fallback_factory():
+                return await self._call_model(
+                    loop_ctx=loop_ctx, task_model=fallback_model, mode=mode, emit=emit,
+                )
+
+            result = await retry_model_call(fallback_factory, fallback_config)
+            if result is not None:
+                return result
+
+        return None
 
     async def _execute_tool_call(
         self,

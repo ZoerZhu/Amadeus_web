@@ -1105,3 +1105,345 @@ def test_tool_cache_invalidate_empty_paths():
     cache.set("file_read", {"path": "a.py"}, {"ok": True, "summary": "x", "data": {}})
     assert cache.invalidate_paths([]) == 0
     assert cache.get("file_read", {"path": "a.py"}) is not None
+
+
+# ---------------------------------------------------------------------------
+# ToolExecutor tests
+# ---------------------------------------------------------------------------
+
+from backend.amadeus_app.orchestrator.tool_executor import (
+    ToolCache,
+    ToolCallResult,
+    ToolExecutor,
+)
+from backend.amadeus_app.orchestrator.agent_loop_runner import AgentLoopRunner
+
+
+@pytest.mark.asyncio
+async def test_execute_batch_parallel_reads(agent_storage):
+    """3 read tools execute in parallel, results returned in original order."""
+    from unittest.mock import AsyncMock
+
+    cache = ToolCache()
+    runner = AgentLoopRunner()
+    executor = ToolExecutor(runner=runner, cache=cache)
+
+    tool_calls = [
+        {"id": "1", "name": "file_read", "arguments": {"path": "a.py"}},
+        {"id": "2", "name": "file_read", "arguments": {"path": "b.py"}},
+        {"id": "3", "name": "file_read", "arguments": {"path": "c.py"}},
+    ]
+
+    call_order: list[str] = []
+
+    async def mock_execute_tool_call(*, storage, task_id, tool_name, tool_args,
+                                      tool_call_id, gateway, context, loop_ctx,
+                                      emit, approved_permission=None):
+        call_order.append(tool_call_id)
+        await asyncio.sleep(0.05)  # Simulate I/O
+        return {
+            "ok": True,
+            "summary": f"read {tool_args['path']}",
+            "data": {"content": f"content of {tool_args['path']}"},
+        }
+
+    async def mock_emit(**kwargs):
+        return {"id": "evt_1"}
+
+    runner._execute_tool_call = mock_execute_tool_call  # type: ignore
+    runner._append_tool_message = lambda *args, **kwargs: None  # type: ignore  # added by Task 3
+
+    from backend.amadeus_app.orchestrator.agent_loop_context import AgentLoopContext
+    loop_ctx = AgentLoopContext(
+        system_prompt="test",
+        messages=[],
+        tool_schemas=[],
+        mcp_snapshot={},
+    )
+
+    results = await executor.execute_batch(
+        tool_calls=tool_calls,
+        gateway=None,  # type: ignore
+        context=None,  # type: ignore
+        loop_ctx=loop_ctx,
+        emit=mock_emit,
+        storage=None,
+        task_id="test",
+    )
+
+    # All 3 results returned
+    assert len(results) == 3
+    # Results in original order
+    assert results[0].tool_call_id == "1"
+    assert results[1].tool_call_id == "2"
+    assert results[2].tool_call_id == "3"
+    # None from cache (first time)
+    assert all(not r.from_cache for r in results)
+
+
+@pytest.mark.asyncio
+async def test_execute_batch_cached_result_emits_events(agent_storage):
+    """Cached results emit tool_call/tool_result events with cached=True."""
+    from unittest.mock import AsyncMock
+
+    cache = ToolCache()
+    runner = AgentLoopRunner()
+    executor = ToolExecutor(runner=runner, cache=cache)
+    runner._append_tool_message = lambda *args, **kwargs: None  # type: ignore  # added by Task 3
+
+    # Pre-populate cache
+    cached_result = {
+        "ok": True,
+        "summary": "cached content",
+        "data": {"content": "hello"},
+    }
+    cache.set("file_read", {"path": "a.py"}, cached_result)
+
+    tool_calls = [{"id": "1", "name": "file_read", "arguments": {"path": "a.py"}}]
+
+    emitted_events: list[dict] = []
+
+    async def mock_emit(**kwargs):
+        emitted_events.append(kwargs)
+        return {"id": "evt_1"}
+
+    from backend.amadeus_app.orchestrator.agent_loop_context import AgentLoopContext
+    loop_ctx = AgentLoopContext(
+        system_prompt="test", messages=[], tool_schemas=[], mcp_snapshot={},
+    )
+
+    results = await executor.execute_batch(
+        tool_calls=tool_calls,
+        gateway=None,  # type: ignore
+        context=None,  # type: ignore
+        loop_ctx=loop_ctx,
+        emit=mock_emit,
+        storage=None,
+        task_id="test",
+    )
+
+    assert len(results) == 1
+    assert results[0].from_cache is True
+    # Events were emitted
+    assert any(e.get("kind") == "tool_call" for e in emitted_events)
+    assert any(e.get("kind") == "tool_result" for e in emitted_events)
+    # tool_call event has cached=True
+    tool_call_events = [e for e in emitted_events if e.get("kind") == "tool_call"]
+    assert tool_call_events[0]["payload"]["cached"] is True
+
+
+@pytest.mark.asyncio
+async def test_execute_batch_mixed_read_write(agent_storage):
+    """Reads run in parallel, writes run serially after reads."""
+    from unittest.mock import AsyncMock
+
+    cache = ToolCache()
+    runner = AgentLoopRunner()
+    executor = ToolExecutor(runner=runner, cache=cache)
+    runner._append_tool_message = lambda *args, **kwargs: None  # type: ignore  # added by Task 3
+
+    tool_calls = [
+        {"id": "1", "name": "file_read", "arguments": {"path": "a.py"}},
+        {"id": "2", "name": "file_write", "arguments": {"path": "out.txt", "content": "x"}},
+    ]
+
+    execution_log: list[str] = []
+
+    async def mock_execute_tool_call(*, storage, task_id, tool_name, tool_args,
+                                      tool_call_id, gateway, context, loop_ctx,
+                                      emit, approved_permission=None):
+        execution_log.append(f"start:{tool_name}:{tool_call_id}")
+        await asyncio.sleep(0.02)
+        execution_log.append(f"end:{tool_name}:{tool_call_id}")
+        return {
+            "ok": True,
+            "summary": f"{tool_name} done",
+            "data": {},
+            "modified_paths": ["out.txt"] if tool_name == "file_write" else [],
+        }
+
+    async def mock_emit(**kwargs):
+        return {"id": "evt_1"}
+
+    runner._execute_tool_call = mock_execute_tool_call  # type: ignore
+
+    from backend.amadeus_app.orchestrator.agent_loop_context import AgentLoopContext
+    loop_ctx = AgentLoopContext(
+        system_prompt="test", messages=[], tool_schemas=[], mcp_snapshot={},
+    )
+
+    results = await executor.execute_batch(
+        tool_calls=tool_calls,
+        gateway=None,  # type: ignore
+        context=None,  # type: ignore
+        loop_ctx=loop_ctx,
+        emit=mock_emit,
+        storage=None,
+        task_id="test",
+    )
+
+    assert len(results) == 2
+    assert results[0].tool_call_id == "1"  # file_read first
+    assert results[1].tool_call_id == "2"  # file_write second
+
+
+@pytest.mark.asyncio
+async def test_execute_batch_preserves_message_order(agent_storage):
+    """After parallel execution, loop_ctx.messages are in tool_calls order."""
+    from unittest.mock import AsyncMock
+
+    cache = ToolCache()
+    runner = AgentLoopRunner()
+    executor = ToolExecutor(runner=runner, cache=cache)
+
+    tool_calls = [
+        {"id": "tc_1", "name": "file_read", "arguments": {"path": "a.py"}},
+        {"id": "tc_2", "name": "file_read", "arguments": {"path": "b.py"}},
+        {"id": "tc_3", "name": "file_read", "arguments": {"path": "c.py"}},
+    ]
+
+    async def mock_execute_tool_call(*, storage, task_id, tool_name, tool_args,
+                                      tool_call_id, gateway, context, loop_ctx,
+                                      emit, approved_permission=None):
+        # Variable delay so parallel completion order differs from call order
+        delays = {"tc_1": 0.03, "tc_2": 0.01, "tc_3": 0.02}
+        await asyncio.sleep(delays.get(tool_call_id, 0.01))
+        return {
+            "ok": True,
+            "summary": f"read {tool_args['path']}",
+            "data": {"content": tool_args["path"]},
+        }
+
+    async def mock_emit(**kwargs):
+        return {"id": "evt_1"}
+
+    runner._execute_tool_call = mock_execute_tool_call  # type: ignore
+    runner._append_tool_message = lambda loop_ctx_inner, tool_call_id_inner, tool_name_inner, result_inner: loop_ctx_inner.messages.append({  # type: ignore
+        "role": "tool",
+        "tool_call_id": tool_call_id_inner,
+        "name": tool_name_inner,
+        "content": str(result_inner.get("summary", "")),
+    })
+
+    from backend.amadeus_app.orchestrator.agent_loop_context import AgentLoopContext
+    loop_ctx = AgentLoopContext(
+        system_prompt="test", messages=[], tool_schemas=[], mcp_snapshot={},
+    )
+
+    await executor.execute_batch(
+        tool_calls=tool_calls,
+        gateway=None,  # type: ignore
+        context=None,  # type: ignore
+        loop_ctx=loop_ctx,
+        emit=mock_emit,
+        storage=None,
+        task_id="test",
+    )
+
+    # Messages are in original tool_calls order, not completion order
+    assert len(loop_ctx.messages) == 3
+    assert loop_ctx.messages[0]["tool_call_id"] == "tc_1"
+    assert loop_ctx.messages[1]["tool_call_id"] == "tc_2"
+    assert loop_ctx.messages[2]["tool_call_id"] == "tc_3"
+
+
+@pytest.mark.asyncio
+async def test_execute_batch_error_isolation(agent_storage):
+    """One read tool failing does not affect other read tools."""
+    from unittest.mock import AsyncMock
+
+    cache = ToolCache()
+    runner = AgentLoopRunner()
+    executor = ToolExecutor(runner=runner, cache=cache)
+
+    tool_calls = [
+        {"id": "1", "name": "file_read", "arguments": {"path": "a.py"}},
+        {"id": "2", "name": "file_read", "arguments": {"path": "ERROR"}},
+        {"id": "3", "name": "file_read", "arguments": {"path": "c.py"}},
+    ]
+
+    async def mock_execute_tool_call(*, storage, task_id, tool_name, tool_args,
+                                      tool_call_id, gateway, context, loop_ctx,
+                                      emit, approved_permission=None):
+        if "ERROR" in str(tool_args.get("path", "")):
+            raise RuntimeError("simulated network error")
+        return {
+            "ok": True,
+            "summary": f"read {tool_args['path']}",
+            "data": {"content": "ok"},
+        }
+
+    async def mock_emit(**kwargs):
+        return {"id": "evt_1"}
+
+    runner._execute_tool_call = mock_execute_tool_call  # type: ignore
+    runner._append_tool_message = lambda loop_ctx_inner, tool_call_id_inner, tool_name_inner, result_inner: loop_ctx_inner.messages.append({  # type: ignore
+        "role": "tool",
+        "tool_call_id": tool_call_id_inner,
+        "name": tool_name_inner,
+        "content": str(result_inner.get("summary", "")),
+    })
+
+    from backend.amadeus_app.orchestrator.agent_loop_context import AgentLoopContext
+    loop_ctx = AgentLoopContext(
+        system_prompt="test", messages=[], tool_schemas=[], mcp_snapshot={},
+    )
+
+    results = await executor.execute_batch(
+        tool_calls=tool_calls,
+        gateway=None,  # type: ignore
+        context=None,  # type: ignore
+        loop_ctx=loop_ctx,
+        emit=mock_emit,
+        storage=None,
+        task_id="test",
+    )
+
+    assert len(results) == 3
+    assert results[0].result["ok"] is True   # a.py succeeded
+    assert results[1].result["ok"] is False  # ERROR failed
+    assert results[2].result["ok"] is True   # c.py succeeded
+
+
+@pytest.mark.asyncio
+async def test_execute_batch_permission_blocked_propagates(agent_storage):
+    """AgentLoopPermissionBlocked propagates up, pausing the batch."""
+    from unittest.mock import AsyncMock
+    from backend.amadeus_app.orchestrator.agent_loop_runner import AgentLoopPermissionBlocked
+
+    cache = ToolCache()
+    runner = AgentLoopRunner()
+    executor = ToolExecutor(runner=runner, cache=cache)
+
+    tool_calls = [
+        {"id": "1", "name": "file_read", "arguments": {"path": "a.py"}},
+        {"id": "2", "name": "shell_exec", "arguments": {"command": "rm -rf /"}},
+    ]
+
+    async def mock_execute_tool_call(*, storage, task_id, tool_name, tool_args,
+                                      tool_call_id, gateway, context, loop_ctx,
+                                      emit, approved_permission=None):
+        if tool_name == "shell_exec":
+            raise AgentLoopPermissionBlocked(tool_name, "perm_123")
+        return {"ok": True, "summary": "ok", "data": {}}
+
+    async def mock_emit(**kwargs):
+        return {"id": "evt_1"}
+
+    runner._execute_tool_call = mock_execute_tool_call  # type: ignore
+
+    from backend.amadeus_app.orchestrator.agent_loop_context import AgentLoopContext
+    loop_ctx = AgentLoopContext(
+        system_prompt="test", messages=[], tool_schemas=[], mcp_snapshot={},
+    )
+
+    with pytest.raises(AgentLoopPermissionBlocked):
+        await executor.execute_batch(
+            tool_calls=tool_calls,
+            gateway=None,  # type: ignore
+            context=None,  # type: ignore
+            loop_ctx=loop_ctx,
+            emit=mock_emit,
+            storage=None,
+            task_id="test",
+        )

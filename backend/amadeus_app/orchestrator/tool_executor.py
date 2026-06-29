@@ -90,3 +90,220 @@ def _extract_read_paths(tool_name: str, tool_args: dict[str, Any]) -> list[str]:
         return [scope] if scope else []
     # web_search and others: no path index
     return []
+
+
+import asyncio
+from dataclasses import dataclass, field
+
+
+_READ_ONLY_TOOLS = frozenset({"file_read", "code_search", "web_search"})
+
+
+@dataclass
+class ToolCallResult:
+    tool_call_id: str
+    tool_name: str
+    result: dict[str, Any]
+    from_cache: bool = False
+    modified_paths: list[str] = field(default_factory=list)
+
+
+class ToolExecutor:
+    """Batch-execute tool_calls: reads in parallel, writes serially."""
+
+    def __init__(self, *, runner, cache: ToolCache) -> None:
+        self.runner = runner
+        self.cache = cache
+
+    async def execute_batch(
+        self,
+        *,
+        tool_calls: list[dict[str, Any]],
+        gateway,
+        context,
+        loop_ctx,
+        emit,
+        approved_permission: dict[str, Any] | None = None,
+        storage=None,
+        task_id: str = "",
+    ) -> list[ToolCallResult]:
+        # Classify
+        read_calls = [tc for tc in tool_calls if tc["name"] in _READ_ONLY_TOOLS]
+        write_calls = [tc for tc in tool_calls if tc["name"] not in _READ_ONLY_TOOLS]
+
+        # Execute reads in parallel
+        read_tasks = [
+            self._execute_single_read(
+                tc=tc, gateway=gateway, context=context, loop_ctx=loop_ctx,
+                emit=emit, approved_permission=approved_permission,
+                storage=storage, task_id=task_id,
+            )
+            for tc in read_calls
+        ]
+        read_results_raw = await asyncio.gather(*read_tasks, return_exceptions=True)
+
+        # Process read results, handling exceptions
+        read_results: list[ToolCallResult] = []
+        for i, result in enumerate(read_results_raw):
+            if isinstance(result, type(None)):
+                continue
+            tc = read_calls[i]
+            if isinstance(result, Exception):
+                # Check if it's a permission block
+                from .agent_loop_runner import AgentLoopPermissionBlocked
+                if isinstance(result, AgentLoopPermissionBlocked):
+                    raise result
+                # Other exception: isolate, emit error event
+                await emit(
+                    kind="tool_result",
+                    role="worker",
+                    name=tc["name"],
+                    status="error",
+                    summary=str(result)[:500],
+                    payload={
+                        "toolCallId": tc.get("id", ""),
+                        "ok": False,
+                        "data": {"error": str(result)},
+                    },
+                )
+                read_results.append(ToolCallResult(
+                    tool_call_id=tc.get("id", ""),
+                    tool_name=tc["name"],
+                    result={"ok": False, "summary": str(result), "data": {}},
+                    from_cache=False,
+                    modified_paths=[],
+                ))
+            else:
+                read_results.append(result)
+
+        # Execute writes serially
+        write_results: list[ToolCallResult] = []
+        for tc in write_calls:
+            result = await self._execute_single_write(
+                tc=tc, gateway=gateway, context=context, loop_ctx=loop_ctx,
+                emit=emit, approved_permission=approved_permission,
+                storage=storage, task_id=task_id,
+            )
+            write_results.append(result)
+            # Invalidate cache based on modified_paths
+            modified = result.modified_paths
+            if modified:
+                self.cache.invalidate_paths(modified)
+            else:
+                self.cache.invalidate_all()
+
+        # Merge in original order and append messages
+        all_results = read_results + write_results
+        result_map: dict[str, ToolCallResult] = {r.tool_call_id: r for r in all_results}
+        ordered: list[ToolCallResult] = []
+        for tc in tool_calls:
+            tc_id = tc.get("id", "")
+            if tc_id in result_map:
+                ordered.append(result_map[tc_id])
+                # Append tool message in order
+                r = result_map[tc_id]
+                self.runner._append_tool_message(
+                    loop_ctx, tc_id, tc["name"], r.result,
+                )
+        return ordered
+
+    async def _execute_single_read(
+        self, *, tc, gateway, context, loop_ctx, emit,
+        approved_permission, storage, task_id,
+    ) -> ToolCallResult:
+        tool_name = tc["name"]
+        tool_args = tc.get("arguments", {})
+        tool_call_id = tc.get("id", "")
+
+        # Check cache
+        cached = self.cache.get(tool_name, tool_args)
+        if cached is not None:
+            # Emit cached events
+            await emit(
+                kind="tool_call",
+                role="worker",
+                name=tool_name,
+                status="started",
+                summary=f"Calling {tool_name} (cached).",
+                payload={
+                    "toolCallId": tool_call_id,
+                    "arguments": tool_args,
+                    "round": loop_ctx.rounds + 1,
+                    "cached": True,
+                },
+            )
+            await emit(
+                kind="tool_result",
+                role="worker",
+                name=tool_name,
+                status="done",
+                summary=str(cached.get("summary", ""))[:500] + " (from cache)",
+                payload={
+                    "toolCallId": tool_call_id,
+                    "ok": True,
+                    "data": cached.get("data", {}),
+                    "fromCache": True,
+                },
+            )
+            return ToolCallResult(
+                tool_call_id=tool_call_id,
+                tool_name=tool_name,
+                result=cached,
+                from_cache=True,
+                modified_paths=[],
+            )
+
+        # Cache miss: execute
+        result = await self.runner._execute_tool_call(
+            storage=storage,
+            task_id=task_id,
+            tool_name=tool_name,
+            tool_args=tool_args,
+            tool_call_id=tool_call_id,
+            gateway=gateway,
+            context=context,
+            loop_ctx=loop_ctx,
+            emit=emit,
+            approved_permission=approved_permission,
+        )
+        # Cache successful read results
+        if result and result.get("ok", True):
+            self.cache.set(tool_name, tool_args, result)
+        return ToolCallResult(
+            tool_call_id=tool_call_id,
+            tool_name=tool_name,
+            result=result or {"ok": False, "summary": "No result", "data": {}},
+            from_cache=False,
+            modified_paths=[],
+        )
+
+    async def _execute_single_write(
+        self, *, tc, gateway, context, loop_ctx, emit,
+        approved_permission, storage, task_id,
+    ) -> ToolCallResult:
+        tool_name = tc["name"]
+        tool_args = tc.get("arguments", {})
+        tool_call_id = tc.get("id", "")
+
+        result = await self.runner._execute_tool_call(
+            storage=storage,
+            task_id=task_id,
+            tool_name=tool_name,
+            tool_args=tool_args,
+            tool_call_id=tool_call_id,
+            gateway=gateway,
+            context=context,
+            loop_ctx=loop_ctx,
+            emit=emit,
+            approved_permission=approved_permission,
+        )
+        modified = []
+        if result and result.get("modified_paths"):
+            modified = result["modified_paths"]
+        return ToolCallResult(
+            tool_call_id=tool_call_id,
+            tool_name=tool_name,
+            result=result or {"ok": False, "summary": "No result", "data": {}},
+            from_cache=False,
+            modified_paths=modified,
+        )

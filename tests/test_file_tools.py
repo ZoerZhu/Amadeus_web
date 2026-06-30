@@ -355,3 +355,108 @@ async def test_file_backup_store_backs_up_and_cleans(tmp_path: Path):
     assert Path(backup["backupPath"]).read_text(encoding="utf-8") == "original"
     store.cleanup()
     assert not Path(backup["backupPath"]).exists()
+
+
+from backend.amadeus_app.file_tools.file_writer import (
+    run_file_patch, run_file_move, run_file_delete,
+)
+
+
+@pytest.mark.asyncio
+async def test_file_patch_replaces_exact_text(tmp_path: Path):
+    f = tmp_path / "app.py"
+    f.write_text("def foo():\n    return 1\n", encoding="utf-8")
+    result = await run_file_patch(
+        path="app.py", old_text="return 1", new_text="return 2",
+        workspace_root=str(tmp_path),
+        expected_hash=compute_sha256("def foo():\n    return 1\n"),
+    )
+    assert result["ok"] is True
+    assert f.read_text(encoding="utf-8") == "def foo():\n    return 2\n"
+    assert result["data"]["newHash"] == compute_sha256("def foo():\n    return 2\n")
+
+
+@pytest.mark.asyncio
+async def test_file_patch_hash_mismatch_rejected(tmp_path: Path):
+    f = tmp_path / "app.py"
+    f.write_text("old content\n", encoding="utf-8")
+    result = await run_file_patch(
+        path="app.py", old_text="old", new_text="new",
+        workspace_root=str(tmp_path),
+        expected_hash="0" * 64,
+    )
+    assert result["ok"] is False
+    assert "hash" in result["summary"].lower()
+
+
+@pytest.mark.asyncio
+async def test_file_patch_old_text_not_found(tmp_path: Path):
+    f = tmp_path / "app.py"
+    f.write_text("content\n", encoding="utf-8")
+    result = await run_file_patch(
+        path="app.py", old_text="missing", new_text="new",
+        workspace_root=str(tmp_path),
+        expected_hash=compute_sha256("content\n"),
+    )
+    assert result["ok"] is False
+    assert "oldText" in result["summary"] or "not found" in result["summary"].lower()
+
+
+@pytest.mark.asyncio
+async def test_file_patch_multiple_matches_rejected(tmp_path: Path):
+    f = tmp_path / "app.py"
+    f.write_text("dup\ndup\n", encoding="utf-8")
+    result = await run_file_patch(
+        path="app.py", old_text="dup", new_text="x",
+        workspace_root=str(tmp_path),
+        expected_hash=compute_sha256("dup\ndup\n"),
+    )
+    assert result["ok"] is False
+    assert "multiple" in result["summary"].lower() or "matches" in result["summary"].lower()
+
+
+@pytest.mark.asyncio
+async def test_file_move_relocates_file_with_backup(tmp_path: Path):
+    backup_dir = tmp_path / "backups"
+    store = FileBackupStore(str(backup_dir), task_id="t1")
+    f = tmp_path / "src.txt"
+    f.write_text("data", encoding="utf-8")
+    result = await run_file_move(
+        src="src.txt", dst="dst.txt", workspace_root=str(tmp_path),
+        backup_store=store,
+    )
+    assert result["ok"] is True
+    assert not (tmp_path / "src.txt").exists()
+    assert (tmp_path / "dst.txt").read_text(encoding="utf-8") == "data"
+
+
+@pytest.mark.asyncio
+async def test_file_delete_removes_file_with_backup(tmp_path: Path):
+    backup_dir = tmp_path / "backups"
+    store = FileBackupStore(str(backup_dir), task_id="t1")
+    f = tmp_path / "trash.txt"
+    f.write_text("bye", encoding="utf-8")
+    result = await run_file_delete(
+        path="trash.txt", workspace_root=str(tmp_path), backup_store=store,
+    )
+    assert result["ok"] is True
+    assert not f.exists()
+
+
+@pytest.mark.asyncio
+async def test_file_delete_empty_directory(tmp_path: Path):
+    (tmp_path / "emptydir").mkdir()
+    result = await run_file_delete(path="emptydir", workspace_root=str(tmp_path))
+    assert result["ok"] is True
+    assert not (tmp_path / "emptydir").exists()
+
+
+@pytest.mark.asyncio
+async def test_file_delete_non_empty_directory_rejected(tmp_path: Path):
+    d = tmp_path / "nonempty"
+    d.mkdir()
+    (d / "child.txt").write_text("x", encoding="utf-8")
+    result = await run_file_delete(path="nonempty", workspace_root=str(tmp_path))
+    assert result["ok"] is False
+    assert "non-empty" in result["summary"].lower() or "not empty" in result["summary"].lower()
+    assert d.exists()  # unchanged

@@ -442,6 +442,7 @@ async def create_permission_request(
     arguments_preview: str,
     risk_level: str = "confirm",
     payload: dict[str, Any] | None = None,
+    question_type: str = "",
 ) -> dict[str, Any]:
     permission_id = uuid4().hex
     now = _now_iso()
@@ -454,6 +455,7 @@ async def create_permission_request(
         "status": "pending",
         "reason": "",
         "payload_json": _json_dumps(payload or {}),
+        "question_type": question_type,
         "created_at": now,
         "resolved_at": None,
     }
@@ -462,8 +464,8 @@ async def create_permission_request(
         conn.execute(
             """
             INSERT INTO orchestrator_permission_requests
-            (id, task_id, tool_name, arguments_preview, risk_level, status, reason, payload_json, created_at, resolved_at)
-            VALUES (:id, :task_id, :tool_name, :arguments_preview, :risk_level, :status, :reason, :payload_json, :created_at, :resolved_at)
+            (id, task_id, tool_name, arguments_preview, risk_level, status, reason, payload_json, question_type, created_at, resolved_at)
+            VALUES (:id, :task_id, :tool_name, :arguments_preview, :risk_level, :status, :reason, :payload_json, :question_type, :created_at, :resolved_at)
             """,
             record,
         )
@@ -658,6 +660,7 @@ def _serialize_permission_row(row) -> dict[str, Any]:
         "status": row["status"],
         "reason": row["reason"],
         "payload": _decode_json(row["payload_json"]) if "payload_json" in row.keys() else {},
+        "questionType": row["question_type"] if "question_type" in row.keys() else "",
         "createdAt": row["created_at"],
         "resolvedAt": row["resolved_at"],
     }

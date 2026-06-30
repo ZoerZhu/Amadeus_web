@@ -535,6 +535,10 @@ class SQLiteStorage:
             conn.execute(
                 "ALTER TABLE orchestrator_permission_requests ADD COLUMN payload_json TEXT NOT NULL DEFAULT '{}'"
             )
+        if "question_type" not in orchestrator_permission_columns:
+            conn.execute(
+                "ALTER TABLE orchestrator_permission_requests ADD COLUMN question_type TEXT NOT NULL DEFAULT ''"
+            )
         ledger_schema = conn.execute(
             """
             SELECT sql FROM sqlite_master

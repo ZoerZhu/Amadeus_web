@@ -254,3 +254,104 @@ async def test_code_search_falls_back_to_python_when_rg_unavailable(tmp_path: Pa
     assert result["results"][0]["path"].endswith("a.py")
     assert result["results"][0]["line"] == 1
     assert "hello" in result["results"][0]["preview"]
+
+
+from backend.amadeus_app.file_tools.file_writer import (
+    run_file_write, run_file_append, run_file_mkdir,
+    CodeChangeBudget, FileBackupStore,
+)
+
+
+@pytest.mark.asyncio
+async def test_file_write_creates_new_file_returns_hash(tmp_path: Path):
+    result = await run_file_write(
+        path="out.txt", content="hello", workspace_root=str(tmp_path),
+    )
+    assert result["ok"] is True
+    assert (tmp_path / "out.txt").read_text(encoding="utf-8") == "hello"
+    assert result["data"]["newHash"] == compute_sha256("hello")
+    assert "out.txt" in result["modified_paths"]
+
+
+@pytest.mark.asyncio
+async def test_file_write_overwrite_requires_hash(tmp_path: Path):
+    f = tmp_path / "out.txt"
+    f.write_text("old", encoding="utf-8")
+    result = await run_file_write(
+        path="out.txt", content="new", workspace_root=str(tmp_path),
+    )
+    assert result["ok"] is False
+    assert "expectedHash" in result["summary"] or "hash" in result["summary"].lower()
+
+
+@pytest.mark.asyncio
+async def test_file_write_overwrite_hash_mismatch_rejected(tmp_path: Path):
+    f = tmp_path / "out.txt"
+    f.write_text("old", encoding="utf-8")
+    result = await run_file_write(
+        path="out.txt", content="new", workspace_root=str(tmp_path),
+        expected_hash="0000000000000000000000000000000000000000000000000000000000000000",
+    )
+    assert result["ok"] is False
+    assert "hash" in result["summary"].lower() or "mismatch" in result["summary"].lower()
+    assert f.read_text(encoding="utf-8") == "old"  # unchanged
+
+
+@pytest.mark.asyncio
+async def test_file_write_overwrite_hash_match_succeeds(tmp_path: Path):
+    f = tmp_path / "out.txt"
+    f.write_text("old", encoding="utf-8")
+    result = await run_file_write(
+        path="out.txt", content="new", workspace_root=str(tmp_path),
+        expected_hash=compute_sha256("old"),
+    )
+    assert result["ok"] is True
+    assert f.read_text(encoding="utf-8") == "new"
+    assert result["data"]["newHash"] == compute_sha256("new")
+    assert result["data"]["diffSummary"]
+
+
+@pytest.mark.asyncio
+async def test_file_append_creates_and_appends(tmp_path: Path):
+    await run_file_append(path="log.txt", content="line1\n", workspace_root=str(tmp_path))
+    result = await run_file_append(
+        path="log.txt", content="line2\n", workspace_root=str(tmp_path),
+        expected_hash=compute_sha256("line1\n"),
+    )
+    assert result["ok"] is True
+    assert (tmp_path / "log.txt").read_text(encoding="utf-8") == "line1\nline2\n"
+
+
+@pytest.mark.asyncio
+async def test_file_mkdir_creates_nested(tmp_path: Path):
+    result = await run_file_mkdir(path="a/b/c", workspace_root=str(tmp_path))
+    assert result["ok"] is True
+    assert (tmp_path / "a" / "b" / "c").is_dir()
+
+
+@pytest.mark.asyncio
+async def test_code_change_budget_rejects_over_limit():
+    budget = CodeChangeBudget(max_files=2, max_lines=5)
+    assert budget.record("a.py", 3) is True
+    assert budget.record("b.py", 2) is True  # 2 files, 5 lines
+    assert budget.record("c.py", 1) is False  # exceeds file count
+
+
+@pytest.mark.asyncio
+async def test_code_change_budget_rejects_line_over_limit():
+    budget = CodeChangeBudget(max_files=10, max_lines=5)
+    assert budget.record("a.py", 6) is False
+
+
+@pytest.mark.asyncio
+async def test_file_backup_store_backs_up_and_cleans(tmp_path: Path):
+    store_dir = tmp_path / "backups"
+    store = FileBackupStore(str(store_dir), task_id="t1")
+    f = tmp_path / "orig.txt"
+    f.write_text("original", encoding="utf-8")
+    backup = store.backup(f)
+    assert backup is not None
+    assert backup["originalPath"] == str(f)
+    assert Path(backup["backupPath"]).read_text(encoding="utf-8") == "original"
+    store.cleanup()
+    assert not Path(backup["backupPath"]).exists()

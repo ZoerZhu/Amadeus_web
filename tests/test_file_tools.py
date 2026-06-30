@@ -640,3 +640,132 @@ async def test_integration_read_patch_rollback_flow(agent_storage, tmp_path):
     # Rollback restores original
     await runner.rollback_task(storage=agent_storage, task_id=task["id"])
     assert f.read_text(encoding="utf-8") == original
+
+
+# ---------------------------------------------------------------------------
+# Final-review fix: file_delete/file_move must record changes in FileChangeTracker
+# so non-git rollback can restore deleted files and moved sources.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_file_delete_records_tracker_change(tmp_path: Path):
+    """run_file_delete records a 'deleted' change with oldSnapshot for rollback."""
+    from backend.amadeus_app.orchestrator import storage as orch_storage
+    from backend.amadeus_app.orchestrator.file_change_tracker import FileChangeTracker
+
+    storage = SQLiteStorage(str(tmp_path / "test.db"))
+    await storage.connect()
+    task = await orch_storage.create_task(
+        storage, user_id="u", title="t", prompt="p",
+        workspace_path=str(tmp_path), conversation_id=None,
+        active_skill_ids=[], settings={},
+    )
+    tracker = FileChangeTracker(storage, str(tmp_path), task["id"])
+    await tracker.initialize()
+
+    f = tmp_path / "trash.txt"
+    f.write_text("bye-content", encoding="utf-8")
+    result = await run_file_delete(
+        path="trash.txt", workspace_root=str(tmp_path), file_tracker=tracker,
+    )
+    assert result["ok"] is True
+    assert not f.exists()
+
+    changes = await orch_storage.list_file_changes(storage, task["id"])
+    assert len(changes) == 1
+    assert changes[0]["changeType"] == "deleted"
+    assert changes[0]["oldSnapshot"] == "bye-content"
+    await storage.close()
+
+
+@pytest.mark.asyncio
+async def test_file_move_records_tracker_changes(tmp_path: Path):
+    """run_file_move records 'deleted' for src and 'created' for dst."""
+    from backend.amadeus_app.orchestrator import storage as orch_storage
+    from backend.amadeus_app.orchestrator.file_change_tracker import FileChangeTracker
+
+    storage = SQLiteStorage(str(tmp_path / "test.db"))
+    await storage.connect()
+    task = await orch_storage.create_task(
+        storage, user_id="u", title="t", prompt="p",
+        workspace_path=str(tmp_path), conversation_id=None,
+        active_skill_ids=[], settings={},
+    )
+    tracker = FileChangeTracker(storage, str(tmp_path), task["id"])
+    await tracker.initialize()
+
+    (tmp_path / "src.txt").write_text("moved-content", encoding="utf-8")
+    result = await run_file_move(
+        src="src.txt", dst="dst.txt", workspace_root=str(tmp_path),
+        file_tracker=tracker,
+    )
+    assert result["ok"] is True
+
+    changes = await orch_storage.list_file_changes(storage, task["id"])
+    types_by_path = {c["relativePath"]: c["changeType"] for c in changes}
+    assert types_by_path.get("src.txt") == "deleted"
+    assert types_by_path.get("dst.txt") == "created"
+    src_change = next(c for c in changes if c["relativePath"] == "src.txt")
+    assert src_change["oldSnapshot"] == "moved-content"
+    await storage.close()
+
+
+@pytest.mark.asyncio
+async def test_rollback_after_delete_restores_file(tmp_path: Path):
+    """Rollback after run_file_delete restores the deleted file."""
+    from backend.amadeus_app.orchestrator import storage as orch_storage
+    from backend.amadeus_app.orchestrator.file_change_tracker import FileChangeTracker
+
+    storage = SQLiteStorage(str(tmp_path / "test.db"))
+    await storage.connect()
+    task = await orch_storage.create_task(
+        storage, user_id="u", title="t", prompt="p",
+        workspace_path=str(tmp_path), conversation_id=None,
+        active_skill_ids=[], settings={},
+    )
+    tracker = FileChangeTracker(storage, str(tmp_path), task["id"])
+    await tracker.initialize()
+
+    f = tmp_path / "trash.txt"
+    f.write_text("restore-me", encoding="utf-8")
+    await run_file_delete(
+        path="trash.txt", workspace_root=str(tmp_path), file_tracker=tracker,
+    )
+    assert not f.exists()
+
+    result = await tracker.rollback()
+    assert result["ok"] is True
+    assert f.read_text(encoding="utf-8") == "restore-me"
+    await storage.close()
+
+
+@pytest.mark.asyncio
+async def test_rollback_after_move_restores_source(tmp_path: Path):
+    """Rollback after run_file_move restores the source file and removes destination."""
+    from backend.amadeus_app.orchestrator import storage as orch_storage
+    from backend.amadeus_app.orchestrator.file_change_tracker import FileChangeTracker
+
+    storage = SQLiteStorage(str(tmp_path / "test.db"))
+    await storage.connect()
+    task = await orch_storage.create_task(
+        storage, user_id="u", title="t", prompt="p",
+        workspace_path=str(tmp_path), conversation_id=None,
+        active_skill_ids=[], settings={},
+    )
+    tracker = FileChangeTracker(storage, str(tmp_path), task["id"])
+    await tracker.initialize()
+
+    (tmp_path / "src.txt").write_text("move-me-back", encoding="utf-8")
+    await run_file_move(
+        src="src.txt", dst="dst.txt", workspace_root=str(tmp_path),
+        file_tracker=tracker,
+    )
+    assert not (tmp_path / "src.txt").exists()
+    assert (tmp_path / "dst.txt").exists()
+
+    result = await tracker.rollback()
+    assert result["ok"] is True
+    assert (tmp_path / "src.txt").read_text(encoding="utf-8") == "move-me-back"
+    assert not (tmp_path / "dst.txt").exists()
+    await storage.close()

@@ -379,6 +379,14 @@ async def run_file_move(
     if backup_store:
         src_content = backup_store.backup(src_path)
 
+    # Read source content before move (file won't exist after) for tracker.
+    src_text_content = None
+    if file_tracker:
+        try:
+            src_text_content = src_path.read_text(encoding="utf-8", errors="replace")
+        except Exception:  # noqa: BLE001
+            src_text_content = None
+
     dst_path.parent.mkdir(parents=True, exist_ok=True)
     try:
         shutil.move(str(src_path), str(dst_path))
@@ -387,7 +395,13 @@ async def run_file_move(
 
     if file_tracker:
         try:
-            await file_tracker.record_write(dst_rel, old_dst_content, dst_path.read_text(encoding="utf-8", errors="replace"), source=source)
+            if old_dst_content is None:
+                await file_tracker.record_move(src_rel, dst_rel, old_content=src_text_content, source=source)
+            else:
+                # Overwrite: record src delete + dst modification so rollback restores both.
+                await file_tracker.record_delete(src_rel, old_content=src_text_content, source=source)
+                new_dst_content = dst_path.read_text(encoding="utf-8", errors="replace")
+                await file_tracker.record_write(dst_rel, old_dst_content, new_dst_content, source=source)
         except Exception:  # noqa: BLE001
             pass
 
@@ -424,10 +438,21 @@ async def run_file_delete(
     if target.is_file():
         if backup_store:
             backup = backup_store.backup(target)
+        old_content = None
+        if file_tracker:
+            try:
+                old_content = target.read_text(encoding="utf-8", errors="replace")
+            except Exception:  # noqa: BLE001
+                old_content = None
         try:
             target.unlink()
         except OSError as error:
             return {"ok": False, "summary": f"delete failed: {error}", "data": {}}
+        if file_tracker:
+            try:
+                await file_tracker.record_delete(rel_path, old_content=old_content, source=source)
+            except Exception:  # noqa: BLE001
+                pass
     elif target.is_dir():
         try:
             children = list(target.iterdir())

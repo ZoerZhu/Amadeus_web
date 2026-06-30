@@ -236,7 +236,26 @@ async def _file_write(args: dict[str, Any], context: CapabilityExecutionContext)
         }
 
     target_path.parent.mkdir(parents=True, exist_ok=True)
+    # Read old content for change tracking
+    old_content = None
+    if target_path.exists():
+        try:
+            old_content = target_path.read_text(encoding=str(args.get("encoding") or "utf-8"))
+        except Exception:  # noqa: BLE001
+            old_content = None
     target_path.write_text(content, encoding=str(args.get("encoding") or "utf-8"))
+    # Record file change for tracking/rollback
+    file_tracker = context.metadata.get("file_tracker") if context.metadata else None
+    if file_tracker:
+        try:
+            await file_tracker.record_write(
+                rel_path=str(target_path.relative_to(workspace_root)),
+                old_content=old_content,
+                new_content=content,
+                source="file_write",
+            )
+        except Exception:  # noqa: BLE001
+            pass  # Don't fail the write if tracking fails
     artifact = await _create_artifact_for_path(
         context,
         path=target_path,

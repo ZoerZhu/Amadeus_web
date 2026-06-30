@@ -273,3 +273,54 @@ class TestAgentLoopTrackerIntegration:
         runner = AgentLoopRunner.__new__(AgentLoopRunner)
         assert hasattr(runner, "_file_tracker") or hasattr(runner, "_current_file_tracker") or True
         # Full integration test requires mocking the model — structural check here
+
+
+class TestFileWriteTracking:
+    @pytest.mark.asyncio
+    async def test_file_write_records_change(self, tmp_path):
+        from backend.amadeus_app.orchestrator.capability_adapters import _file_write, CapabilityExecutionContext
+        from backend.amadeus_app.orchestrator.domain import OrchestratorSettings
+        from backend.amadeus_app.orchestrator.file_change_tracker import FileChangeTracker
+        from backend.amadeus_app.storage import SQLiteStorage
+
+        db_path = tmp_path / "test.db"
+        storage = SQLiteStorage(str(db_path))
+        await storage.connect()
+
+        task = await orch_storage.create_task(
+            storage, user_id="u", title="t", prompt="p",
+            workspace_path=str(tmp_path), conversation_id=None,
+            active_skill_ids=[], settings={},
+        )
+        task_id = task["id"]
+
+        tracker = FileChangeTracker(storage, str(tmp_path), task_id)
+        await tracker.initialize()
+
+        (tmp_path / "existing.txt").write_text("original")
+
+        async def _emit(**kwargs):
+            return {}
+
+        context = CapabilityExecutionContext(
+            task_id=task_id,
+            prompt="test",
+            workspace_path=str(tmp_path),
+            settings=OrchestratorSettings(),
+            storage=storage,
+            emit_event=_emit,
+            metadata={"file_tracker": tracker},
+        )
+
+        result = await _file_write(
+            {"path": "existing.txt", "content": "new content", "allowCodeFiles": True},
+            context,
+        )
+        assert result["ok"] is True
+
+        # Verify change was recorded (only in non-Git mode)
+        changes = await orch_storage.list_file_changes(storage, task_id)
+        if not tracker.is_git_repo:
+            assert len(changes) == 1
+            assert changes[0]["changeType"] == "modified"
+            assert changes[0]["oldSnapshot"] == "original"

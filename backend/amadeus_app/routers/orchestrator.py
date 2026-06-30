@@ -16,6 +16,7 @@ from ..event_stream import sse
 from ..logging_config import get_logger
 from ..orchestrator import storage as orchestrator_storage
 from ..orchestrator.domain import (
+    OrchestratorPermissionAnswerRequest,
     OrchestratorPermissionDecisionRequest,
     OrchestratorSettings,
     OrchestratorTaskControlRequest,
@@ -332,6 +333,43 @@ async def reject_orchestrator_permission(
     request: OrchestratorPermissionDecisionRequest,
 ) -> dict[str, Any]:
     return await _decide_orchestrator_permission(permission_id, status="rejected", reason=request.reason)
+
+
+@router.post("/tasks/{task_id}/permissions/{permission_id}/answer")
+async def answer_orchestrator_permission(
+    task_id: str,
+    permission_id: str,
+    request: OrchestratorPermissionAnswerRequest,
+    background_tasks: BackgroundTasks,
+) -> dict[str, Any]:
+    storage = require_storage()
+    permission = await orchestrator_storage.get_permission_request(storage, permission_id)
+    if permission is None:
+        raise HTTPException(status_code=404, detail="permission request not found")
+    if permission["taskId"] != task_id:
+        raise HTTPException(status_code=404, detail="permission does not belong to this task")
+    if permission["status"] != "pending":
+        raise HTTPException(status_code=409, detail=f"permission already {permission['status']}")
+
+    updated = await orchestrator_storage.update_permission_answer(
+        storage, permission_id, answer=request.answer
+    )
+    if updated is None:
+        raise HTTPException(status_code=404, detail="permission request not found")
+
+    await orchestrator_storage.append_event(
+        storage,
+        task_id=task_id,
+        kind="question",
+        role="user",
+        name="ask_user",
+        status="answered",
+        summary=f"User answered: {request.answer[:200]}",
+        payload={"permissionId": permission_id, "answer": request.answer},
+    )
+
+    background_tasks.add_task(_resume_approved_permission, permission_id)
+    return {"ok": True}
 
 
 async def _decide_orchestrator_permission(

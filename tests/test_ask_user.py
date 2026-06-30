@@ -218,3 +218,65 @@ class TestResumeWithAnswer:
         params = list(sig.parameters.keys())
         assert "storage" in params
         assert "permission_id" in params
+
+
+class TestAnswerEndpoint:
+    @pytest.mark.asyncio
+    async def test_answer_endpoint_approves_and_stores_answer(self, tmp_path, monkeypatch):
+        from backend.amadeus_app.storage import SQLiteStorage
+        from backend.amadeus_app.orchestrator import storage as orch_storage
+
+        db_path = tmp_path / "test.db"
+        storage = SQLiteStorage(str(db_path))
+        await storage.connect()
+
+        task = await orch_storage.create_task(
+            storage,
+            user_id="test-user",
+            title="test",
+            prompt="test",
+            workspace_path=str(tmp_path),
+            conversation_id=None,
+            active_skill_ids=[],
+            settings={},
+        )
+        task_id = task["id"]
+
+        perm = await orch_storage.create_permission_request(
+            storage,
+            task_id=task_id,
+            tool_name="ask_user",
+            arguments_preview="question",
+            risk_level="safe",
+            question_type="ask_user",
+        )
+
+        # Mock the resume function to avoid actually running the loop
+        resume_called = False
+        async def mock_resume(*args, **kwargs):
+            nonlocal resume_called
+            resume_called = True
+
+        monkeypatch.setattr(
+            "backend.amadeus_app.routers.orchestrator.default_orchestrator_runner.resume_from_permission",
+            mock_resume,
+        )
+        monkeypatch.setattr(
+            "backend.amadeus_app.routers.orchestrator.require_storage",
+            lambda: storage,
+        )
+
+        from backend.amadeus_app.routers.orchestrator import answer_orchestrator_permission
+        from fastapi import BackgroundTasks
+
+        result = await answer_orchestrator_permission(
+            task_id=task_id,
+            permission_id=perm["id"],
+            request=type("Req", (), {"answer": "React"})(),
+            background_tasks=BackgroundTasks(),
+        )
+        assert result["ok"] is True
+
+        updated = await orch_storage.get_permission_request(storage, perm["id"])
+        assert updated["status"] == "approved"
+        assert updated["payload"]["answer"] == "React"

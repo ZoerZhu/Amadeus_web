@@ -158,6 +158,10 @@ class OrchestratorPermissionDecisionRequest(BaseModel):
     reason: str = ""
 
 
+class OrchestratorPermissionAnswerRequest(BaseModel):
+    answer: str
+
+
 class CapabilityDefinition(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 

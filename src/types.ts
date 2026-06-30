@@ -509,6 +509,18 @@ export interface OrchestratorTaskEvent {
   timestamp: string;
 }
 
+export interface FileChange {
+  id: string;
+  taskId: string;
+  seq: number;
+  relativePath: string;
+  changeType: "modified" | "created" | "deleted";
+  diffText: string;
+  oldSnapshot: string;
+  source: string;
+  createdAt: string;
+}
+
 export interface OrchestratorTaskDetail {
   task: OrchestratorTaskSummary;
   events: OrchestratorTaskEvent[];

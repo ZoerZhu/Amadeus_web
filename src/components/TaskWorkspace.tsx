@@ -26,11 +26,13 @@ import {
   controlOrchestratorTask,
   createOrchestratorTask,
   downloadArtifactUrl,
+  fetchFileChanges,
   fetchOrchestratorTaskDetail,
   fetchOrchestratorTasks,
   fetchPendingPermissions,
   rejectPermission,
   answerPermission,
+  rollbackTask,
   streamOrchestratorTaskEvents,
   uploadWorkspaceFile
 } from "../api";
@@ -38,6 +40,7 @@ import { ACCEPTED_UPLOAD_TYPES, buildConversationTitle, formatHistoryTime, rende
 import type {
   ChatAttachment,
   ChatMode,
+  FileChange,
   ModelSettings,
   OrchestratorArtifact,
   OrchestratorEventKind,
@@ -282,6 +285,7 @@ export function TaskWorkspace({
   const [taskDetail, setTaskDetail] = useState<OrchestratorTaskSummary | null>(null);
   const [events, setEvents] = useState<OrchestratorTaskEvent[]>([]);
   const [artifacts, setArtifacts] = useState<OrchestratorArtifact[]>([]);
+  const [fileChanges, setFileChanges] = useState<FileChange[]>([]);
   const [permissions, setPermissions] = useState<OrchestratorPermissionRequest[]>([]);
   const [permBusy, setPermBusy] = useState<Record<string, boolean>>({});
   const [input, setInput] = useState("");
@@ -378,11 +382,13 @@ export function TaskWorkspace({
       setEvents([]);
       setArtifacts([]);
       setPermissions([]);
+      setFileChanges([]);
       lastSeqRef.current = 0;
       return;
     }
     let cancelled = false;
     setError("");
+    fetchFileChanges(effectiveActiveId).then(setFileChanges).catch(() => undefined);
     fetchOrchestratorTaskDetail(effectiveActiveId)
       .then((detail) => {
         if (cancelled) {
@@ -828,6 +834,43 @@ export function TaskWorkspace({
         </div>
 
         {error && <div className="task-workspace-error">{error}</div>}
+
+        {fileChanges.length > 0 && (
+          <div className="file-changes-panel">
+            <div className="file-changes-header">
+              <span>文件变更 ({fileChanges.length})</span>
+              {(taskDetail?.status === "done" || taskDetail?.status === "failed") && (
+                <button
+                  className="rollback-btn"
+                  onClick={async () => {
+                    if (!window.confirm("确认回滚所有文件变更？此操作不可撤销。")) return;
+                    try {
+                      await rollbackTask(effectiveActiveId!);
+                      await refreshActiveDetail();
+                      setFileChanges([]);
+                    } catch (err) {
+                      setError(err instanceof Error ? err.message : "回滚失败");
+                    }
+                  }}
+                >
+                  <Trash2 size={14} /> 回滚
+                </button>
+              )}
+            </div>
+            {fileChanges.map((change) => (
+              <div key={change.id} className="file-change-item">
+                <span className={`change-type-badge change-${change.changeType}`}>
+                  {change.changeType === "created" ? "新增" :
+                   change.changeType === "deleted" ? "删除" : "修改"}
+                </span>
+                <span className="file-path">{change.relativePath}</span>
+                {change.diffText && (
+                  <pre className="diff-preview">{change.diffText.slice(0, 500)}</pre>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
 
         <div className="task-composer">
           <input

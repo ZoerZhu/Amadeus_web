@@ -11,6 +11,7 @@ import type {
   ChatMode,
   ConversationDetail,
   ConversationSummary,
+  FileChange,
   FileUploadResponse,
   McpCapability,
   McpPreset,
@@ -935,6 +936,17 @@ export async function answerPermission(
     const data = await response.json().catch(() => ({}));
     throw new Error(data.detail || `answer ${response.status}`);
   }
+}
+
+export async function fetchFileChanges(taskId: string): Promise<FileChange[]> {
+  const res = await fetch(`/api/orchestrator/tasks/${taskId}/file-changes`);
+  const data = await res.json();
+  return data.changes || [];
+}
+
+export async function rollbackTask(taskId: string): Promise<{ ok: boolean; method?: string }> {
+  const res = await fetch(`/api/orchestrator/tasks/${taskId}/rollback`, { method: "POST" });
+  return res.json();
 }
 
 function drainSseBuffer<TEvent>(

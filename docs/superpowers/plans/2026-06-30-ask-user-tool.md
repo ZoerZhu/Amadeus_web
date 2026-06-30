@@ -469,11 +469,7 @@ Add to `capability_catalog()` function (line 75), add a new entry in the list:
 
 - [ ] **Step 4: Implement _ask_user adapter**
 
-In `backend/amadeus_app/orchestrator/capability_adapters.py`, add import at top:
-
-```python
-from .agent_loop_runner import AgentLoopPermissionBlocked
-```
+In `backend/amadeus_app/orchestrator/capability_adapters.py`, use lazy import inside the function to avoid circular imports (same pattern as `tool_executor.py:135`):
 
 Add the `_ask_user` function (before the registry registration at line ~1381):
 
@@ -522,11 +518,7 @@ async def _ask_user(args: dict[str, Any], context: CapabilityExecutionContext) -
             },
         )
 
-    raise AgentLoopPermissionBlocked(
-        permission_id=permission["id"],
-        capability="ask_user",
-        reason=f"Waiting for user answer: {question[:100]}",
-    )
+    raise AgentLoopPermissionBlocked("ask_user", permission["id"])
 ```
 
 Then add to the registry (find the registry section at ~line 1381):

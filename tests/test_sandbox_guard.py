@@ -127,3 +127,25 @@ class TestSandboxGuardSanitizeEnv:
         clean = guard.sanitize_env(env)
         assert clean["CUSTOM_VAR"] == "value"
         assert clean["HOME"] == "/home/test"
+
+
+class TestOrchestratorSettingsSandboxMode:
+    def test_default_sandbox_mode_is_guard(self):
+        from backend.amadeus_app.orchestrator.domain import OrchestratorSettings
+        settings = OrchestratorSettings()
+        assert settings.sandbox_mode == "guard"
+
+    def test_sandbox_mode_accepts_off(self):
+        from backend.amadeus_app.orchestrator.domain import OrchestratorSettings
+        settings = OrchestratorSettings(sandboxMode="off")
+        assert settings.sandbox_mode == "off"
+
+    def test_sandbox_mode_accepts_strict(self):
+        from backend.amadeus_app.orchestrator.domain import OrchestratorSettings
+        settings = OrchestratorSettings(sandboxMode="strict")
+        assert settings.sandbox_mode == "strict"
+
+    def test_sandbox_mode_invalid_falls_back_to_guard(self):
+        from backend.amadeus_app.orchestrator.domain import OrchestratorSettings
+        with pytest.raises(Exception):
+            OrchestratorSettings(sandboxMode="invalid")

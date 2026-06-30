@@ -364,6 +364,7 @@ export interface OrchestratorSettings {
   agentLoopEnabled?: boolean;
   taskModel?: Record<string, unknown>;
   fallbackModel?: Record<string, unknown>;
+  sandboxMode?: "off" | "guard" | "strict";
 }
 
 export type McpTransport = "stdio" | "http";

@@ -237,3 +237,20 @@ async def test_code_search_provider_field_present(tmp_path: Path):
     result = await run_code_search(query="x", workspace_root=str(tmp_path))
     assert "provider" in result
     assert result["provider"] in ("ripgrep", "builtin")
+
+
+@pytest.mark.asyncio
+async def test_code_search_falls_back_to_python_when_rg_unavailable(tmp_path: Path, monkeypatch):
+    # Force ripgrep to be considered unavailable so the pure-Python fallback runs.
+    from backend.amadeus_app.file_tools import code_search
+    monkeypatch.setattr(code_search, "_ripgrep_available", lambda: False)
+    (tmp_path / "a.py").write_text("def hello():\n    pass\n", encoding="utf-8")
+    (tmp_path / "b.py").write_text("no match here\n", encoding="utf-8")
+    result = await run_code_search(
+        query="hello", workspace_root=str(tmp_path), path=".",
+    )
+    assert result["provider"] == "builtin"
+    assert len(result["results"]) == 1
+    assert result["results"][0]["path"].endswith("a.py")
+    assert result["results"][0]["line"] == 1
+    assert "hello" in result["results"][0]["preview"]

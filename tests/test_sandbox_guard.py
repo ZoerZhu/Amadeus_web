@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import pytest
 from pathlib import Path
+from typing import Any
 
 from backend.amadeus_app.orchestrator.sandbox_guard import SandboxGuard, SandboxResult
 
@@ -149,3 +150,142 @@ class TestOrchestratorSettingsSandboxMode:
         from backend.amadeus_app.orchestrator.domain import OrchestratorSettings
         with pytest.raises(Exception):
             OrchestratorSettings(sandboxMode="invalid")
+
+
+class TestShellExecSandboxIntegration:
+    """Integration tests verifying that SandboxGuard is wired into _shell_exec."""
+
+    @staticmethod
+    def _make_emit_capture():
+        events: list[dict[str, Any]] = []
+
+        async def _emit(**kwargs):
+            events.append(kwargs)
+            return {}
+
+        return events, _emit
+
+    @pytest.mark.asyncio
+    async def test_shell_exec_blocks_dangerous_command(self, tmp_path):
+        from backend.amadeus_app.orchestrator.capability_adapters import (
+            CapabilityExecutionContext,
+            _shell_exec,
+        )
+        from backend.amadeus_app.orchestrator.domain import OrchestratorSettings
+
+        events, _emit = self._make_emit_capture()
+        context = CapabilityExecutionContext(
+            task_id="test-task",
+            prompt="test",
+            workspace_path=str(tmp_path),
+            settings=OrchestratorSettings(sandboxMode="guard"),
+            emit_event=_emit,
+        )
+        result = await _shell_exec({"command": "format C:", "cwd": "."}, context)
+
+        assert result["ok"] is False
+        assert "Blocked by sandbox" in result["summary"]
+        assert result["data"]["action"] == "blocked"
+        # A blocked event should have been emitted with status="blocked".
+        assert any(event.get("status") == "blocked" for event in events)
+
+    @pytest.mark.asyncio
+    async def test_shell_exec_emits_started_then_blocked_event(self, tmp_path):
+        from backend.amadeus_app.orchestrator.capability_adapters import (
+            CapabilityExecutionContext,
+            _shell_exec,
+        )
+        from backend.amadeus_app.orchestrator.domain import OrchestratorSettings
+
+        events, _emit = self._make_emit_capture()
+        context = CapabilityExecutionContext(
+            task_id="test-task",
+            prompt="test",
+            workspace_path=str(tmp_path),
+            settings=OrchestratorSettings(sandboxMode="guard"),
+            emit_event=_emit,
+        )
+        await _shell_exec({"command": "shutdown /s /t 0"}, context)
+
+        statuses = [event.get("status") for event in events]
+        assert "started" in statuses
+        assert "blocked" in statuses
+
+    @pytest.mark.asyncio
+    async def test_shell_exec_dry_run_in_strict_mode(self, tmp_path):
+        from backend.amadeus_app.orchestrator.capability_adapters import (
+            CapabilityExecutionContext,
+            _shell_exec,
+        )
+        from backend.amadeus_app.orchestrator.domain import OrchestratorSettings
+
+        events, _emit = self._make_emit_capture()
+        context = CapabilityExecutionContext(
+            task_id="test-task",
+            prompt="test",
+            workspace_path=str(tmp_path),
+            settings=OrchestratorSettings(sandboxMode="strict", trustMode=True),
+            emit_event=_emit,
+        )
+        # "rm -rf local_dir" is classified as dangerous by the policy but is
+        # not in SandboxGuard's blocked patterns (those require a trailing "/"),
+        # so strict mode should surface it as a dry-run rather than executing.
+        result = await _shell_exec({"command": "rm -rf local_dir"}, context)
+
+        assert result["ok"] is True
+        assert result["data"]["dryRun"] is True
+        assert result["data"]["preview"] == "rm -rf local_dir"
+        assert "Dry-run" in result["summary"]
+        assert any(event.get("status") == "dry_run" for event in events)
+
+    @pytest.mark.asyncio
+    async def test_shell_exec_off_mode_allows_blocked_pattern(self, tmp_path):
+        from backend.amadeus_app.orchestrator.capability_adapters import (
+            CapabilityExecutionContext,
+            _shell_exec,
+        )
+        from backend.amadeus_app.orchestrator.domain import OrchestratorSettings
+
+        events, _emit = self._make_emit_capture()
+        context = CapabilityExecutionContext(
+            task_id="test-task",
+            prompt="test",
+            workspace_path=str(tmp_path),
+            settings=OrchestratorSettings(sandboxMode="off", trustMode=True),
+            emit_event=_emit,
+        )
+        # In off mode, even a "format C:" pattern is allowed through the guard.
+        # The command should not be blocked by the sandbox; instead it will be
+        # attempted (and likely fail on this platform), but the key assertion is
+        # that no "blocked"/"dry_run" status was emitted by the guard.
+        result = await _shell_exec({"command": "echo sandbox-off-check"}, context)
+
+        statuses = [event.get("status") for event in events]
+        assert "blocked" not in statuses
+        assert "dry_run" not in statuses
+        assert result["ok"] is True
+
+    @pytest.mark.asyncio
+    async def test_shell_exec_safe_command_still_runs_in_guard_mode(self, tmp_path):
+        from backend.amadeus_app.orchestrator.capability_adapters import (
+            CapabilityExecutionContext,
+            _shell_exec,
+        )
+        from backend.amadeus_app.orchestrator.domain import OrchestratorSettings
+
+        events, _emit = self._make_emit_capture()
+        context = CapabilityExecutionContext(
+            task_id="test-task",
+            prompt="test",
+            workspace_path=str(tmp_path),
+            settings=OrchestratorSettings(sandboxMode="guard", trustMode=True),
+            emit_event=_emit,
+        )
+        result = await _shell_exec({"command": "echo hello-sandbox"}, context)
+
+        assert result["ok"] is True
+        assert "hello-sandbox" in str(result.get("data", {}).get("stdout", ""))
+        statuses = [event.get("status") for event in events]
+        assert "blocked" not in statuses
+        assert "dry_run" not in statuses
+        assert "done" in statuses

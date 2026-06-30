@@ -22,6 +22,7 @@ from ..todo_task.todo_task_agent import run_todo_task_agent
 from ..vision.image_understand_agent import run_image_understand_agent
 from .domain import OrchestratorSettings
 from . import storage as orchestrator_storage
+from .sandbox_guard import SandboxGuard
 from .shell_exec_policy import classify_shell_command, parse_shell_command
 
 
@@ -1127,12 +1128,53 @@ async def _shell_exec(args: dict[str, Any], context: CapabilityExecutionContext)
         },
     )
 
+    # === SandboxGuard check ===
+    sandbox_mode = str(getattr(context.settings, "sandbox_mode", "guard") or "guard")
+    guard = SandboxGuard(context.workspace_path, mode=sandbox_mode)
+    sandbox_result = guard.check_command(command, risk_level=risk.risk)
+
+    if sandbox_result.action == "block":
+        await _emit_event(
+            context,
+            kind="error",
+            role="coder",
+            name="shell_exec",
+            status="blocked",
+            summary=sandbox_result.reason,
+            payload={"command": command, "blockedBy": "sandbox"},
+        )
+        return {
+            "ok": False,
+            "summary": sandbox_result.reason,
+            "data": {"command": command, "action": "blocked"},
+        }
+
+    if sandbox_result.action == "dry_run":
+        await _emit_event(
+            context,
+            kind="command",
+            role="coder",
+            name="shell_exec",
+            status="dry_run",
+            summary=f"Dry-run preview: {risk.command_preview}",
+            payload={"command": command, "preview": sandbox_result.preview},
+        )
+        return {
+            "ok": True,
+            "summary": f"Dry-run: command not executed. {sandbox_result.reason}",
+            "data": {"command": command, "preview": sandbox_result.preview, "dryRun": True},
+        }
+
+    # === SandboxGuard check end ===
+
     try:
+        sanitized_env = guard.sanitize_env()
         proc = await asyncio.create_subprocess_shell(
             command,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
             cwd=str(cwd_path),
+            env=sanitized_env,
         )
         stdout_bytes, stderr_bytes = await asyncio.wait_for(
             proc.communicate(), timeout=timeout

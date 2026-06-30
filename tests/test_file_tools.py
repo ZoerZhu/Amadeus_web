@@ -184,3 +184,56 @@ async def test_run_file_read_pdf_extraction(tmp_path: Path):
     result = await run_file_read(path=str(pdf_path), workspace_root=str(tmp_path))
     assert result["encoding"] == "pdf-text"
     assert "truncated" in result
+
+
+from backend.amadeus_app.file_tools.code_search import run_code_search
+
+
+@pytest.mark.asyncio
+async def test_code_search_builtin_finds_match(tmp_path: Path):
+    (tmp_path / "a.py").write_text("def hello():\n    pass\n", encoding="utf-8")
+    (tmp_path / "b.py").write_text("no match here\n", encoding="utf-8")
+    result = await run_code_search(
+        query="hello", workspace_root=str(tmp_path), path=".",
+    )
+    assert result["provider"] in ("ripgrep", "builtin")
+    assert len(result["results"]) == 1
+    assert result["results"][0]["path"].endswith("a.py")
+    assert result["results"][0]["line"] == 1
+    assert "hello" in result["results"][0]["preview"]
+
+
+@pytest.mark.asyncio
+async def test_code_search_builtin_case_insensitive(tmp_path: Path):
+    (tmp_path / "a.py").write_text("Hello World\n", encoding="utf-8")
+    result = await run_code_search(
+        query="hello", workspace_root=str(tmp_path), path=".", case_sensitive=False,
+    )
+    assert len(result["results"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_code_search_case_sensitive_no_match(tmp_path: Path):
+    (tmp_path / "a.py").write_text("Hello\n", encoding="utf-8")
+    result = await run_code_search(
+        query="hello", workspace_root=str(tmp_path), path=".", case_sensitive=True,
+    )
+    assert len(result["results"]) == 0
+
+
+@pytest.mark.asyncio
+async def test_code_search_results_truncated_at_max(tmp_path: Path):
+    for i in range(10):
+        (tmp_path / f"f{i}.py").write_text("needle\n", encoding="utf-8")
+    result = await run_code_search(
+        query="needle", workspace_root=str(tmp_path), path=".", max_results=3,
+    )
+    assert len(result["results"]) == 3
+
+
+@pytest.mark.asyncio
+async def test_code_search_provider_field_present(tmp_path: Path):
+    (tmp_path / "a.py").write_text("x\n", encoding="utf-8")
+    result = await run_code_search(query="x", workspace_root=str(tmp_path))
+    assert "provider" in result
+    assert result["provider"] in ("ripgrep", "builtin")

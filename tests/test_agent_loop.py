@@ -1804,3 +1804,63 @@ async def test_agent_loop_injects_code_budget_and_backup_store(agent_storage):
 
 async def _noop_finish(args, context):
     return {"ok": True, "summary": "finished", "data": {}}
+
+
+# ---------------------------------------------------------------------------
+# Fix for review finding: rollback_task must clean up FileBackupStore directly
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_rollback_task_cleans_up_backup_dir(agent_storage):
+    """Regression: rollback_task must remove the FileBackupStore backup dir.
+
+    The fresh FileChangeTracker constructed inside rollback_task has no backup
+    store attached, so tracker.cleanup_backups() is a silent no-op. rollback_task
+    must construct a fresh FileBackupStore and call .cleanup() on it directly.
+    """
+    from pathlib import Path
+    from backend.amadeus_app.file_tools.file_writer import FileBackupStore
+
+    with tempfile.TemporaryDirectory() as tmp:
+        task = await orch_storage.create_task(
+            agent_storage,
+            user_id="test-user",
+            title="test rollback cleanup",
+            prompt="test",
+            workspace_path=tmp,
+            conversation_id=None,
+            active_skill_ids=[],
+            settings=OrchestratorSettings(agent_loop_enabled=True).model_dump(by_alias=True),
+            context={},
+            budget={},
+        )
+        task_id = task["id"]
+
+        # Mark task as done so rollback is allowed.
+        await orch_storage.update_task_status(agent_storage, task_id, status="done", finished=True)
+
+        # Simulate backups created during the task: build a FileBackupStore using
+        # the SAME app_data_dir that rollback_task will use internally.
+        runner = AgentLoopRunner()
+        app_data_dir = runner._app_data_dir(agent_storage)
+        backup_store = FileBackupStore(app_data_dir, task_id)
+
+        # Back up a real file so the backup dir contains at least one entry.
+        dummy_file = Path(tmp) / "dummy.txt"
+        dummy_file.write_text("original content", encoding="utf-8")
+        backup_info = backup_store.backup(dummy_file)
+        assert backup_info is not None, "backup() must return info for an existing file"
+
+        backup_dir = Path(app_data_dir) / "file_backups" / task_id
+        assert backup_dir.exists(), "backup dir should exist before rollback"
+        assert any(backup_dir.iterdir()), "backup dir should contain at least one backup file"
+
+        # rollback_task should clean up the backup dir.
+        result = await runner.rollback_task(storage=agent_storage, task_id=task_id)
+        assert result["ok"] is True
+
+        assert not backup_dir.exists(), (
+            "rollback_task must clean up the FileBackupStore backup dir; "
+            "tracker.cleanup_backups() is a no-op on the fresh tracker."
+        )

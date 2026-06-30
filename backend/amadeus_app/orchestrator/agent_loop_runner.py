@@ -413,7 +413,15 @@ class AgentLoopRunner:
             await tracker.initialize()
 
         result = await tracker.rollback()
-        tracker.cleanup_backups()
+
+        # Clean up the FileBackupStore directly. The fresh tracker above has no
+        # backup store attached (so tracker.cleanup_backups() would be a silent
+        # no-op); construct a fresh store located via task_id and remove it.
+        try:
+            backup_store = FileBackupStore(self._app_data_dir(storage), task_id)
+            backup_store.cleanup()
+        except Exception:  # noqa: BLE001
+            pass  # best-effort cleanup
 
         await orchestrator_storage.update_task_status(
             storage, task_id, status="rolled_back", finished=True

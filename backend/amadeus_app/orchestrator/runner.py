@@ -239,6 +239,11 @@ class OrchestratorRunner:
                 finished=True,
             )
 
+    async def rollback_task(self, *, storage: SQLiteStorage, task_id: str) -> dict[str, Any]:
+        """Rollback a task's file changes. Delegates to the agent loop runner,
+        which owns the FileChangeTracker lifecycle."""
+        return await self.agent_loop_runner.rollback_task(storage=storage, task_id=task_id)
+
     def _build_context(
         self,
         *,

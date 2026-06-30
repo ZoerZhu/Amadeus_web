@@ -349,6 +349,36 @@ class AgentLoopRunner:
                 storage, permission["taskId"], status="failed", error=str(error), finished=True
             )
 
+    async def rollback_task(self, *, storage, task_id: str) -> dict[str, Any]:
+        """Rollback a task's file changes to pre-task state."""
+        task = await orchestrator_storage.get_task(storage, task_id)
+        if task is None:
+            return {"ok": False, "reason": "task not found"}
+        if task.get("status") not in ("done", "failed"):
+            return {"ok": False, "reason": "can only rollback completed or failed tasks"}
+
+        settings = OrchestratorSettings.model_validate(task.get("settings") or {})
+        workspace_path = str(task.get("workspacePath") or settings.default_workspace or ".")
+        tracker = FileChangeTracker(storage, workspace_path, task_id)
+        await tracker.initialize()
+
+        result = await tracker.rollback()
+
+        await orchestrator_storage.update_task_status(
+            storage, task_id, status="rolled_back", finished=True
+        )
+        await orchestrator_storage.append_event(
+            storage,
+            task_id=task_id,
+            kind="status",
+            role="coordinator",
+            name="rollback",
+            status="rolled_back",
+            summary=f"Task rolled back: {result.get('method', 'unknown')}",
+            payload=result,
+        )
+        return result
+
     async def _run_loop(
         self,
         *,

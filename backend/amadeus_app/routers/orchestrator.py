@@ -277,6 +277,11 @@ async def control_orchestrator_task(task_id: str, request: OrchestratorTaskContr
     task = await orchestrator_storage.get_task(storage, task_id)
     if task is None:
         raise HTTPException(status_code=404, detail="task not found")
+    if request.action == "rollback":
+        if task["status"] not in ("done", "failed"):
+            raise HTTPException(status_code=409, detail=f"cannot rollback task with status: {task['status']}")
+        result = await default_orchestrator_runner.rollback_task(storage=storage, task_id=task_id)
+        return result
     target_status = {
         "pause": "paused",
         "resume": "running",
@@ -370,6 +375,26 @@ async def answer_orchestrator_permission(
 
     background_tasks.add_task(_resume_approved_permission, permission_id)
     return {"ok": True}
+
+
+@router.post("/tasks/{task_id}/rollback")
+async def rollback_orchestrator_task(task_id: str) -> dict[str, Any]:
+    storage = require_storage()
+    task = await orchestrator_storage.get_task(storage, task_id)
+    if task is None:
+        raise HTTPException(status_code=404, detail="task not found")
+    if task["status"] not in ("done", "failed"):
+        raise HTTPException(status_code=409, detail=f"cannot rollback task with status: {task['status']}")
+
+    result = await default_orchestrator_runner.rollback_task(storage=storage, task_id=task_id)
+    return result
+
+
+@router.get("/tasks/{task_id}/file-changes")
+async def list_orchestrator_file_changes(task_id: str) -> dict[str, Any]:
+    storage = require_storage()
+    changes = await orchestrator_storage.list_file_changes(storage, task_id)
+    return {"changes": changes}
 
 
 async def _decide_orchestrator_permission(

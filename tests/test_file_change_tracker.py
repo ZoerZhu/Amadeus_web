@@ -324,3 +324,51 @@ class TestFileWriteTracking:
             assert len(changes) == 1
             assert changes[0]["changeType"] == "modified"
             assert changes[0]["oldSnapshot"] == "original"
+
+
+class TestRollbackEndpoint:
+    @pytest.mark.asyncio
+    async def test_rollback_endpoint_restores_files(self, tmp_path, monkeypatch):
+        from backend.amadeus_app.orchestrator.file_change_tracker import FileChangeTracker
+
+        db_path = tmp_path / "test.db"
+        storage = SQLiteStorage(str(db_path))
+        await storage.connect()
+
+        task = await orch_storage.create_task(
+            storage, user_id="u", title="t", prompt="p",
+            workspace_path=str(tmp_path), conversation_id=None,
+            active_skill_ids=[], settings={},
+        )
+        task_id = task["id"]
+
+        # Set task to "done" so rollback is allowed
+        await orch_storage.update_task_status(storage, task_id, status="done", finished=True)
+
+        # Setup tracker and modify a file
+        tracker = FileChangeTracker(storage, str(tmp_path), task_id)
+        await tracker.initialize()
+        test_file = tmp_path / "app.py"
+        test_file.write_text("original")
+        await tracker.record_write("app.py", old_content="original", new_content="modified")
+        test_file.write_text("modified")
+
+        # Mock the runner to return our tracker's rollback
+        class MockRunner:
+            async def rollback_task(self, *, storage, task_id):
+                return await tracker.rollback()
+
+        monkeypatch.setattr(
+            "backend.amadeus_app.routers.orchestrator.default_orchestrator_runner",
+            MockRunner(),
+        )
+        monkeypatch.setattr(
+            "backend.amadeus_app.routers.orchestrator.require_storage",
+            lambda: storage,
+        )
+
+        from backend.amadeus_app.routers.orchestrator import rollback_orchestrator_task
+
+        result = await rollback_orchestrator_task(task_id)
+        assert result["ok"] is True
+        assert test_file.read_text() == "original"

@@ -29,6 +29,7 @@ from .context_window import estimate_token_count, trim_context
 from .model_retry import ModelRetryConfig, retry_model_call
 from .shell_exec_policy import classify_shell_command
 from .tool_executor import ToolCache, ToolExecutor
+from .file_change_tracker import FileChangeTracker
 from ..orchestrator_integrations.mcp_client import mcp_manager
 
 
@@ -113,6 +114,12 @@ class AgentLoopRunner:
             emit_event=_emit,
         )
 
+        # Initialize file change tracker
+        file_tracker = FileChangeTracker(storage, workspace_path, task_id)
+        await file_tracker.initialize()
+        context.metadata["file_tracker"] = file_tracker
+        self._current_file_tracker = file_tracker
+
         try:
             # Reset the task-level tool result cache so entries never leak across tasks.
             self.tool_executor.cache = ToolCache()
@@ -196,6 +203,7 @@ class AgentLoopRunner:
             )
             await orchestrator_storage.update_task_status(storage, task_id, status="paused")
         except Exception as error:  # noqa: BLE001
+            self._current_file_tracker = None
             await _emit(
                 kind="error",
                 role="coordinator",
@@ -1019,6 +1027,24 @@ class AgentLoopRunner:
             summary=final_answer["summary"],
             payload=final_answer,
         )
+        # Collect git diff if workspace is a git repo
+        if hasattr(self, "_current_file_tracker") and self._current_file_tracker:
+            file_tracker = self._current_file_tracker
+            if file_tracker.is_git_repo:
+                try:
+                    changes = await file_tracker.collect_git_diff()
+                    if changes:
+                        await emit(
+                            kind="artifact",
+                            role="coder",
+                            name="file_changes",
+                            status="done",
+                            summary=f"Tracked {len(changes)} file change(s).",
+                            payload={"changeCount": len(changes)},
+                        )
+                except Exception:  # noqa: BLE001
+                    pass
+            self._current_file_tracker = None
         await emit(
             kind="done",
             role="summarizer",

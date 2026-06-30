@@ -791,6 +791,20 @@ export function OrchestratorSettingsPanel({
             </>
           )}
         </div>
+        <div className="settings-section">
+          <h4>沙箱守卫</h4>
+          <label className="switch-row">
+            <span>模式</span>
+            <select
+              value={normalizedOrchestrator.sandboxMode || "guard"}
+              onChange={(event) => updateOrchestrator({ sandboxMode: event.target.value as "off" | "guard" | "strict" })}
+            >
+              <option value="off">关闭 — 不做任何拦截</option>
+              <option value="guard">守卫 — 拦截危险命令（推荐）</option>
+              <option value="strict">严格 — 危险命令走 dry-run</option>
+            </select>
+          </label>
+        </div>
         {normalizedOrchestrator.opencodeEnabled && (
           <div className="opencode-routing-config">
             <label className="switch-row">

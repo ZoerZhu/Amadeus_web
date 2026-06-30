@@ -65,7 +65,9 @@ const STATUS_LABELS: Record<string, string> = {
   cancelled: "已取消",
   done: "已完成",
   failed: "失败",
-  rolled_back: "已回滚"
+  rolled_back: "已回滚",
+  blocked: "已拦截",
+  dry_run: "预览"
 };
 
 const EVENT_LABELS: Record<OrchestratorEventKind, string> = {
@@ -103,7 +105,8 @@ function attachmentLabel(attachment: ChatAttachment): string {
   return attachment.originalFilename || attachment.filename || attachment.path.split(/[\\/]/).pop() || "附件";
 }
 
-function eventIcon(kind: OrchestratorEventKind) {
+function eventIcon(event: OrchestratorTaskEvent) {
+  const kind = event.kind;
   if (kind === "message") {
     return <BookOpen size={14} />;
   }
@@ -118,6 +121,9 @@ function eventIcon(kind: OrchestratorEventKind) {
   }
   if (kind === "error") {
     return <AlertTriangle size={14} />;
+  }
+  if (event.status === "blocked") {
+      return <AlertTriangle size={14} />;
   }
   if (kind === "command") {
     return <Terminal size={14} />;
@@ -654,7 +660,7 @@ export function TaskWorkspace({
                   const cmdPayload = event.kind === "command" ? event.payload : null;
                   return (
                   <div className={`task-process-event is-${event.kind}`} key={`${event.taskId}-${event.seq}`}>
-                    <span className="task-process-icon">{eventIcon(event.kind)}</span>
+                    <span className="task-process-icon">{eventIcon(event)}</span>
                     <div>
                       <div className="task-process-head">
                         <strong>{event.name || EVENT_LABELS[event.kind]}</strong>
@@ -687,7 +693,7 @@ export function TaskWorkspace({
           {doneEvent && (
             <div className="task-done-card">
               <div className={`task-process-event is-${doneEvent.kind}`}>
-                <span className="task-process-icon">{eventIcon(doneEvent.kind)}</span>
+                <span className="task-process-icon">{eventIcon(doneEvent)}</span>
                 <div>
                   <div className="task-process-head">
                     <strong>{doneEvent.name || EVENT_LABELS[doneEvent.kind]}</strong>

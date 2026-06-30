@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -11,6 +12,7 @@ import httpx
 from ..model_adapter import build_chat_payload
 from ..providers import get_provider
 from ..domain import ModelSettings
+from ..file_tools.file_writer import CodeChangeBudget, FileBackupStore
 from .agent_loop_context import (
     AgentLoopContext,
     build_agent_loop_system_prompt,
@@ -105,25 +107,33 @@ class AgentLoopRunner:
         async def _emit(**event: Any) -> dict[str, Any]:
             return await orchestrator_storage.append_event(storage, task_id=task_id, **event)
 
-        context = CapabilityExecutionContext(
-            task_id=task_id,
-            prompt=request.prompt,
-            workspace_path=workspace_path,
-            settings=settings,
-            metadata={"mode": mode, "model": task_model, "agentLoop": True},
-            storage=storage,
-            emit_event=_emit,
-        )
-
-        # Initialize a task-scoped file change tracker.
+        # Initialize a task-scoped file change tracker + backup store + code budget.
         file_tracker = await self._tracker_for_task(
             storage=storage,
             task_id=task_id,
             workspace_path=workspace_path,
             task_context=None,
         )
-        context.metadata["file_tracker"] = file_tracker
+        backup_store = FileBackupStore(self._app_data_dir(storage), task_id)
+        code_budget = CodeChangeBudget(max_files=5, max_lines=300)
+        file_tracker.attach_backup_store(backup_store)
         self._file_trackers[task_id] = file_tracker
+
+        context = CapabilityExecutionContext(
+            task_id=task_id,
+            prompt=request.prompt,
+            workspace_path=workspace_path,
+            settings=settings,
+            metadata={
+                "mode": mode, "model": task_model, "agentLoop": True,
+                "file_tracker": file_tracker,
+                "backup_store": backup_store,
+                "code_change_budget": code_budget,
+                "authorized_external_paths": [],
+            },
+            storage=storage,
+            emit_event=_emit,
+        )
 
         await self._persist_tracker_baseline(storage=storage, task_id=task_id, file_tracker=file_tracker)
 
@@ -255,24 +265,32 @@ class AgentLoopRunner:
         async def _emit(**event: Any) -> dict[str, Any]:
             return await orchestrator_storage.append_event(storage, task_id=permission["taskId"], **event)
 
-        context = CapabilityExecutionContext(
-            task_id=permission["taskId"],
-            prompt=str(task.get("prompt") or ""),
-            workspace_path=workspace_path,
-            settings=settings,
-            metadata=task.get("context") if isinstance(task.get("context"), dict) else {},
-            storage=storage,
-            emit_event=_emit,
-        )
-
         file_tracker = await self._tracker_for_task(
             storage=storage,
             task_id=permission["taskId"],
             workspace_path=workspace_path,
             task_context=task.get("context") if isinstance(task.get("context"), dict) else {},
         )
-        context.metadata["file_tracker"] = file_tracker
+        backup_store = FileBackupStore(self._app_data_dir(storage), permission["taskId"])
+        code_budget = CodeChangeBudget(max_files=5, max_lines=300)
+        file_tracker.attach_backup_store(backup_store)
         self._file_trackers[permission["taskId"]] = file_tracker
+
+        context = CapabilityExecutionContext(
+            task_id=permission["taskId"],
+            prompt=str(task.get("prompt") or ""),
+            workspace_path=workspace_path,
+            settings=settings,
+            metadata={
+                **(task.get("context") if isinstance(task.get("context"), dict) else {}),
+                "file_tracker": file_tracker,
+                "backup_store": backup_store,
+                "code_change_budget": code_budget,
+                "authorized_external_paths": [],
+            },
+            storage=storage,
+            emit_event=_emit,
+        )
 
         events = await orchestrator_storage.list_events(storage, permission["taskId"])
         loop_ctx = self._rebuild_context_from_events(
@@ -395,6 +413,7 @@ class AgentLoopRunner:
             await tracker.initialize()
 
         result = await tracker.rollback()
+        tracker.cleanup_backups()
 
         await orchestrator_storage.update_task_status(
             storage, task_id, status="rolled_back", finished=True
@@ -443,6 +462,18 @@ class AgentLoopRunner:
         task_ctx = dict(task_record.get("context") or {}) if task_record else {}
         task_ctx.update(file_tracker.baseline_state())
         await orchestrator_storage.update_task_context(storage, task_id, task_ctx)
+
+    def _app_data_dir(self, storage) -> str:
+        """Return the directory used for backups and other app data."""
+        # Prefer a 'file_backups' sibling of the storage DB; fall back to a temp dir.
+        try:
+            db_path = getattr(storage, "db_path", "") or ""
+            if db_path:
+                return str(Path(db_path).resolve().parent)
+        except Exception:  # noqa: BLE001
+            pass
+        import tempfile
+        return tempfile.gettempdir()
 
     async def _run_loop(
         self,

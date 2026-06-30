@@ -1742,3 +1742,65 @@ def test_extract_read_paths_handles_file_list():
     from backend.amadeus_app.orchestrator.tool_executor import _extract_read_paths
     assert _extract_read_paths("file_list", {"path": "src"}) == ["src"]
     assert _extract_read_paths("file_read", {"path": "a.py"}) == ["a.py"]
+
+
+# ---------------------------------------------------------------------------
+# Task 9 (file-tools-upgrade plan): allowedExternalPaths + context injection
+# ---------------------------------------------------------------------------
+
+from pathlib import Path
+from unittest.mock import patch
+from backend.amadeus_app.storage import DEFAULT_USER_ID
+
+
+def test_orchestrator_settings_has_allowed_external_paths():
+    from backend.amadeus_app.orchestrator.domain import OrchestratorSettings
+    settings = OrchestratorSettings(allowedExternalPaths=["/tmp/ext"])
+    assert settings.allowed_external_paths == ["/tmp/ext"]
+    dumped = settings.model_dump(by_alias=True)
+    assert dumped["allowedExternalPaths"] == ["/tmp/ext"]
+
+
+@pytest.mark.asyncio
+async def test_agent_loop_injects_code_budget_and_backup_store(agent_storage):
+    from backend.amadeus_app.orchestrator.capability_adapters import CapabilityExecutionContext
+    from backend.amadeus_app.file_tools.file_writer import CodeChangeBudget, FileBackupStore
+
+    captured_contexts: list[CapabilityExecutionContext] = []
+
+    async def fake_file_list(args, context):
+        captured_contexts.append(context)
+        return {"ok": True, "summary": "listed", "data": {"entries": []}}
+
+    registry = CapabilityRegistry()
+    registry.register("file_list", fake_file_list)
+    registry.register("finish", _noop_finish)
+
+    runner = AgentLoopRunner(capability_registry=registry)
+    call_count = [0]
+
+    async def mock_call_model(*, loop_ctx, task_model, mode, emit):
+        call_count[0] += 1
+        if call_count[0] == 1:
+            return {"content": "list files", "tool_calls": [
+                {"id": "c1", "name": "file_list", "arguments": {"path": "."}},
+            ], "tool_calls_raw": [], "finish_reason": "tool_calls"}
+        return {"content": "done", "tool_calls": [
+            {"id": "c2", "name": "finish", "arguments": {"summary": "done"}},
+        ], "tool_calls_raw": [], "finish_reason": "stop"}
+
+    with patch.object(runner, "_call_model", side_effect=mock_call_model):
+        request = OrchestratorTaskCreateRequest(prompt="list files", workspacePath=str(Path(__file__).resolve().parent))
+        settings = OrchestratorSettings(defaultWorkspace=str(Path(__file__).resolve().parent), trustMode=True, agentLoopEnabled=True)
+        task = await orch_storage.create_task(agent_storage, user_id=DEFAULT_USER_ID, title="t", prompt=request.prompt, workspace_path=request.workspace_path, conversation_id=None, active_skill_ids=[], settings=settings.model_dump(by_alias=True), budget={})
+        await runner.run(storage=agent_storage, task_id=task["id"], request=request, settings=settings)
+
+    assert len(captured_contexts) == 1
+    meta = captured_contexts[0].metadata
+    assert isinstance(meta.get("code_change_budget"), CodeChangeBudget)
+    assert isinstance(meta.get("backup_store"), FileBackupStore)
+    assert meta.get("file_tracker") is not None
+
+
+async def _noop_finish(args, context):
+    return {"ok": True, "summary": "finished", "data": {}}

@@ -289,3 +289,36 @@ class TestShellExecSandboxIntegration:
         assert "blocked" not in statuses
         assert "dry_run" not in statuses
         assert "done" in statuses
+
+
+class TestCodeAgentSandboxIntegration:
+    """Integration tests verifying that SandboxGuard path validation is wired
+    into _code_agent (blocks workspace paths outside the task workspace)."""
+
+    @pytest.mark.asyncio
+    async def test_code_agent_rejects_outside_workspace(self, tmp_path):
+        from backend.amadeus_app.orchestrator.capability_adapters import (
+            CapabilityExecutionContext,
+            _code_agent,
+        )
+        from backend.amadeus_app.orchestrator.domain import OrchestratorSettings
+
+        events: list[dict[str, Any]] = []
+
+        async def _emit(**kwargs):
+            events.append(kwargs)
+            return {}
+
+        context = CapabilityExecutionContext(
+            task_id="test-task",
+            prompt="test",
+            workspace_path=str(tmp_path),
+            settings=OrchestratorSettings(sandboxMode="guard", opencodeEnabled=True),
+            emit_event=_emit,
+        )
+        result = await _code_agent(
+            {"prompt": "test", "workspacePath": str(tmp_path.parent / "outside")},
+            context,
+        )
+        assert result["ok"] is False
+        assert "inside the task workspace" in result["summary"]

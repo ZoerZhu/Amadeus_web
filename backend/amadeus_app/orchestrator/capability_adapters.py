@@ -266,6 +266,17 @@ async def _code_agent(args: dict[str, Any], context: CapabilityExecutionContext)
             "summary": "OpenCode is disabled in Orchestrator settings.",
             "data": {"capability": "code_agent"},
         }
+    # === SandboxGuard path validation ===
+    sandbox_mode = str(getattr(context.settings, "sandbox_mode", "guard") or "guard")
+    guard = SandboxGuard(context.workspace_path, mode=sandbox_mode)
+    requested_workspace = str(args.get("workspacePath") or context.workspace_path)
+    if not guard.check_path(requested_workspace):
+        return {
+            "ok": False,
+            "summary": "code_agent workspace must stay inside the task workspace.",
+            "data": {"requestedPath": requested_workspace},
+        }
+    # === SandboxGuard path validation end ===
     request = CodeTaskStreamRequest(
         taskId=f"{context.task_id}-opencode",
         title=str(args.get("title") or "OpenCode 子任务"),

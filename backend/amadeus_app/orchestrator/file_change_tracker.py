@@ -28,6 +28,19 @@ class FileChangeTracker:
         self.git_baseline_dirty_paths: set[str] = set()
         self.git_baseline_untracked_paths: set[str] = set()
         self._seq = 0
+        self._backup_store: Any = None
+
+    def attach_backup_store(self, store: Any) -> None:
+        """Attach a FileBackupStore so rollback can restore deleted/moved files."""
+        self._backup_store = store
+
+    def cleanup_backups(self) -> None:
+        """Remove all on-disk backups for this task."""
+        if self._backup_store is not None:
+            try:
+                self._backup_store.cleanup()
+            except Exception:  # noqa: BLE001
+                pass
 
     async def initialize(self) -> None:
         """Called at task start. Detects Git and records baseline."""
@@ -137,6 +150,65 @@ class FileChangeTracker:
             old_snapshot=old_snapshot,
             source=source,
         )
+
+    async def record_delete(
+        self,
+        rel_path: str,
+        old_content: str | None = None,
+        source: str = "file_delete",
+    ) -> dict[str, Any] | None:
+        """Record a file deletion (non-git mode)."""
+        if self.is_git_repo:
+            return None
+        old_snapshot = old_content if (old_content and len(old_content) <= self.MAX_SNAPSHOT_SIZE) else ""
+        return await orch_storage.create_file_change(
+            self._storage,
+            task_id=self._task_id,
+            seq=self._next_seq(),
+            relative_path=rel_path,
+            change_type="deleted",
+            diff_text="",
+            old_snapshot=old_snapshot,
+            source=source,
+        )
+
+    async def record_move(
+        self,
+        src_rel: str,
+        dst_rel: str,
+        old_content: str | None = None,
+        source: str = "file_move",
+    ) -> list[dict[str, Any]]:
+        """Record a move as a delete of src + create of dst (non-git mode)."""
+        if self.is_git_repo:
+            return []
+        changes: list[dict[str, Any]] = []
+        delete_change = await self.record_delete(src_rel, old_content=old_content, source=source)
+        if delete_change:
+            changes.append(delete_change)
+        create_change = await orch_storage.create_file_change(
+            self._storage,
+            task_id=self._task_id,
+            seq=self._next_seq(),
+            relative_path=dst_rel,
+            change_type="created",
+            diff_text="",
+            old_snapshot="",
+            source=source,
+        )
+        if create_change:
+            changes.append(create_change)
+        return changes
+
+    async def record_patch(
+        self,
+        rel_path: str,
+        old_content: str | None,
+        new_content: str,
+        source: str = "file_patch",
+    ) -> dict[str, Any] | None:
+        """Record a file patch (alias for record_write with file_patch source)."""
+        return await self.record_write(rel_path, old_content, new_content, source=source)
 
     async def collect_git_diff(self) -> list[dict[str, Any]]:
         """Called at task end in Git mode. Collects all changes via git diff."""
@@ -334,6 +406,10 @@ class FileChangeTracker:
                     full_path.unlink(missing_ok=True)
                     restored += 1
                 elif change["changeType"] == "modified" and change["oldSnapshot"]:
+                    full_path.parent.mkdir(parents=True, exist_ok=True)
+                    full_path.write_text(change["oldSnapshot"], encoding="utf-8")
+                    restored += 1
+                elif change["changeType"] == "deleted" and change.get("oldSnapshot"):
                     full_path.parent.mkdir(parents=True, exist_ok=True)
                     full_path.write_text(change["oldSnapshot"], encoding="utf-8")
                     restored += 1

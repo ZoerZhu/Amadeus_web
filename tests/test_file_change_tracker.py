@@ -593,3 +593,87 @@ class TestI1TaskScopedTracker:
 
         assert runner._file_trackers["task-a"] == "tracker-a"
         assert runner._file_trackers["task-b"] == "tracker-b"
+
+
+class TestFileChangeTrackerDeleteMove:
+    @pytest.mark.asyncio
+    async def test_record_delete_non_git(self, tmp_path):
+        from backend.amadeus_app.orchestrator.file_change_tracker import FileChangeTracker
+        from backend.amadeus_app.storage import SQLiteStorage
+        from backend.amadeus_app.orchestrator import storage as orch_storage
+
+        db_path = tmp_path / "test.db"
+        storage = SQLiteStorage(str(db_path))
+        await storage.connect()
+        task = await orch_storage.create_task(
+            storage, user_id="u", title="t", prompt="p",
+            workspace_path=str(tmp_path), conversation_id=None,
+            active_skill_ids=[], settings={},
+        )
+        tracker = FileChangeTracker(storage, str(tmp_path), task["id"])
+        await tracker.initialize()
+        f = tmp_path / "old.txt"
+        f.write_text("content", encoding="utf-8")
+
+        await tracker.record_delete("old.txt", old_content="content")
+
+        changes = await orch_storage.list_file_changes(storage, task["id"])
+        assert len(changes) == 1
+        assert changes[0]["changeType"] == "deleted"
+        assert changes[0]["oldSnapshot"] == "content"
+        await storage.close()
+
+    @pytest.mark.asyncio
+    async def test_record_move_non_git(self, tmp_path):
+        from backend.amadeus_app.orchestrator.file_change_tracker import FileChangeTracker
+        from backend.amadeus_app.storage import SQLiteStorage
+        from backend.amadeus_app.orchestrator import storage as orch_storage
+
+        db_path = tmp_path / "test.db"
+        storage = SQLiteStorage(str(db_path))
+        await storage.connect()
+        task = await orch_storage.create_task(
+            storage, user_id="u", title="t", prompt="p",
+            workspace_path=str(tmp_path), conversation_id=None,
+            active_skill_ids=[], settings={},
+        )
+        tracker = FileChangeTracker(storage, str(tmp_path), task["id"])
+        await tracker.initialize()
+
+        await tracker.record_move("src.txt", "dst.txt", old_content="moved")
+
+        changes = await orch_storage.list_file_changes(storage, task["id"])
+        # Move records a delete of src + create of dst
+        types = {c["changeType"] for c in changes}
+        assert "deleted" in types
+        assert "created" in types
+        await storage.close()
+
+    @pytest.mark.asyncio
+    async def test_cleanup_backups_removes_backup_dir(self, tmp_path):
+        from backend.amadeus_app.orchestrator.file_change_tracker import FileChangeTracker
+        from backend.amadeus_app.file_tools.file_writer import FileBackupStore
+        from backend.amadeus_app.storage import SQLiteStorage
+        from backend.amadeus_app.orchestrator import storage as orch_storage
+
+        db_path = tmp_path / "test.db"
+        storage = SQLiteStorage(str(db_path))
+        await storage.connect()
+        task = await orch_storage.create_task(
+            storage, user_id="u", title="t", prompt="p",
+            workspace_path=str(tmp_path), conversation_id=None,
+            active_skill_ids=[], settings={},
+        )
+        tracker = FileChangeTracker(storage, str(tmp_path), task["id"])
+        backup_dir = tmp_path / "backups"
+        store = FileBackupStore(str(backup_dir), task_id=task["id"])
+        f = tmp_path / "x.txt"
+        f.write_text("x", encoding="utf-8")
+        store.backup(f)
+        tracker.attach_backup_store(store)
+        assert backup_dir.exists()
+
+        tracker.cleanup_backups()
+
+        assert not (backup_dir / "file_backups" / task["id"]).exists()
+        await storage.close()

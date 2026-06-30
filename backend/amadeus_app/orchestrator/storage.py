@@ -485,6 +485,70 @@ async def get_permission_request(storage: SQLiteStorage, permission_id: str) -> 
     return await storage.run_in_thread(_exec)
 
 
+async def create_file_change(
+    storage: SQLiteStorage,
+    *,
+    task_id: str,
+    seq: int,
+    relative_path: str,
+    change_type: str,
+    diff_text: str = "",
+    old_snapshot: str = "",
+    source: str = "file_write",
+) -> dict[str, Any]:
+    change_id = uuid4().hex
+    now = _now_iso()
+    record = {
+        "id": change_id,
+        "task_id": task_id,
+        "seq": seq,
+        "relative_path": relative_path,
+        "change_type": change_type,
+        "diff_text": diff_text,
+        "old_snapshot": old_snapshot,
+        "source": source,
+        "created_at": now,
+    }
+
+    def _exec(conn) -> None:
+        conn.execute(
+            """
+            INSERT INTO orchestrator_file_changes
+            (id, task_id, seq, relative_path, change_type, diff_text, old_snapshot, source, created_at)
+            VALUES (:id, :task_id, :seq, :relative_path, :change_type, :diff_text, :old_snapshot, :source, :created_at)
+            """,
+            record,
+        )
+
+    await storage.run_in_thread(_exec)
+    return _serialize_file_change_row(record)
+
+
+async def list_file_changes(storage: SQLiteStorage, task_id: str) -> list[dict[str, Any]]:
+    def _exec(conn) -> list[dict[str, Any]]:
+        rows = conn.execute(
+            "SELECT * FROM orchestrator_file_changes WHERE task_id = ? ORDER BY seq ASC",
+            (task_id,),
+        ).fetchall()
+        return [_serialize_file_change_row(row) for row in rows]
+
+    return await storage.run_in_thread(_exec)
+
+
+def _serialize_file_change_row(row) -> dict[str, Any]:
+    return {
+        "id": row["id"],
+        "taskId": row["task_id"],
+        "seq": row["seq"],
+        "relativePath": row["relative_path"],
+        "changeType": row["change_type"],
+        "diffText": row["diff_text"],
+        "oldSnapshot": row["old_snapshot"],
+        "source": row["source"],
+        "createdAt": row["created_at"],
+    }
+
+
 async def list_pending_permission_requests(storage: SQLiteStorage, task_id: str) -> list[dict[str, Any]]:
     def _exec(conn) -> list[dict[str, Any]]:
         rows = conn.execute(

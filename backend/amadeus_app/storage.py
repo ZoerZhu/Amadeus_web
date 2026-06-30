@@ -505,6 +505,22 @@ class SQLiteStorage:
 
             CREATE INDEX IF NOT EXISTS orchestrator_permission_requests_task_idx
                 ON orchestrator_permission_requests (task_id, status, created_at ASC);
+
+            CREATE TABLE IF NOT EXISTS orchestrator_file_changes (
+                id              TEXT PRIMARY KEY,
+                task_id         TEXT NOT NULL REFERENCES orchestrator_tasks(id) ON DELETE CASCADE,
+                seq             INTEGER NOT NULL,
+                relative_path   TEXT NOT NULL,
+                change_type     TEXT NOT NULL DEFAULT 'modified'
+                                CHECK (change_type IN ('modified', 'created', 'deleted')),
+                diff_text       TEXT NOT NULL DEFAULT '',
+                old_snapshot    TEXT NOT NULL DEFAULT '',
+                source          TEXT NOT NULL DEFAULT 'file_write',
+                created_at      TEXT NOT NULL
+            );
+
+            CREATE INDEX IF NOT EXISTS orchestrator_file_changes_task_idx
+                ON orchestrator_file_changes (task_id, seq ASC);
             """
         )
         app_settings_columns = {

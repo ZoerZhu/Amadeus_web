@@ -1864,3 +1864,45 @@ async def test_rollback_task_cleans_up_backup_dir(agent_storage):
             "rollback_task must clean up the FileBackupStore backup dir; "
             "tracker.cleanup_backups() is a no-op on the fresh tracker."
         )
+
+
+# ---------------------------------------------------------------------------
+# Task 10: Extend permission payload for file ops + task-scoped external write
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_file_delete_generates_permission_with_operation_payload(agent_storage, tmp_path):
+    from backend.amadeus_app.orchestrator.capability_adapters import CapabilityRegistry
+    from backend.amadeus_app.orchestrator.agent_loop_runner import AgentLoopPermissionBlocked
+
+    runner = AgentLoopRunner()
+    call_count = [0]
+
+    async def mock_call_model(*, loop_ctx, task_model, mode, emit):
+        call_count[0] += 1
+        if call_count[0] == 1:
+            return {"content": "delete file", "tool_calls": [
+                {"id": "c1", "name": "file_delete", "arguments": {"path": "trash.txt"}},
+            ], "tool_calls_raw": [], "finish_reason": "tool_calls"}
+        return {"content": "done", "tool_calls": [
+            {"id": "c2", "name": "finish", "arguments": {"summary": "done"}},
+        ], "tool_calls_raw": [], "finish_reason": "stop"}
+
+    (tmp_path / "trash.txt").write_text("bye", encoding="utf-8")
+    request = OrchestratorTaskCreateRequest(prompt="delete trash.txt", workspacePath=str(tmp_path), trustMode=True)
+    settings = OrchestratorSettings(defaultWorkspace=str(tmp_path), trustMode=True, agentLoopEnabled=True)
+    task = await orch_storage.create_task(agent_storage, user_id=DEFAULT_USER_ID, title="t", prompt=request.prompt, workspace_path=str(tmp_path), conversation_id=None, active_skill_ids=[], settings=settings.model_dump(by_alias=True), budget={})
+
+    with patch.object(runner, "_call_model", side_effect=mock_call_model):
+        await runner.run(storage=agent_storage, task_id=task["id"], request=request, settings=settings)
+
+    detail = await orch_storage.get_detail(agent_storage, task["id"])
+    assert detail["task"]["status"] == "paused"
+    perms = await orch_storage.list_pending_permission_requests(agent_storage, task["id"])
+    assert len(perms) == 1
+    assert perms[0]["toolName"] == "file_delete"
+    payload = perms[0]["payload"]
+    assert payload["operation"] == "file_delete"
+    assert "paths" in payload
+    assert payload["riskLevel"] == "dangerous"

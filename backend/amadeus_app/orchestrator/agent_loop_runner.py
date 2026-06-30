@@ -299,6 +299,17 @@ class AgentLoopRunner:
             workspace_path=workspace_path,
         )
 
+        # Task-scoped external write authorization: if the approved permission was
+        # for a cross-workspace file op, authorize that external root for this task.
+        if permission.get("payload", {}).get("outsideWorkspace"):
+            paths = permission.get("payload", {}).get("paths", [])
+            authorized = context.metadata.setdefault("authorized_external_paths", [])
+            for p in paths:
+                if p:
+                    root = str(Path(p).expanduser().resolve().parent)
+                    if root not in authorized:
+                        authorized.append(root)
+
         # If this is an ask_user question with an answer, inject it as a tool result
         perm_payload = permission.get("payload") or {}
         if perm_payload.get("questionType") == "ask_user" and "answer" in perm_payload:
@@ -870,6 +881,8 @@ class AgentLoopRunner:
 
         if not decision.allowed and not is_approved:
             arguments_preview = _json_preview(tool_args)
+            # Build the permission payload
+            file_op_payload = _build_file_op_payload(tool_name, tool_args, context, decision.risk)
             permission = await orchestrator_storage.create_permission_request(
                 storage,
                 task_id=task_id,
@@ -886,6 +899,7 @@ class AgentLoopRunner:
                     "commandPreview": str(tool_args.get("command") or "")[:200] if tool_name == "shell_exec" else "",
                     "workspacePath": context.workspace_path,
                     "round": loop_ctx.rounds + 1,
+                    **file_op_payload,
                 },
             )
             await emit(
@@ -1305,6 +1319,57 @@ def _json_preview(value: Any, limit: int = 2000) -> str:
     except TypeError:
         text = repr(value)
     return text[:limit]
+
+
+_FILE_OP_TOOLS = frozenset({
+    "file_write", "file_append", "file_patch", "file_mkdir", "file_move", "file_delete",
+})
+
+
+def _build_file_op_payload(
+    tool_name: str,
+    tool_args: dict[str, Any],
+    context: CapabilityExecutionContext,
+    risk: str,
+) -> dict[str, Any]:
+    """Build extended permission fields for file-operation tools."""
+    if tool_name not in _FILE_OP_TOOLS:
+        return {}
+    paths: list[str] = []
+    if tool_name in ("file_write", "file_append", "file_patch", "file_mkdir", "file_delete"):
+        paths = [str(tool_args.get("path") or "")]
+    elif tool_name == "file_move":
+        paths = [str(tool_args.get("src") or ""), str(tool_args.get("dst") or "")]
+    outside = any(_is_path_outside_workspace(p, context) for p in paths if p)
+    requires_hash = tool_name in ("file_write", "file_append", "file_patch")
+    diff_preview = ""
+    if tool_name == "file_patch":
+        diff_preview = f"--- old\n+++ new\n- {tool_args.get('oldText', '')[:200]}\n+ {tool_args.get('newText', '')[:200]}"
+    return {
+        "operation": tool_name,
+        "paths": paths,
+        "outsideWorkspace": outside,
+        "riskLevel": risk,
+        "diff": diff_preview,
+        "requiresHash": requires_hash,
+        "backupPreview": tool_name in ("file_delete", "file_move"),
+    }
+
+
+def _is_path_outside_workspace(path_text: str, context: CapabilityExecutionContext) -> bool:
+    if not path_text:
+        return False
+    from pathlib import Path as _Path
+    candidate = _Path(path_text).expanduser()
+    if not candidate.is_absolute():
+        candidate = _Path(context.workspace_path) / candidate
+    resolved = candidate.resolve()
+    workspace = _Path(context.workspace_path).resolve()
+    try:
+        resolved.relative_to(workspace)
+        return False
+    except ValueError:
+        return True
 
 
 default_agent_loop_runner = AgentLoopRunner()

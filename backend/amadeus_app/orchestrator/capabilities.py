@@ -9,6 +9,7 @@ from .domain import CapabilityDefinition, CapabilityRisk
 READ_CAPABILITIES = {
     "web_search",
     "file_read",
+    "file_list",
     "memory",
     "vision",
     "mcp_resource",
@@ -21,6 +22,9 @@ READ_CAPABILITIES = {
 
 WRITE_CAPABILITIES = {
     "file_write",
+    "file_append",
+    "file_patch",
+    "file_mkdir",
     "doc_writer",
     "code_agent",
     "shell_exec",
@@ -28,6 +32,8 @@ WRITE_CAPABILITIES = {
 
 DANGEROUS_CAPABILITIES = {
     "browser",
+    "file_delete",
+    "file_move",
 }
 
 
@@ -76,9 +82,15 @@ class CapabilityGateway:
 def capability_catalog() -> list[CapabilityDefinition]:
     return [
         CapabilityDefinition(name="web_search", description="Search the web through built-in or MCP-backed providers.", risk="safe", workerRoles=["researcher"]),
-        CapabilityDefinition(name="file_read", description="Read allowed workspace files.", risk="safe", workerRoles=["researcher", "coder", "writer"]),
-        CapabilityDefinition(name="code_search", description="Search code and text files through MCP-backed search or local workspace fallback.", risk="safe", workerRoles=["researcher", "coder"]),
-        CapabilityDefinition(name="file_write", description="Write non-code artifacts and files.", risk="confirm", workerRoles=["writer"]),
+        CapabilityDefinition(name="file_read", description="Read a single workspace file. Returns content, sha256, sizeBytes, mtime, encoding, truncated.", risk="safe", workerRoles=["researcher", "coder", "writer"]),
+        CapabilityDefinition(name="file_list", description="List a directory in the workspace. Returns entries with metadata.", risk="safe", workerRoles=["researcher", "coder", "writer"]),
+        CapabilityDefinition(name="code_search", description="Search code/text files. Prefers ripgrep, falls back to Python scan.", risk="safe", workerRoles=["researcher", "coder"]),
+        CapabilityDefinition(name="file_write", description="Write content to a file. Overwrites require expectedHash from a prior file_read.", risk="confirm", workerRoles=["writer"]),
+        CapabilityDefinition(name="file_append", description="Append content to a file. Existing files require expectedHash.", risk="confirm", workerRoles=["writer"]),
+        CapabilityDefinition(name="file_patch", description="Apply an exact oldText→newText replacement. Requires expectedHash.", risk="confirm", workerRoles=["coder"]),
+        CapabilityDefinition(name="file_mkdir", description="Create a directory (and parents).", risk="confirm", workerRoles=["writer"]),
+        CapabilityDefinition(name="file_move", description="Move a file. Always requires confirmation.", risk="dangerous", workerRoles=["writer"]),
+        CapabilityDefinition(name="file_delete", description="Delete a regular file or empty directory. Always requires confirmation.", risk="dangerous", workerRoles=["writer"]),
         CapabilityDefinition(name="code_agent", description="Delegate code changes and command execution to OpenCode.", risk="confirm", workerRoles=["coder"]),
         CapabilityDefinition(name="doc_writer", description="Create structured documents.", risk="confirm", workerRoles=["writer"]),
         CapabilityDefinition(name="memory", description="Recall or save structured memory.", risk="safe", workerRoles=["memory"]),

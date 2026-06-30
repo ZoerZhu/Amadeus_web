@@ -1692,3 +1692,53 @@ async def test_run_loop_cache_invalidates_after_write(agent_storage):
     file_read_count = execute_count[0]  # Total calls through mock
     # Should be 3: file_read, file_write, file_read (cache miss after write)
     assert file_read_count == 3, f"Expected 3 tool executions, got {file_read_count}"
+
+
+# ---------------------------------------------------------------------------
+# Task 8 (file-tools-upgrade plan): classification, schemas, executor tests
+# ---------------------------------------------------------------------------
+
+
+def test_file_tools_classification():
+    from backend.amadeus_app.orchestrator.capabilities import (
+        READ_CAPABILITIES, WRITE_CAPABILITIES, DANGEROUS_CAPABILITIES,
+    )
+    assert "file_list" in READ_CAPABILITIES
+    assert "file_read" in READ_CAPABILITIES
+    assert "code_search" in READ_CAPABILITIES
+    assert "file_write" in WRITE_CAPABILITIES
+    assert "file_append" in WRITE_CAPABILITIES
+    assert "file_patch" in WRITE_CAPABILITIES
+    assert "file_mkdir" in WRITE_CAPABILITIES
+    assert "file_delete" in DANGEROUS_CAPABILITIES
+    assert "file_move" in DANGEROUS_CAPABILITIES
+
+
+def test_gateway_classifies_file_delete_as_dangerous():
+    from backend.amadeus_app.orchestrator.capabilities import CapabilityGateway
+    gw = CapabilityGateway(trust_mode=True)
+    assert gw.classify("file_delete") == "dangerous"
+    assert gw.classify("file_move") == "dangerous"
+    assert gw.classify("file_write") == "confirm"
+    assert gw.classify("file_read") == "safe"
+    assert gw.classify("file_list") == "safe"
+
+
+def test_build_tool_schemas_includes_new_file_tools():
+    from backend.amadeus_app.orchestrator.agent_loop_context import build_tool_schemas
+    schemas = build_tool_schemas()
+    names = {s["function"]["name"] for s in schemas}
+    assert {"file_list", "file_read", "file_write", "file_append", "file_patch",
+            "file_mkdir", "file_move", "file_delete"} <= names
+
+
+def test_read_only_tools_includes_file_list():
+    from backend.amadeus_app.orchestrator.tool_executor import _READ_ONLY_TOOLS
+    assert "file_list" in _READ_ONLY_TOOLS
+    assert "file_read" in _READ_ONLY_TOOLS
+
+
+def test_extract_read_paths_handles_file_list():
+    from backend.amadeus_app.orchestrator.tool_executor import _extract_read_paths
+    assert _extract_read_paths("file_list", {"path": "src"}) == ["src"]
+    assert _extract_read_paths("file_read", {"path": "a.py"}) == ["a.py"]

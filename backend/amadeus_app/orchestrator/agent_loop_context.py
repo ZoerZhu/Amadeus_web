@@ -29,9 +29,12 @@ You have access to the following tools. Use them to gather information, execute 
 5. When the task is complete, call the `finish` tool with a structured summary.
 
 ## Important Rules
-- Prefer read-only tools first to gather context before making changes.
-- Use `shell_exec` only for verification and inspection (tests, lint, build). Code changes should go through `code_agent`.
-- Stay within the workspace boundary. Never access files outside the workspace.
+- Prefer read-only tools (file_list, file_read, code_search) first to gather context before making changes.
+- Before patching or overwriting a file, ALWAYS call file_read first to get the current sha256 (expectedHash). Pass that expectedHash to file_patch/file_write/file_append.
+- Use file_patch for small precise code edits (max 5 files / 300 lines). For larger or complex code changes, delegate to code_agent.
+- Use `shell_exec` only for verification and inspection (tests, lint, build).
+- file_delete and file_move always require user confirmation.
+- Stay within the workspace boundary. Cross-workspace reads are logged; cross-workspace writes require authorization.
 - Each tool call should have a clear purpose. Avoid redundant calls.
 - If a tool fails, analyze the error and decide whether to retry with different arguments or proceed differently.
 - Do not output chain-of-thought reasoning. Output only actionable plans and observations.
@@ -82,15 +85,15 @@ _CAPABILITY_TOOL_SCHEMAS: list[dict[str, Any]] = [
     {
         "type": "function",
         "function": {
-            "name": "file_read",
-            "description": "Read or list files in the workspace. Use action='list' to list directory, action='read' to read a file.",
+            "name": "file_list",
+            "description": "List a directory in the workspace. Returns entries with name, type, sizeBytes, modifiedAt. Use this to explore the workspace structure before reading files.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "action": {"type": "string", "enum": ["list", "read"], "default": "list"},
-                    "path": {"type": "string", "description": "File or directory path (relative to workspace).", "default": "."},
-                    "maxEntries": {"type": "integer", "default": 80},
-                    "maxBytes": {"type": "integer", "default": 128000},
+                    "path": {"type": "string", "description": "Directory path (relative to workspace).", "default": "."},
+                    "recursive": {"type": "boolean", "default": False},
+                    "includeHidden": {"type": "boolean", "default": False},
+                    "maxEntries": {"type": "integer", "default": 200},
                 },
             },
         },
@@ -98,16 +101,130 @@ _CAPABILITY_TOOL_SCHEMAS: list[dict[str, Any]] = [
     {
         "type": "function",
         "function": {
+            "name": "file_read",
+            "description": "Read a single file. Always call file_read first to get the current sha256 (expectedHash) before patching or overwriting. Returns content, sha256, sizeBytes, mtime, encoding, truncated.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "File path (relative to workspace, or absolute)."},
+                    "startLine": {"type": "integer", "description": "1-based start line (optional)."},
+                    "endLine": {"type": "integer", "description": "1-based end line (optional)."},
+                    "maxBytes": {"type": "integer", "default": 131072},
+                    "includeLineNumbers": {"type": "boolean", "default": False},
+                },
+                "required": ["path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "code_search",
-            "description": "Search code and text files in the workspace for a query pattern.",
+            "description": "Search code/text files for a query. Prefers ripgrep, falls back to Python scan. Results include path, line, preview, provider.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "query": {"type": "string", "description": "Search query or pattern."},
                     "path": {"type": "string", "default": "."},
                     "maxResults": {"type": "integer", "default": 50},
+                    "caseSensitive": {"type": "boolean", "default": False},
                 },
                 "required": ["query"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "file_write",
+            "description": "Write content to a file. Overwriting an existing file requires expectedHash (the sha256 returned by a prior file_read). New non-code files may omit expectedHash.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "File path (relative to workspace)."},
+                    "content": {"type": "string"},
+                    "expectedHash": {"type": "string", "description": "sha256 from a prior file_read (required for overwrites)."},
+                    "encoding": {"type": "string", "default": "utf-8"},
+                },
+                "required": ["path", "content"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "file_append",
+            "description": "Append content to a file. Existing files require expectedHash from a prior file_read.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "content": {"type": "string"},
+                    "expectedHash": {"type": "string"},
+                    "encoding": {"type": "string", "default": "utf-8"},
+                },
+                "required": ["path", "content"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "file_patch",
+            "description": "Apply an exact oldText→newText replacement to a file. Requires expectedHash from a prior file_read. Rejects if oldText is not found or matches multiple locations. Use for small precise edits; delegate large changes to code_agent.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                    "oldText": {"type": "string", "description": "Exact text to replace (must be unique in the file)."},
+                    "newText": {"type": "string"},
+                    "expectedHash": {"type": "string", "description": "sha256 from a prior file_read."},
+                    "encoding": {"type": "string", "default": "utf-8"},
+                },
+                "required": ["path", "oldText", "newText", "expectedHash"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "file_mkdir",
+            "description": "Create a directory and any parent directories. No-op if it already exists.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                },
+                "required": ["path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "file_move",
+            "description": "Move a file from src to dst. Always requires confirmation. Backs up destination content if it exists.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "src": {"type": "string"},
+                    "dst": {"type": "string"},
+                },
+                "required": ["src", "dst"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "file_delete",
+            "description": "Delete a regular file or an empty directory. Non-empty directories are rejected (no recursive delete). Always requires confirmation. Backs up content before deletion.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string"},
+                },
+                "required": ["path"],
             },
         },
     },

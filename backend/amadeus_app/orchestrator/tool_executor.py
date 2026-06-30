@@ -86,7 +86,7 @@ class ToolCache:
 
 def _extract_read_paths(tool_name: str, tool_args: dict[str, Any]) -> list[str]:
     """Extract paths that a read tool touches, for path-based cache invalidation."""
-    if tool_name == "file_read":
+    if tool_name in ("file_read", "file_list"):
         path = str(tool_args.get("path") or "")
         return [path] if path else []
     if tool_name == "code_search":
@@ -101,7 +101,7 @@ def _extract_read_paths(tool_name: str, tool_args: dict[str, Any]) -> list[str]:
     return []
 
 
-_READ_ONLY_TOOLS = frozenset({"file_read", "code_search", "web_search"})
+_READ_ONLY_TOOLS = frozenset({"file_read", "file_list", "code_search", "web_search"})
 
 
 @dataclass

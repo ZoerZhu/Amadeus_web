@@ -350,6 +350,7 @@ export interface OrchestratorSettings {
   enabled: boolean;
   trustMode: boolean;
   defaultWorkspace: string;
+  allowedExternalPaths?: string[];
   maxRounds: number;
   maxToolCalls: number;
   maxRuntimeSeconds: number;
@@ -584,6 +585,13 @@ export interface OrchestratorPermissionRequest {
     context?: string;
     options?: string[];
     answer?: string;
+    // File-op extensions
+    operation?: string;
+    paths?: string[];
+    outsideWorkspace?: boolean;
+    diff?: string;
+    requiresHash?: boolean;
+    backupPreview?: boolean;
   };
 }
 

@@ -1,4 +1,4 @@
-﻿.empty-state {
+.empty-state {
   display: grid;
   flex: 1;
   place-items: center;
@@ -332,5 +332,203 @@
   line-height: 1.48;
   white-space: pre-wrap;
   word-break: break-word;
+}
+
+/* ---------------------------------------------------------------------------
+ * File-operation cards (read/search log, write confirm, diff preview, etc.)
+ * ------------------------------------------------------------------------- */
+
+.file-op-card {
+  display: grid;
+  gap: 6px;
+  padding: 9px 10px;
+  border: 1px solid rgba(0, 0, 0, 0.07);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.58);
+}
+
+.file-op-card.is-read {
+  border-left: 3px solid rgba(27, 127, 76, 0.55);
+}
+
+.file-op-card.is-write {
+  border-left: 3px solid rgba(217, 119, 6, 0.55);
+}
+
+.file-op-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.file-op-tool {
+  color: rgba(13, 13, 14, 0.78);
+  font-size: 0.78rem;
+  font-weight: 680;
+}
+
+.file-op-path {
+  display: inline-block;
+  max-width: 100%;
+  overflow: hidden;
+  padding: 1px 6px;
+  border-radius: var(--radius-pill, 999px);
+  background: rgba(13, 13, 14, 0.06);
+  color: rgba(13, 13, 14, 0.7);
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 0.72rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-op-badge {
+  flex: 0 0 auto;
+  padding: 1px 7px;
+  border-radius: var(--radius-pill, 999px);
+  background: rgba(27, 127, 76, 0.16);
+  color: #1b7f4c;
+  font-size: 0.68rem;
+  font-weight: 600;
+}
+
+.file-op-diff {
+  margin: 0;
+  border: 1px solid rgba(13, 13, 14, 0.07);
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.42);
+}
+
+.file-op-diff summary {
+  display: flex;
+  align-items: center;
+  min-height: 26px;
+  padding: 4px 8px;
+  color: rgba(13, 13, 14, 0.6);
+  cursor: pointer;
+  font-size: 0.74rem;
+  font-weight: 680;
+  list-style: none;
+}
+
+.file-op-diff summary::-webkit-details-marker {
+  display: none;
+}
+
+.file-op-diff[open] summary {
+  border-bottom: 1px solid rgba(13, 13, 14, 0.07);
+}
+
+.file-op-hash {
+  color: rgba(13, 13, 14, 0.42);
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 0.68rem;
+}
+
+/* Unified diff preview — base container. Per-line coloring hooks below
+ * apply when the diff is rendered as <span class="diff-line"> elements;
+ * the current file-op card renders the diff as plain text inside <pre>,
+ * so the container gets a monospace block style while the line hooks
+ * remain available for future per-line rendering. */
+
+.diff-preview {
+  max-height: 240px;
+  margin: 0;
+  overflow: auto;
+  padding: 8px 10px;
+  border-radius: 9px;
+  background: rgba(0, 0, 0, 0.04);
+  color: rgba(13, 13, 14, 0.74);
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 0.72rem;
+  line-height: 1.45;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.diff-line {
+  display: block;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.diff-line.is-add {
+  color: #1b7f4c;
+  background: rgba(27, 127, 76, 0.08);
+}
+
+.diff-line.is-del {
+  color: #b43b3b;
+  background: rgba(180, 59, 59, 0.08);
+}
+
+/* File-op extensions inside the orchestrator permission card */
+
+.orchestrator-permission-paths {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  margin: 6px 0;
+}
+
+.orchestrator-permission-path {
+  display: inline-block;
+  max-width: 100%;
+  overflow: hidden;
+  padding: 2px 7px;
+  border-radius: var(--radius-pill, 999px);
+  background: rgba(13, 13, 14, 0.06);
+  color: rgba(13, 13, 14, 0.72);
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 0.72rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.orchestrator-permission-outside,
+.orchestrator-permission-hash,
+.orchestrator-permission-backup {
+  display: block;
+  margin-top: 4px;
+  color: rgba(138, 91, 17, 0.95);
+  font-size: 0.72rem;
+  font-weight: 600;
+}
+
+.orchestrator-permission-outside {
+  color: #b43b3b;
+}
+
+.orchestrator-permission-diff {
+  margin-top: 6px;
+  border: 1px solid rgba(13, 13, 14, 0.08);
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.42);
+}
+
+.orchestrator-permission-diff summary {
+  display: flex;
+  align-items: center;
+  min-height: 28px;
+  padding: 5px 9px;
+  color: rgba(13, 13, 14, 0.62);
+  cursor: pointer;
+  font-size: 0.74rem;
+  font-weight: 680;
+  list-style: none;
+}
+
+.orchestrator-permission-diff summary::-webkit-details-marker {
+  display: none;
+}
+
+.orchestrator-permission-diff[open] summary {
+  border-bottom: 1px solid rgba(13, 13, 14, 0.07);
+}
+
+.orchestrator-permission-diff .diff-preview {
+  border: 0;
+  border-radius: 0;
 }
 

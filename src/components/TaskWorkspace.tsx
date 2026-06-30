@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
   AlertTriangle,
   BookOpen,
@@ -204,6 +204,44 @@ function taskMessageAttachments(event: OrchestratorTaskEvent): ChatAttachment[] 
 
 function finalAnswerPayload(event: OrchestratorTaskEvent): Record<string, unknown> {
   return event.payload && typeof event.payload === "object" ? event.payload : {};
+}
+
+const FILE_READ_TOOLS = new Set(["file_read", "file_list", "code_search"]);
+const FILE_WRITE_TOOLS = new Set(["file_write", "file_append", "file_patch", "file_mkdir", "file_move", "file_delete"]);
+
+function isFileOpEvent(event: OrchestratorTaskEvent): boolean {
+  if (event.kind !== "tool_call" && event.kind !== "tool_result") return false;
+  const name = event.name || (event.payload?.toolName as string) || "";
+  return FILE_READ_TOOLS.has(name) || FILE_WRITE_TOOLS.has(name);
+}
+
+function renderFileOpCard(event: OrchestratorTaskEvent): React.ReactNode {
+  const name = event.name || (event.payload?.toolName as string) || "";
+  const isRead = FILE_READ_TOOLS.has(name);
+  const args = (event.payload?.arguments as Record<string, unknown>) || {};
+  const data = (event.payload?.data as Record<string, unknown>) || {};
+  const paths: string[] = [];
+  if (typeof args.path === "string") paths.push(args.path);
+  if (typeof args.src === "string") paths.push(args.src);
+  if (typeof args.dst === "string") paths.push(args.dst);
+  const diff = (data.diffSummary as string) || (event.payload?.diff as string) || "";
+  const newHash = data.newHash as string | undefined;
+  return (
+    <div className={`file-op-card is-${isRead ? "read" : "write"}`} key={`${event.taskId}-${event.seq}`}>
+      <div className="file-op-head">
+        <span className="file-op-tool">{name}</span>
+        {paths.map((p, i) => (<code key={i} className="file-op-path">{p}</code>))}
+        {Boolean(event.payload?.fromCache) && <span className="file-op-badge">cached</span>}
+      </div>
+      {diff && (
+        <details className="file-op-diff">
+          <summary>diff</summary>
+          <pre className="diff-preview">{diff}</pre>
+        </details>
+      )}
+      {newHash && <small className="file-op-hash">sha256: {newHash.slice(0, 12)}…</small>}
+    </div>
+  );
 }
 
 function QuestionCard({
@@ -721,6 +759,28 @@ export function TaskWorkspace({
                   {permPayload?.workspacePath && (
                     <small className="orchestrator-permission-workspace">{permPayload.workspacePath}</small>
                   )}
+                  {permPayload?.paths && permPayload.paths.length > 0 && (
+                    <div className="orchestrator-permission-paths">
+                      {permPayload.paths.map((p, i) => (
+                        <code key={i} className="orchestrator-permission-path">{p}</code>
+                      ))}
+                    </div>
+                  )}
+                  {permPayload?.outsideWorkspace && (
+                    <small className="orchestrator-permission-outside">⚠ 路径位于工作区之外</small>
+                  )}
+                  {permPayload?.requiresHash && (
+                    <small className="orchestrator-permission-hash">需要哈希校验</small>
+                  )}
+                  {permPayload?.backupPreview && (
+                    <small className="orchestrator-permission-backup">将创建备份</small>
+                  )}
+                  {permPayload?.diff && (
+                    <details className="orchestrator-permission-diff">
+                      <summary>diff 预览</summary>
+                      <pre className="diff-preview">{permPayload.diff}</pre>
+                    </details>
+                  )}
                   <div className="orchestrator-permission-actions">
                     <button
                       className="text-icon-button is-primary"
@@ -760,6 +820,9 @@ export function TaskWorkspace({
               </summary>
               <div className="task-process-list">
                 {processEvents.slice(-40).map((event) => {
+                  if (isFileOpEvent(event)) {
+                    return renderFileOpCard(event);
+                  }
                   const detail = eventDetail(event);
                   const cmdPayload = event.kind === "command" ? event.payload : null;
                   return (

@@ -544,6 +544,17 @@ export function OrchestratorSettingsPanel({
           />
         </label>
         <label className="field">
+          <span>允许的外部路径（跨区读取/写入授权，每行一个绝对路径）</span>
+          <textarea
+            rows={3}
+            value={(normalizedOrchestrator.allowedExternalPaths || []).join("\n")}
+            onChange={(event) => updateOrchestrator({
+              allowedExternalPaths: event.target.value.split("\n").map((s) => s.trim()).filter(Boolean),
+            })}
+            placeholder="例如 D:\projects\shared"
+          />
+        </label>
+        <label className="field">
           <span>最大轮次</span>
           <input
             type="number"

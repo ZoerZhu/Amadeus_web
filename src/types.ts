@@ -363,6 +363,7 @@ export interface OrchestratorSettings {
   enabledCapabilities: string[];
   agentLoopEnabled?: boolean;
   taskModel?: Record<string, unknown>;
+  fallbackModel?: Record<string, unknown>;
 }
 
 export type McpTransport = "stdio" | "http";

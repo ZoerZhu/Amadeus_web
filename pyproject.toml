@@ -19,6 +19,7 @@ dependencies = [
     "pyinstaller>=6.0.0",
     "markitdown[all]>=0.1.6",
     "sqlite-vec>=0.1.6",
+    "mss>=9.0.1",
 ]
 
 [build-system]

@@ -647,6 +647,7 @@ export function OrchestratorSettingsPanel({
             />
           </label>
           {normalizedOrchestrator.agentLoopEnabled !== false && (
+            <>
             <div className="task-model-config">
               <div className="task-model-head">
                 <strong>任务专用模型</strong>
@@ -717,6 +718,77 @@ export function OrchestratorSettingsPanel({
                 清空（继承基础模型）
               </button>
             </div>
+            <div className="task-model-config">
+              <div className="task-model-head">
+                <strong>备用模型（Fallback）</strong>
+                <small>
+                  {(normalizedOrchestrator.fallbackModel as Record<string, unknown> | undefined)?.model
+                    ? `当前: ${String((normalizedOrchestrator.fallbackModel as Record<string, unknown>).model)}`
+                    : "空则无备用模型"}
+                </small>
+              </div>
+              <label className="field">
+                <span>Provider</span>
+                <input
+                  value={String((normalizedOrchestrator.fallbackModel as Record<string, unknown> | undefined)?.providerName ?? "")}
+                  onChange={(event) => updateOrchestrator({
+                    fallbackModel: {
+                      ...(normalizedOrchestrator.fallbackModel as Record<string, unknown> ?? {}),
+                      providerName: event.target.value,
+                    },
+                  })}
+                  placeholder="留空继承任务模型 Provider"
+                />
+              </label>
+              <label className="field">
+                <span>Base URL</span>
+                <input
+                  value={String((normalizedOrchestrator.fallbackModel as Record<string, unknown> | undefined)?.baseUrl ?? "")}
+                  onChange={(event) => updateOrchestrator({
+                    fallbackModel: {
+                      ...(normalizedOrchestrator.fallbackModel as Record<string, unknown> ?? {}),
+                      baseUrl: event.target.value,
+                    },
+                  })}
+                  placeholder="留空继承任务模型 Base URL"
+                />
+              </label>
+              <label className="field">
+                <span>模型名称</span>
+                <input
+                  value={String((normalizedOrchestrator.fallbackModel as Record<string, unknown> | undefined)?.model ?? "")}
+                  onChange={(event) => updateOrchestrator({
+                    fallbackModel: {
+                      ...(normalizedOrchestrator.fallbackModel as Record<string, unknown> ?? {}),
+                      model: event.target.value,
+                    },
+                  })}
+                  placeholder="如 gpt-4o-mini, deepseek-chat"
+                />
+              </label>
+              <label className="field">
+                <span>API Key</span>
+                <input
+                  type="password"
+                  value={String((normalizedOrchestrator.fallbackModel as Record<string, unknown> | undefined)?.apiKey ?? "")}
+                  onChange={(event) => updateOrchestrator({
+                    fallbackModel: {
+                      ...(normalizedOrchestrator.fallbackModel as Record<string, unknown> ?? {}),
+                      apiKey: event.target.value,
+                    },
+                  })}
+                  placeholder="留空继承任务模型 API Key"
+                />
+              </label>
+              <button
+                className="text-icon-button"
+                onClick={() => updateOrchestrator({ fallbackModel: {} })}
+                type="button"
+              >
+                清空（不使用备用模型）
+              </button>
+            </div>
+            </>
           )}
         </div>
         {normalizedOrchestrator.opencodeEnabled && (

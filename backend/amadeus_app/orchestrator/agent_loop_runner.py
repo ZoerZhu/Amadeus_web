@@ -476,7 +476,11 @@ class AgentLoopRunner:
             async with httpx.AsyncClient(timeout=180.0) as client:
                 async with client.stream("POST", endpoint, headers=headers, json=payload) as response:
                     if response.status_code < 200 or response.status_code >= 300:
-                        return None
+                        raise httpx.HTTPStatusError(
+                            f"HTTP {response.status_code}",
+                            request=response.request,
+                            response=response,
+                        )
 
                     async for line in response.aiter_lines():
                         if not line or not line.startswith("data: "):
@@ -534,7 +538,14 @@ class AgentLoopRunner:
                         if choice.get("finish_reason"):
                             finish_reason = str(choice["finish_reason"])
 
+        except httpx.HTTPStatusError:
+            raise  # Let retry_model_call classify and retry
+        except (httpx.TimeoutException, httpx.NetworkError, httpx.ConnectError) as net_err:
+            raise net_err  # Retryable — let retry_model_call handle backoff
         except Exception:  # noqa: BLE001
+            # Non-retryable unexpected errors (e.g. JSON parse of response body)
+            # Return None to signal failure without raising, so retry_model_call
+            # treats it as a non-retryable None result
             return None
 
         content = "".join(content_parts)

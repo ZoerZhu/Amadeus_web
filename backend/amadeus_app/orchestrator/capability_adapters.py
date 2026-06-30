@@ -1420,6 +1420,54 @@ async def _desktop_screenshot(args: dict[str, Any], context: CapabilityExecution
         }
 
 
+async def _ask_user(args: dict[str, Any], context: CapabilityExecutionContext) -> dict[str, Any]:
+    question = str(args.get("question") or "").strip()
+    if not question:
+        return {"ok": False, "summary": "ask_user requires a question.", "data": {}}
+
+    options = args.get("options") or []
+    if isinstance(options, list):
+        options = [str(o) for o in options[:4]]
+    else:
+        options = []
+
+    context_str = str(args.get("context") or "").strip()
+
+    permission = await orchestrator_storage.create_permission_request(
+        context.storage,
+        task_id=context.task_id,
+        tool_name="ask_user",
+        arguments_preview=question[:2000],
+        risk_level="safe",
+        payload={
+            "question": question,
+            "context": context_str,
+            "options": options,
+            "questionType": "ask_user",
+        },
+        question_type="ask_user",
+    )
+
+    await _emit_event(
+        context,
+        kind="question",
+        role="assistant",
+        name="ask_user",
+        status="pending",
+        summary=question,
+        payload={
+            "permissionId": permission["id"],
+            "question": question,
+            "context": context_str,
+            "options": options,
+            "questionType": "ask_user",
+        },
+    )
+
+    from .agent_loop_runner import AgentLoopPermissionBlocked
+    raise AgentLoopPermissionBlocked("ask_user", permission["id"])
+
+
 def build_default_capability_registry() -> CapabilityRegistry:
     registry = CapabilityRegistry()
     registry.register("file_read", _file_read)
@@ -1434,6 +1482,7 @@ def build_default_capability_registry() -> CapabilityRegistry:
     registry.register("code_agent", _code_agent)
     registry.register("shell_exec", _shell_exec)
     registry.register("desktop_screenshot", _desktop_screenshot)
+    registry.register("ask_user", _ask_user)
     return registry
 
 

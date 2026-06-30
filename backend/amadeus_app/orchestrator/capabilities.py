@@ -16,6 +16,7 @@ READ_CAPABILITIES = {
     "code_search",
     "todo_task",
     "desktop_screenshot",
+    "ask_user",
 }
 
 WRITE_CAPABILITIES = {
@@ -88,6 +89,7 @@ def capability_catalog() -> list[CapabilityDefinition]:
         CapabilityDefinition(name="mcp_resource", description="Read MCP resources and prompts through adapters.", risk="safe", workerRoles=["researcher"]),
         CapabilityDefinition(name="shell_exec", description="Execute shell commands in the task workspace. Low-risk commands auto-approve in trust mode; high-risk commands require permission.", risk="confirm", workerRoles=["coder"]),
         CapabilityDefinition(name="desktop_screenshot", description="Capture a desktop screenshot for visual context. Only available in Electron environment with screenshot enabled.", risk="safe", workerRoles=["researcher"]),
+        CapabilityDefinition(name="ask_user", description="Ask the user a question and wait for their answer. Use when you need clarification or a decision before proceeding.", risk="safe", workerRoles=["coordinator", "coder", "writer"]),
     ]
 
 

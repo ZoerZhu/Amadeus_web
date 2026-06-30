@@ -30,6 +30,7 @@ import {
   fetchOrchestratorTasks,
   fetchPendingPermissions,
   rejectPermission,
+  answerPermission,
   streamOrchestratorTaskEvents,
   uploadWorkspaceFile
 } from "../api";
@@ -200,6 +201,72 @@ function taskMessageAttachments(event: OrchestratorTaskEvent): ChatAttachment[] 
 
 function finalAnswerPayload(event: OrchestratorTaskEvent): Record<string, unknown> {
   return event.payload && typeof event.payload === "object" ? event.payload : {};
+}
+
+function QuestionCard({
+  permission,
+  onAnswer,
+  onSkip,
+  busy,
+}: {
+  permission: OrchestratorPermissionRequest;
+  onAnswer: (answer: string) => void;
+  onSkip: () => void;
+  busy: boolean;
+}) {
+  const [customAnswer, setCustomAnswer] = useState("");
+  const payload = permission.payload || {};
+  const options: string[] = payload.options || [];
+  const question = payload.question || "";
+  const contextStr = payload.context || "";
+
+  return (
+    <div className="orchestrator-permission-card question-card" key={permission.id}>
+      <div className="orchestrator-permission-card-head">
+        <Shield size={16} />
+        <span className="orchestrator-permission-tool">{question || permission.toolName}</span>
+      </div>
+      {contextStr && <p className="orchestrator-permission-reason">{contextStr}</p>}
+      {options.length > 0 && (
+        <div className="question-options">
+          {options.map((opt, idx) => (
+            <button
+              key={idx}
+              className="text-icon-button is-primary"
+              disabled={busy}
+              onClick={() => onAnswer(opt)}
+              type="button"
+            >
+              {opt}
+            </button>
+          ))}
+        </div>
+      )}
+      <div className="question-custom">
+        <input
+          type="text"
+          value={customAnswer}
+          onChange={(e) => setCustomAnswer(e.target.value)}
+          placeholder="自定义输入..."
+          disabled={busy}
+        />
+        <button
+          className="text-icon-button is-primary"
+          disabled={busy || !customAnswer.trim()}
+          onClick={() => onAnswer(customAnswer.trim())}
+          type="button"
+        >
+          <Send size={14} />
+        </button>
+      </div>
+      <div className="orchestrator-permission-actions">
+        <button className="text-icon-button" disabled={busy} onClick={onSkip} type="button">
+          跳过
+        </button>
+        {busy && <Loader2 className="phase-spinner" size={14} />}
+      </div>
+    </div>
+  );
 }
 
 export function TaskWorkspace({
@@ -594,6 +661,37 @@ export function TaskWorkspace({
             <div className="task-permission-stack">
               {permissions.map((permission) => {
                 const permPayload = permission.payload;
+                if (permPayload?.questionType === "ask_user" || permission.questionType === "ask_user") {
+                  return (
+                    <QuestionCard
+                      key={permission.id}
+                      permission={permission}
+                      busy={permBusy[permission.id] || false}
+                      onAnswer={async (answer) => {
+                        setPermBusy((prev) => ({ ...prev, [permission.id]: true }));
+                        try {
+                          await answerPermission(effectiveActiveId!, permission.id, answer);
+                          await refreshPermissions();
+                        } catch (err) {
+                          setError(err instanceof Error ? err.message : "回答失败");
+                        } finally {
+                          setPermBusy((prev) => ({ ...prev, [permission.id]: false }));
+                        }
+                      }}
+                      onSkip={async () => {
+                        setPermBusy((prev) => ({ ...prev, [permission.id]: true }));
+                        try {
+                          await answerPermission(effectiveActiveId!, permission.id, "User skipped the question.");
+                          await refreshPermissions();
+                        } catch (err) {
+                          setError(err instanceof Error ? err.message : "跳过失败");
+                        } finally {
+                          setPermBusy((prev) => ({ ...prev, [permission.id]: false }));
+                        }
+                      }}
+                    />
+                  );
+                }
                 return (
                 <div className={`orchestrator-permission-card is-${permission.riskLevel}`} key={permission.id}>
                   <div className="orchestrator-permission-card-head">

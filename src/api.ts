@@ -918,6 +918,25 @@ export async function rejectPermission(
   return data as OrchestratorPermissionRequest;
 }
 
+export async function answerPermission(
+  taskId: string,
+  permissionId: string,
+  answer: string
+): Promise<void> {
+  const response = await fetch(
+    `/api/orchestrator/tasks/${encodeURIComponent(taskId)}/permissions/${encodeURIComponent(permissionId)}/answer`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ answer }),
+    }
+  );
+  if (!response.ok) {
+    const data = await response.json().catch(() => ({}));
+    throw new Error(data.detail || `answer ${response.status}`);
+  }
+}
+
 function drainSseBuffer<TEvent>(
   input: string,
   onEvent: (event: TEvent) => void,

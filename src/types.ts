@@ -556,6 +556,7 @@ export interface OrchestratorPermissionRequest {
   reason: string;
   createdAt: string;
   resolvedAt: string | null;
+  questionType?: string;
   payload?: {
     toolName?: string;
     toolArguments?: Record<string, unknown>;
@@ -566,6 +567,11 @@ export interface OrchestratorPermissionRequest {
     commandPreview?: string;
     workspacePath?: string;
     round?: number;
+    questionType?: string;
+    question?: string;
+    context?: string;
+    options?: string[];
+    answer?: string;
   };
 }
 

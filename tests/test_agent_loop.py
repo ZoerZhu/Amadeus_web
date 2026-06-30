@@ -1906,3 +1906,106 @@ async def test_file_delete_generates_permission_with_operation_payload(agent_sto
     assert payload["operation"] == "file_delete"
     assert "paths" in payload
     assert payload["riskLevel"] == "dangerous"
+
+
+@pytest.mark.asyncio
+async def test_resume_from_permission_authorizes_external_path(agent_storage, tmp_path):
+    """resume_from_permission must populate authorized_external_paths for
+    cross-workspace file ops so subsequent writes to that root skip re-prompt.
+
+    Regression: the authorization block at the top of resume_from_permission
+    (appending the parent of each approved external path to
+    context.metadata["authorized_external_paths"]) had zero test coverage.
+    """
+    import tempfile
+    from pathlib import Path
+
+    # Workspace = tmp_path. External root = a separate temp dir (outside workspace).
+    with tempfile.TemporaryDirectory() as external_dir:
+        external_root = Path(external_dir).resolve()
+        external_file_a = external_root / "a.txt"
+        external_file_b = external_root / "b.txt"
+        external_file_a.write_text("A", encoding="utf-8")
+        external_file_b.write_text("B", encoding="utf-8")
+
+        runner = AgentLoopRunner()
+        call_count = [0]
+
+        async def mock_call_model(*, loop_ctx, task_model, mode, emit):
+            call_count[0] += 1
+            if call_count[0] == 1:
+                # Initial run: delete external file A -> cross-workspace permission blocked.
+                return {"content": "delete external a", "tool_calls": [
+                    {"id": "c1", "name": "file_delete", "arguments": {"path": str(external_file_a)}},
+                ], "tool_calls_raw": [], "finish_reason": "tool_calls"}
+            # Resumed run: delete external file B (same external root) + finish.
+            return {"content": "done", "tool_calls": [
+                {"id": "c2", "name": "file_delete", "arguments": {"path": str(external_file_b)}},
+                {"id": "c3", "name": "finish", "arguments": {"summary": "done"}},
+            ], "tool_calls_raw": [], "finish_reason": "stop"}
+
+        request = OrchestratorTaskCreateRequest(
+            prompt="delete external files", workspacePath=str(tmp_path), trustMode=True,
+        )
+        settings = OrchestratorSettings(
+            defaultWorkspace=str(tmp_path), trustMode=True, agentLoopEnabled=True,
+        )
+        task = await orch_storage.create_task(
+            agent_storage, user_id=DEFAULT_USER_ID, title="t", prompt=request.prompt,
+            workspace_path=str(tmp_path), conversation_id=None, active_skill_ids=[],
+            settings=settings.model_dump(by_alias=True), budget={},
+        )
+
+        # Initial run -> paused with a cross-workspace file_delete permission.
+        with patch.object(runner, "_call_model", side_effect=mock_call_model):
+            await runner.run(storage=agent_storage, task_id=task["id"], request=request, settings=settings)
+
+        perms = await orch_storage.list_pending_permission_requests(agent_storage, task["id"])
+        assert len(perms) == 1
+        perm = perms[0]
+        assert perm["toolName"] == "file_delete"
+        payload = perm["payload"]
+        assert payload["outsideWorkspace"] is True
+        assert str(external_file_a) in payload["paths"]
+
+        # Approve the cross-workspace permission.
+        approved = await orch_storage.update_permission_request_status(
+            agent_storage, perm["id"], status="approved",
+        )
+        assert approved["status"] == "approved"
+
+        # Resume, capturing the context handed to _run_loop so we can assert on
+        # authorized_external_paths while still running the real loop end-to-end.
+        real_run_loop = runner._run_loop
+        captured_contexts: list = []
+
+        async def capturing_run_loop(**kwargs):
+            captured_contexts.append(kwargs["context"])
+            return await real_run_loop(**kwargs)
+
+        with patch.object(runner, "_call_model", side_effect=mock_call_model):
+            with patch.object(runner, "_run_loop", new=capturing_run_loop):
+                await runner.resume_from_permission(
+                    storage=agent_storage, permission_id=perm["id"],
+                )
+
+        # Primary assertion: authorized_external_paths was populated with the
+        # parent (external root) of the approved cross-workspace path.
+        assert captured_contexts, "_run_loop should have been invoked on resume"
+        auth_paths = captured_contexts[0].metadata["authorized_external_paths"]
+        expected_root = str(Path(external_file_a).expanduser().resolve().parent)
+        assert expected_root in auth_paths, (
+            f"expected external root {expected_root!r} in authorized_external_paths, got {auth_paths!r}"
+        )
+
+        # End-to-end assertion: the resumed run completed without re-prompting
+        # (no new pending permission) and the authorized external write succeeded.
+        detail = await orch_storage.get_detail(agent_storage, task["id"])
+        assert detail["task"]["status"] == "done"
+
+        new_perms = await orch_storage.list_pending_permission_requests(agent_storage, task["id"])
+        assert new_perms == [], "subsequent write to authorized external root must not re-prompt"
+
+        assert not external_file_b.exists(), (
+            "external file B should have been deleted via the authorized external path"
+        )

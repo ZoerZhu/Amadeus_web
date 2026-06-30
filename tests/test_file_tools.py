@@ -1,8 +1,15 @@
 from __future__ import annotations
 import hashlib
+import os
+import tempfile
 from pathlib import Path
+from unittest.mock import patch
+
 import pytest
+import pytest_asyncio
+
 from backend.amadeus_app.file_tools.path_guard import PathGuard, compute_sha256
+from backend.amadeus_app.storage import SQLiteStorage
 
 
 def test_compute_sha256_matches_hashlib():
@@ -571,3 +578,65 @@ async def test_adapter_file_delete_nonempty_rejected(tmp_path: Path):
         "file_delete", {"path": "ne"}, ctx,
     )
     assert result["ok"] is False
+
+
+# ---------------------------------------------------------------------------
+# Task 12: Integration test — read → hash → patch → rollback end-to-end
+# ---------------------------------------------------------------------------
+
+
+@pytest_asyncio.fixture
+async def agent_storage():
+    with tempfile.TemporaryDirectory() as tmp:
+        store = SQLiteStorage(os.path.join(tmp, "test_agent.db"))
+        await store.connect()
+        await store.init_schema()
+        yield store
+        await store.close()
+
+
+@pytest.mark.asyncio
+async def test_integration_read_patch_rollback_flow(agent_storage, tmp_path):
+    from backend.amadeus_app.orchestrator.capability_adapters import CapabilityRegistry
+    from backend.amadeus_app.orchestrator.agent_loop_runner import AgentLoopRunner
+    from backend.amadeus_app.orchestrator.domain import OrchestratorSettings, OrchestratorTaskCreateRequest
+    from backend.amadeus_app.orchestrator import storage as orch_storage
+    from backend.amadeus_app.storage import DEFAULT_USER_ID
+
+    f = tmp_path / "app.py"
+    f.write_text("def foo():\n    return 1\n", encoding="utf-8")
+    original = f.read_text(encoding="utf-8")
+
+    runner = AgentLoopRunner()
+    step = [0]
+
+    async def mock_model(*, loop_ctx, task_model, mode, emit):
+        step[0] += 1
+        if step[0] == 1:
+            return {"content": "read file", "tool_calls": [
+                {"id": "c1", "name": "file_read", "arguments": {"path": "app.py"}},
+            ], "tool_calls_raw": [], "finish_reason": "tool_calls"}
+        if step[0] == 2:
+            return {"content": "patch file", "tool_calls": [
+                {"id": "c2", "name": "file_patch", "arguments": {
+                    "path": "app.py", "oldText": "return 1", "newText": "return 2",
+                    "expectedHash": compute_sha256(original),
+                }},
+            ], "tool_calls_raw": [], "finish_reason": "tool_calls"}
+        return {"content": "done", "tool_calls": [
+            {"id": "c3", "name": "finish", "arguments": {"summary": "patched"}},
+        ], "tool_calls_raw": [], "finish_reason": "stop"}
+
+    request = OrchestratorTaskCreateRequest(prompt="patch app.py", workspacePath=str(tmp_path), trustMode=True)
+    settings = OrchestratorSettings(defaultWorkspace=str(tmp_path), trustMode=True, agentLoopEnabled=True)
+    task = await orch_storage.create_task(agent_storage, user_id=DEFAULT_USER_ID, title="t", prompt=request.prompt, workspace_path=str(tmp_path), conversation_id=None, active_skill_ids=[], settings=settings.model_dump(by_alias=True), budget={})
+
+    with patch.object(runner, "_call_model", side_effect=mock_model):
+        await runner.run(storage=agent_storage, task_id=task["id"], request=request, settings=settings)
+
+    assert f.read_text(encoding="utf-8") == "def foo():\n    return 2\n"
+    detail = await orch_storage.get_detail(agent_storage, task["id"])
+    assert detail["task"]["status"] == "done"
+    # Rollback restores original
+    await runner.rollback_task(storage=agent_storage, task_id=task["id"])
+    assert f.read_text(encoding="utf-8") == original

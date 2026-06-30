@@ -386,7 +386,6 @@ class TestFileWriteTracking:
             {
                 "path": "existing.txt",
                 "content": "new content",
-                "allowCodeFiles": True,
                 "expectedHash": compute_sha256("original"),
             },
             context,

@@ -372,8 +372,8 @@ async def test_agent_loop_writes_events_for_multi_round(agent_storage):
                 "content": "I'll search for files first.",
                 "tool_calls": [{
                     "id": "call_1",
-                    "name": "file_read",
-                    "arguments": {"action": "list", "path": "."},
+                    "name": "file_list",
+                    "arguments": {"path": "."},
                 }],
                 "tool_calls_raw": [],
                 "finish_reason": "tool_calls",
@@ -543,8 +543,8 @@ async def test_agent_loop_cancellation_between_rounds(agent_storage):
                 "content": "Working...",
                 "tool_calls": [{
                     "id": "call_1",
-                    "name": "file_read",
-                    "arguments": {"action": "list", "path": "."},
+                    "name": "file_list",
+                    "arguments": {"path": "."},
                 }],
                 "tool_calls_raw": [],
                 "finish_reason": "tool_calls",
@@ -616,8 +616,8 @@ async def test_agent_loop_stops_on_max_rounds(agent_storage):
             "content": "Continuing...",
             "tool_calls": [{
                 "id": f"call_{loop_ctx.rounds}",
-                "name": "file_read",
-                "arguments": {"action": "list", "path": "."},
+                "name": "file_list",
+                "arguments": {"path": "."},
             }],
             "tool_calls_raw": [],
             "finish_reason": "tool_calls",
@@ -785,8 +785,8 @@ async def test_agent_loop_trims_context_on_many_rounds(agent_storage):
             "content": "",
             "tool_calls": [{
                 "id": f"call_{loop_ctx.rounds}",
-                "name": "file_read",
-                "arguments": {"action": "list", "path": "."},
+                "name": "file_list",
+                "arguments": {"path": "."},
             }],
             "tool_calls_raw": [],
             "finish_reason": "tool_calls",

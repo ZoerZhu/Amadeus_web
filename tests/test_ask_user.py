@@ -62,3 +62,39 @@ class TestPermissionRequestQuestionType:
             risk_level="confirm",
         )
         assert perm["questionType"] == ""
+
+
+class TestUpdatePermissionAnswer:
+    @pytest.mark.asyncio
+    async def test_update_answer_stores_in_payload(self, tmp_path):
+        db_path = tmp_path / "test.db"
+        storage = SQLiteStorage(str(db_path))
+        await storage.connect()
+
+        task = await orch_storage.create_task(
+            storage,
+            user_id="test-user",
+            title="test",
+            prompt="test",
+            workspace_path=str(tmp_path),
+            conversation_id=None,
+            active_skill_ids=[],
+            settings={},
+        )
+        task_id = task["id"]
+
+        perm = await orch_storage.create_permission_request(
+            storage,
+            task_id=task_id,
+            tool_name="ask_user",
+            arguments_preview="question",
+            risk_level="safe",
+            question_type="ask_user",
+        )
+
+        updated = await orch_storage.update_permission_answer(
+            storage, perm["id"], answer="React"
+        )
+        assert updated is not None
+        assert updated["status"] == "approved"
+        assert updated["payload"]["answer"] == "React"

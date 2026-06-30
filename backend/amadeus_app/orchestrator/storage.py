@@ -527,6 +527,41 @@ async def update_permission_request_status(
     return await storage.run_in_thread(_exec)
 
 
+async def update_permission_answer(
+    storage: SQLiteStorage,
+    permission_id: str,
+    *,
+    answer: str,
+) -> dict[str, Any] | None:
+    """Approve a permission request and store the user's answer in payload."""
+    now = _now_iso()
+
+    def _exec(conn) -> dict[str, Any] | None:
+        row = conn.execute(
+            "SELECT * FROM orchestrator_permission_requests WHERE id = ? AND status = 'pending'",
+            (permission_id,),
+        ).fetchone()
+        if row is None:
+            return None
+        existing_payload = _decode_json(row["payload_json"]) if "payload_json" in row.keys() else {}
+        existing_payload["answer"] = answer
+        conn.execute(
+            """
+            UPDATE orchestrator_permission_requests
+            SET status = 'approved', payload_json = ?, resolved_at = ?
+            WHERE id = ? AND status = 'pending'
+            """,
+            (_json_dumps(existing_payload), now, permission_id),
+        )
+        row = conn.execute(
+            "SELECT * FROM orchestrator_permission_requests WHERE id = ?",
+            (permission_id,),
+        ).fetchone()
+        return _serialize_permission_row(row) if row else None
+
+    return await storage.run_in_thread(_exec)
+
+
 async def get_detail(storage: SQLiteStorage, task_id: str) -> dict[str, Any] | None:
     task = await get_task(storage, task_id)
     if task is None:

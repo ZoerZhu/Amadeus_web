@@ -15,7 +15,13 @@ from ..code_tasks.opencode_runner import stream_opencode_task
 from ..orchestrator_integrations.mcp_client import mcp_manager
 from ..domain import CodeTaskStreamRequest
 from ..doc_writer.doc_writer_agent import run_doc_writer_agent
-from ..file_tools.file_reader import run_file_reader
+from ..file_tools.file_reader import run_file_read, run_file_list, run_file_reader
+from ..file_tools.file_writer import (
+    run_file_write, run_file_append, run_file_patch, run_file_mkdir,
+    run_file_move, run_file_delete, CodeChangeBudget, FileBackupStore, is_code_or_config,
+)
+from ..file_tools.code_search import run_code_search as _run_code_search_builtin
+from ..file_tools.path_guard import PathGuard
 from ..memory.memory_tools import handle_browse_memory_tree, handle_recall_memory, handle_save_memory
 from ..search.web_search_agent import run_web_search_agent
 from ..todo_task.todo_task_agent import run_todo_task_agent
@@ -76,9 +82,169 @@ class CapabilityRegistry:
         return result
 
 
+def _guard_for(context: CapabilityExecutionContext) -> PathGuard:
+    allowed = list(getattr(context.settings, "allowed_external_paths", []) or [])
+    # Task-scoped external authorizations (added after user approves a cross-workspace write)
+    allowed += context.metadata.get("authorized_external_paths", []) if context.metadata else []
+    return PathGuard(context.workspace_path, allowed_external_paths=allowed)
+
+
+def _is_cross_workspace(path_text: str, context: CapabilityExecutionContext) -> bool:
+    guard = _guard_for(context)
+    try:
+        resolved = guard.resolve_read(path_text)
+    except ValueError:
+        return False
+    return not guard.is_within_workspace(resolved)
+
+
+def _external_paths(context: CapabilityExecutionContext) -> list[str]:
+    allowed = list(getattr(context.settings, "allowed_external_paths", []) or [])
+    if context.metadata:
+        allowed += context.metadata.get("authorized_external_paths", [])
+    return allowed
+
+
+def _file_tracker(context: CapabilityExecutionContext):
+    return context.metadata.get("file_tracker") if context.metadata else None
+
+
+def _backup_store(context: CapabilityExecutionContext):
+    return context.metadata.get("backup_store") if context.metadata else None
+
+
+def _code_budget(context: CapabilityExecutionContext):
+    return context.metadata.get("code_change_budget") if context.metadata else None
+
+
+async def _file_list(args: dict[str, Any], context: CapabilityExecutionContext) -> dict[str, Any]:
+    path = str(args.get("path") or ".")
+    try:
+        result = await run_file_list(
+            path=path,
+            workspace_root=context.workspace_path,
+            allowed_external_paths=_external_paths(context),
+            recursive=bool(args.get("recursive", False)),
+            include_hidden=bool(args.get("includeHidden", False)),
+            max_entries=int(args.get("maxEntries") or 200),
+        )
+    except ValueError as error:
+        return {"ok": False, "summary": str(error), "data": {}}
+    return {"ok": True, "summary": f"已列出 {result.get('path', path)}。", "data": result}
+
+
 async def _file_read(args: dict[str, Any], context: CapabilityExecutionContext) -> dict[str, Any]:
-    read_args = {"action": "list", "path": ".", "maxEntries": 80, **args}
-    return await run_file_reader(read_args)
+    # Migration guard: old action-based calls are rejected
+    if "action" in args:
+        return {
+            "ok": False,
+            "summary": "file_read(action=...) is removed. Migrate to file_read (read a file) or file_list (list a directory).",
+            "data": {"legacyArgs": args},
+        }
+    path = str(args.get("path") or "")
+    if not path:
+        return {"ok": False, "summary": "file_read requires path.", "data": {}}
+    cross = _is_cross_workspace(path, context)
+    try:
+        result = await run_file_read(
+            path=path,
+            workspace_root=context.workspace_path,
+            allowed_external_paths=_external_paths(context),
+            start_line=args.get("startLine"),
+            end_line=args.get("endLine"),
+            max_bytes=int(args.get("maxBytes") or 131072),
+            include_line_numbers=bool(args.get("includeLineNumbers", False)),
+        )
+    except (ValueError, FileNotFoundError) as error:
+        return {"ok": False, "summary": str(error), "data": {}}
+    # Log cross-workspace reads
+    if cross and context.emit_event:
+        try:
+            await context.emit_event(
+                kind="working_set", role="worker", name="read_external",
+                status="done", summary=f"读取工作区外文件: {path}",
+                payload={"path": path, "taskId": context.task_id},
+            )
+        except Exception:  # noqa: BLE001
+            pass
+    return {"ok": True, "summary": f"已读取 {result.get('path', path)}。", "data": result}
+
+
+async def _file_write(args: dict[str, Any], context: CapabilityExecutionContext) -> dict[str, Any]:
+    return await run_file_write(
+        path=str(args.get("path") or ""),
+        content=str(args.get("content") or ""),
+        workspace_root=context.workspace_path,
+        expected_hash=args.get("expectedHash"),
+        encoding=str(args.get("encoding") or "utf-8"),
+        allowed_external_paths=_external_paths(context),
+        file_tracker=_file_tracker(context),
+        backup_store=_backup_store(context),
+        source="file_write",
+    )
+
+
+async def _file_append(args: dict[str, Any], context: CapabilityExecutionContext) -> dict[str, Any]:
+    return await run_file_append(
+        path=str(args.get("path") or ""),
+        content=str(args.get("content") or ""),
+        workspace_root=context.workspace_path,
+        expected_hash=args.get("expectedHash"),
+        encoding=str(args.get("encoding") or "utf-8"),
+        allowed_external_paths=_external_paths(context),
+        file_tracker=_file_tracker(context),
+        backup_store=_backup_store(context),
+        source="file_append",
+    )
+
+
+async def _file_patch(args: dict[str, Any], context: CapabilityExecutionContext) -> dict[str, Any]:
+    return await run_file_patch(
+        path=str(args.get("path") or ""),
+        old_text=str(args.get("oldText") or ""),
+        new_text=str(args.get("newText") or ""),
+        workspace_root=context.workspace_path,
+        expected_hash=str(args.get("expectedHash") or ""),
+        encoding=str(args.get("encoding") or "utf-8"),
+        allowed_external_paths=_external_paths(context),
+        file_tracker=_file_tracker(context),
+        backup_store=_backup_store(context),
+        code_change_budget=_code_budget(context),
+        source="file_patch",
+    )
+
+
+async def _file_mkdir(args: dict[str, Any], context: CapabilityExecutionContext) -> dict[str, Any]:
+    return await run_file_mkdir(
+        path=str(args.get("path") or ""),
+        workspace_root=context.workspace_path,
+        allowed_external_paths=_external_paths(context),
+        file_tracker=_file_tracker(context),
+        source="file_mkdir",
+    )
+
+
+async def _file_move(args: dict[str, Any], context: CapabilityExecutionContext) -> dict[str, Any]:
+    return await run_file_move(
+        src=str(args.get("src") or ""),
+        dst=str(args.get("dst") or ""),
+        workspace_root=context.workspace_path,
+        allowed_external_paths=_external_paths(context),
+        file_tracker=_file_tracker(context),
+        backup_store=_backup_store(context),
+        source="file_move",
+    )
+
+
+async def _file_delete(args: dict[str, Any], context: CapabilityExecutionContext) -> dict[str, Any]:
+    return await run_file_delete(
+        path=str(args.get("path") or ""),
+        workspace_root=context.workspace_path,
+        allowed_external_paths=_external_paths(context),
+        file_tracker=_file_tracker(context),
+        backup_store=_backup_store(context),
+        source="file_delete",
+    )
 
 
 async def _code_search(args: dict[str, Any], context: CapabilityExecutionContext) -> dict[str, Any]:
@@ -99,20 +265,22 @@ async def _code_search(args: dict[str, Any], context: CapabilityExecutionContext
         )
         if mcp_result is not None:
             return mcp_result
-    results = _builtin_code_search(
+    builtin = await _run_code_search_builtin(
         query=query,
-        root_path=root_path,
+        workspace_root=context.workspace_path,
+        path=str(root_path),
         max_results=max_results,
         case_sensitive=bool(args.get("caseSensitive", False)),
+        allowed_external_paths=_external_paths(context),
     )
     return {
         "ok": True,
-        "summary": f"code_search found {len(results)} local result(s).",
+        "summary": f"code_search found {len(builtin['results'])} local result(s).",
         "data": {
-            "provider": "builtin",
+            "provider": builtin["provider"],
             "query": query,
             "path": str(root_path),
-            "results": results,
+            "results": builtin["results"],
             "mcpAttempts": attempts,
         },
     }
@@ -214,68 +382,6 @@ async def _doc_writer(args: dict[str, Any], context: CapabilityExecutionContext)
         result.setdefault("artifactIds", []).append(artifact["id"])
         result.setdefault("data", {})["artifact"] = artifact
     return result
-
-
-async def _file_write(args: dict[str, Any], context: CapabilityExecutionContext) -> dict[str, Any]:
-    raw_path = str(args.get("path") or args.get("outputPath") or "").strip()
-    if not raw_path:
-        return {"ok": False, "summary": "file_write requires path.", "data": {}}
-    content = str(args.get("content") or "")
-    workspace_root = Path(context.workspace_path or ".").expanduser().resolve()
-    target_path = Path(raw_path).expanduser()
-    if not target_path.is_absolute():
-        target_path = workspace_root / target_path
-    target_path = target_path.resolve()
-    if not _is_within(target_path, workspace_root):
-        return {"ok": False, "summary": "file_write path must stay inside the task workspace.", "data": {"path": str(target_path)}}
-    if _looks_like_code_or_config(target_path) and not bool(args.get("allowCodeFiles")):
-        return {
-            "ok": False,
-            "summary": "file_write refused code/config path; use code_agent for source changes.",
-            "data": {"path": str(target_path), "suffix": target_path.suffix},
-        }
-
-    target_path.parent.mkdir(parents=True, exist_ok=True)
-    # Read old content for change tracking
-    old_content = None
-    if target_path.exists():
-        try:
-            old_content = target_path.read_text(encoding=str(args.get("encoding") or "utf-8"))
-        except Exception:  # noqa: BLE001
-            old_content = None
-    target_path.write_text(content, encoding=str(args.get("encoding") or "utf-8"))
-    # Record file change for tracking/rollback
-    file_tracker = context.metadata.get("file_tracker") if context.metadata else None
-    if file_tracker:
-        try:
-            await file_tracker.record_write(
-                rel_path=str(target_path.relative_to(workspace_root)),
-                old_content=old_content,
-                new_content=content,
-                source="file_write",
-            )
-        except Exception:  # noqa: BLE001
-            pass  # Don't fail the write if tracking fails
-    artifact = await _create_artifact_for_path(
-        context,
-        path=target_path,
-        kind=str(args.get("kind") or "file"),
-        description=str(args.get("description") or "file_write output"),
-        meta={"capability": "file_write"},
-    )
-    artifact_ids = [artifact["id"]] if artifact else []
-    # Compute relative path for cache invalidation
-    try:
-        rel_path = str(target_path.relative_to(workspace_root))
-    except ValueError:
-        rel_path = str(target_path)
-    return {
-        "ok": True,
-        "summary": f"已写入文件 {target_path.name}。",
-        "data": {"path": str(target_path), "artifact": artifact},
-        "artifactIds": artifact_ids,
-        "modified_paths": [rel_path],
-    }
 
 
 async def _code_agent(args: dict[str, Any], context: CapabilityExecutionContext) -> dict[str, Any]:
@@ -1490,9 +1596,15 @@ async def _ask_user(args: dict[str, Any], context: CapabilityExecutionContext) -
 
 def build_default_capability_registry() -> CapabilityRegistry:
     registry = CapabilityRegistry()
+    registry.register("file_list", _file_list)
     registry.register("file_read", _file_read)
     registry.register("code_search", _code_search)
     registry.register("file_write", _file_write)
+    registry.register("file_append", _file_append)
+    registry.register("file_patch", _file_patch)
+    registry.register("file_mkdir", _file_mkdir)
+    registry.register("file_move", _file_move)
+    registry.register("file_delete", _file_delete)
     registry.register("web_search", _web_search)
     registry.register("memory", _memory)
     registry.register("todo_task", _todo_task)

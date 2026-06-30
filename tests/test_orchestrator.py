@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import asyncio
 import json
@@ -804,7 +804,8 @@ async def test_code_search_falls_back_to_local_workspace(tmp_path: Path, monkeyp
     )
 
     assert result["ok"] is True
-    assert result["data"]["provider"] == "builtin"
+    # Task 7: code_search builtin now uses ripgrep when available, falling back to Python.
+    assert result["data"]["provider"] in ("builtin", "ripgrep")
     assert result["data"]["results"] == [{"path": str(source), "line": 1, "preview": "def target_func():"}]
 
 
@@ -1382,13 +1383,13 @@ async def test_file_write_adapter_records_v2_artifact(tmp_path: Path, memory_sto
         context,
     )
 
+    # Task 7: file_write adapter now delegates to run_file_write (no artifact creation).
+    # The new contract returns modified_paths + newHash for cache invalidation.
     assert result["ok"] is True
     assert (tmp_path / "notes" / "result.md").read_text(encoding="utf-8") == "hello"
-    artifacts = await orchestrator_storage.list_artifacts(memory_storage, task["id"])
-    assert len(artifacts) == 1
-    assert artifacts[0]["name"] == "result.md"
-    events = await orchestrator_storage.list_events(memory_storage, task["id"])
-    assert any(event["kind"] == "artifact" and event["artifactIds"] == [artifacts[0]["id"]] for event in events)
+    assert "modified_paths" in result
+    assert "notes/result.md" in result["modified_paths"]
+    assert result["data"]["newHash"]
 
 
 @pytest.mark.asyncio

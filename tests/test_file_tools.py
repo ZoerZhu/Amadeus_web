@@ -460,3 +460,114 @@ async def test_file_delete_non_empty_directory_rejected(tmp_path: Path):
     assert result["ok"] is False
     assert "non-empty" in result["summary"].lower() or "not empty" in result["summary"].lower()
     assert d.exists()  # unchanged
+
+
+# --- Task 7: capability adapter wiring tests ---
+from typing import Any
+
+from backend.amadeus_app.orchestrator.capability_adapters import (
+    CapabilityExecutionContext, default_capability_registry,
+)
+from backend.amadeus_app.orchestrator.domain import OrchestratorSettings
+
+
+def _make_ctx(workspace: str, **meta) -> CapabilityExecutionContext:
+    return CapabilityExecutionContext(
+        task_id="test-task", prompt="test", workspace_path=workspace,
+        settings=OrchestratorSettings(defaultWorkspace=workspace, trustMode=True),
+        metadata=meta, storage=None, emit_event=None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_adapter_file_list_uses_workspace(tmp_path: Path):
+    (tmp_path / "a.py").write_text("x", encoding="utf-8")
+    ctx = _make_ctx(str(tmp_path))
+    result = await default_capability_registry.execute("file_list", {"path": "."}, ctx)
+    assert result["ok"] is True
+    names = {e["name"] for e in result["data"]["entries"]}
+    assert "a.py" in names
+
+
+@pytest.mark.asyncio
+async def test_adapter_file_read_returns_hash(tmp_path: Path):
+    (tmp_path / "a.py").write_text("hi\n", encoding="utf-8")
+    ctx = _make_ctx(str(tmp_path))
+    result = await default_capability_registry.execute(
+        "file_read", {"path": "a.py", "includeLineNumbers": True}, ctx,
+    )
+    assert result["ok"] is True
+    assert result["data"]["sha256"] == compute_sha256("hi\n")
+
+
+@pytest.mark.asyncio
+async def test_adapter_file_read_external_logs_event(tmp_path: Path):
+    import shutil
+    import tempfile
+    external = Path(tempfile.mkdtemp(prefix="external_"))
+    try:
+        f = external / "data.txt"
+        f.write_text("ext", encoding="utf-8")
+        events: list[dict[str, Any]] = []
+
+        async def _emit(**kwargs):
+            events.append(kwargs)
+            return {}
+
+        settings = OrchestratorSettings(defaultWorkspace=str(tmp_path), trustMode=True)
+        settings.allowed_external_paths = [str(external)]
+        ctx = CapabilityExecutionContext(
+            task_id="t", prompt="p", workspace_path=str(tmp_path),
+            settings=settings, metadata={}, storage=None, emit_event=_emit,
+        )
+        result = await default_capability_registry.execute(
+            "file_read", {"path": str(f)}, ctx,
+        )
+        assert result["ok"] is True
+        assert any(e.get("name") == "read_external" for e in events)
+    finally:
+        shutil.rmtree(external, ignore_errors=True)
+
+
+@pytest.mark.asyncio
+async def test_adapter_file_write_creates_file(tmp_path: Path):
+    ctx = _make_ctx(str(tmp_path))
+    result = await default_capability_registry.execute(
+        "file_write", {"path": "out.txt", "content": "hello"}, ctx,
+    )
+    assert result["ok"] is True
+    assert (tmp_path / "out.txt").read_text(encoding="utf-8") == "hello"
+
+
+@pytest.mark.asyncio
+async def test_adapter_file_patch_requires_hash(tmp_path: Path):
+    f = tmp_path / "a.py"
+    f.write_text("old\n", encoding="utf-8")
+    ctx = _make_ctx(str(tmp_path))
+    result = await default_capability_registry.execute(
+        "file_patch", {"path": "a.py", "oldText": "old", "newText": "new"}, ctx,
+    )
+    assert result["ok"] is False
+    assert "expectedHash" in result["summary"] or "hash" in result["summary"].lower()
+
+
+@pytest.mark.asyncio
+async def test_adapter_old_file_read_action_returns_migration_error(tmp_path: Path):
+    ctx = _make_ctx(str(tmp_path))
+    result = await default_capability_registry.execute(
+        "file_read", {"action": "list", "path": "."}, ctx,
+    )
+    assert result["ok"] is False
+    assert "migrate" in result["summary"].lower() or "migration" in result["summary"].lower()
+
+
+@pytest.mark.asyncio
+async def test_adapter_file_delete_nonempty_rejected(tmp_path: Path):
+    d = tmp_path / "ne"
+    d.mkdir()
+    (d / "c.txt").write_text("x", encoding="utf-8")
+    ctx = _make_ctx(str(tmp_path))
+    result = await default_capability_registry.execute(
+        "file_delete", {"path": "ne"}, ctx,
+    )
+    assert result["ok"] is False

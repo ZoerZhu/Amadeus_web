@@ -116,6 +116,7 @@ class OrchestratorSettings(BaseModel):
     sandbox_mode: Literal["off", "guard", "strict"] = Field(
         default="guard", alias="sandboxMode"
     )
+    allowed_external_paths: list[str] = Field(default_factory=list, alias="allowedExternalPaths")
 
 
 class OrchestratorTaskCreateRequest(BaseModel):

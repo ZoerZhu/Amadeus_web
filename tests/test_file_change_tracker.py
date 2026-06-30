@@ -348,6 +348,7 @@ class TestFileWriteTracking:
         from backend.amadeus_app.orchestrator.capability_adapters import _file_write, CapabilityExecutionContext
         from backend.amadeus_app.orchestrator.domain import OrchestratorSettings
         from backend.amadeus_app.orchestrator.file_change_tracker import FileChangeTracker
+        from backend.amadeus_app.file_tools.path_guard import compute_sha256
         from backend.amadeus_app.storage import SQLiteStorage
 
         db_path = tmp_path / "test.db"
@@ -379,8 +380,15 @@ class TestFileWriteTracking:
             metadata={"file_tracker": tracker},
         )
 
+        # Task 7: file_write adapter delegates to run_file_write, which requires
+        # expectedHash when overwriting an existing file.
         result = await _file_write(
-            {"path": "existing.txt", "content": "new content", "allowCodeFiles": True},
+            {
+                "path": "existing.txt",
+                "content": "new content",
+                "allowCodeFiles": True,
+                "expectedHash": compute_sha256("original"),
+            },
             context,
         )
         assert result["ok"] is True

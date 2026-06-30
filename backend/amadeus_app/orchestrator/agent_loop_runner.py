@@ -120,6 +120,13 @@ class AgentLoopRunner:
         context.metadata["file_tracker"] = file_tracker
         self._current_file_tracker = file_tracker
 
+        # Persist git baseline ref to task context for later rollback (C1 fix)
+        if file_tracker.is_git_repo and file_tracker.git_baseline_ref:
+            task_record = await orchestrator_storage.get_task(storage, task_id)
+            task_ctx = dict(task_record.get("context") or {}) if task_record else {}
+            task_ctx["git_baseline_ref"] = file_tracker.git_baseline_ref
+            await orchestrator_storage.update_task_context(storage, task_id, task_ctx)
+
         try:
             # Reset the task-level tool result cache so entries never leak across tasks.
             self.tool_executor.cache = ToolCache()
@@ -256,6 +263,10 @@ class AgentLoopRunner:
             emit_event=_emit,
         )
 
+        # Restore the file change tracker if it survived from run() (I1 fix)
+        if hasattr(self, "_current_file_tracker") and self._current_file_tracker:
+            context.metadata["file_tracker"] = self._current_file_tracker
+
         events = await orchestrator_storage.list_events(storage, permission["taskId"])
         loop_ctx = self._rebuild_context_from_events(
             events=events,
@@ -360,7 +371,15 @@ class AgentLoopRunner:
         settings = OrchestratorSettings.model_validate(task.get("settings") or {})
         workspace_path = str(task.get("workspacePath") or settings.default_workspace or ".")
         tracker = FileChangeTracker(storage, workspace_path, task_id)
-        await tracker.initialize()
+
+        # Restore persisted git baseline ref instead of re-calling initialize()
+        # which would capture the current (post-task) HEAD (C1 fix)
+        task_ctx = task.get("context") if isinstance(task.get("context"), dict) else {}
+        persisted_ref = task_ctx.get("git_baseline_ref") if isinstance(task_ctx, dict) else None
+        if persisted_ref:
+            tracker.restore_baseline(persisted_ref)
+        else:
+            await tracker.initialize()
 
         result = await tracker.rollback()
 

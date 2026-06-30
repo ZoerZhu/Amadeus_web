@@ -170,39 +170,61 @@ class FileChangeTracker:
             return await self._rollback_git()
         return await self._rollback_snapshots()
 
+    def restore_baseline(self, ref: str) -> None:
+        """Restore a previously persisted git baseline ref without re-detecting HEAD.
+
+        Use this when the tracker is recreated after the task has already run,
+        so we don't capture the post-task HEAD instead of the pre-task baseline.
+        """
+        self.is_git_repo = True
+        self.git_baseline_ref = ref
+
     async def _rollback_git(self) -> dict[str, Any]:
         if not self.git_baseline_ref:
             return {"ok": False, "reason": "No git baseline ref recorded."}
 
+        # checkout and reset are critical — failure means rollback didn't happen.
+        # clean is best-effort: some untracked files may be locked (e.g. open DB handles).
+        critical_steps: list[tuple[str, list[str]]] = [
+            ("checkout", ["git", "checkout", "--", "."]),
+            ("reset", ["git", "reset", "--hard", self.git_baseline_ref]),
+        ]
+
+        warnings: list[str] = []
         try:
-            # Discard all working tree changes
-            proc = await asyncio.create_subprocess_exec(
-                "git", "checkout", "--", ".",
-                cwd=str(self._workspace),
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            await proc.wait()
+            for step_name, cmd in critical_steps:
+                proc = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    cwd=str(self._workspace),
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                _, stderr_bytes = await proc.communicate()
+                if proc.returncode != 0:
+                    stderr_text = stderr_bytes.decode("utf-8", errors="replace").strip()
+                    return {
+                        "ok": False,
+                        "reason": f"git {step_name} failed (exit {proc.returncode}): {stderr_text}",
+                        "method": "git",
+                        "step": step_name,
+                    }
 
-            # Reset to baseline (in case agent committed)
-            proc = await asyncio.create_subprocess_exec(
-                "git", "reset", "--hard", self.git_baseline_ref,
-                cwd=str(self._workspace),
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            await proc.wait()
-
-            # Clean untracked files created during the task
+            # Best-effort clean: remove untracked files created during the task
             proc = await asyncio.create_subprocess_exec(
                 "git", "clean", "-fd",
                 cwd=str(self._workspace),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
-            await proc.wait()
+            _, stderr_bytes = await proc.communicate()
+            if proc.returncode != 0:
+                stderr_text = stderr_bytes.decode("utf-8", errors="replace").strip()
+                warnings.append(f"git clean warnings: {stderr_text}")
 
-            return {"ok": True, "method": "git", "baselineRef": self.git_baseline_ref}
+            result: dict[str, Any] = {"ok": True, "method": "git", "baselineRef": self.git_baseline_ref}
+            if warnings:
+                result["warnings"] = warnings
+            return result
         except Exception as error:  # noqa: BLE001
             return {"ok": False, "reason": str(error)}
 

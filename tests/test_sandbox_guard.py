@@ -71,6 +71,20 @@ class TestSandboxGuardCheckCommand:
         assert result.allowed is True
         assert result.action == "pass"
 
+    def test_guard_mode_allows_path_traversal_backslash(self):
+        """I3 regression: backslash traversal is still blocked."""
+        guard = SandboxGuard(workspace_path=".", mode="guard")
+        result = guard.check_command("type ..\\..\\..\\Windows\\system32\\config\\SAM")
+        assert result.allowed is False
+        assert result.action == "block"
+
+    def test_guard_mode_blocks_forward_slash_traversal(self):
+        """I3 regression: forward-slash traversal ../ must also be blocked."""
+        guard = SandboxGuard(workspace_path=".", mode="guard")
+        result = guard.check_command("cat ../../../etc/passwd")
+        assert result.allowed is False
+        assert result.action == "block"
+
     def test_case_insensitive_blocking(self):
         guard = SandboxGuard(workspace_path=".", mode="guard")
         result = guard.check_command("FORMAT C:")
@@ -111,8 +125,9 @@ class TestSandboxGuardSanitizeEnv:
         assert "WINDIR" not in clean
         assert clean["USERPROFILE"] == str(Path("/tmp/ws").resolve())
 
-    def test_path_filters_system_dirs(self):
-        guard = SandboxGuard(workspace_path="/tmp/ws", mode="guard")
+    def test_strict_mode_filters_system_dirs_from_path(self):
+        """I2 regression: strict mode filters system dirs from PATH."""
+        guard = SandboxGuard(workspace_path="/tmp/ws", mode="strict")
         env = {
             "PATH": "C:\\Python311;C:\\Windows\\System32;C:\\Program Files\\nodejs",
         }
@@ -121,6 +136,18 @@ class TestSandboxGuardSanitizeEnv:
         assert "C:\\Python311" in path_parts
         assert not any("windows" in p.lower() for p in path_parts)
         assert not any("program files" in p.lower() for p in path_parts)
+
+    def test_guard_mode_preserves_system_dirs_in_path(self):
+        """I2 regression: guard mode must NOT filter PATH — keeps git/node/npm accessible."""
+        guard = SandboxGuard(workspace_path="/tmp/ws", mode="guard")
+        env = {
+            "PATH": "C:\\Python311;C:\\Windows\\System32;C:\\Program Files\\nodejs",
+        }
+        clean = guard.sanitize_env(env)
+        path_parts = clean["PATH"].split(";")
+        assert "C:\\Python311" in path_parts
+        assert "C:\\Windows\\System32" in path_parts
+        assert "C:\\Program Files\\nodejs" in path_parts
 
     def test_preserves_non_sensitive_keys(self):
         guard = SandboxGuard(workspace_path="/tmp/ws", mode="guard")

@@ -28,7 +28,7 @@ class SandboxGuard:
         re.compile(r"\bdiskpart", re.IGNORECASE),
         re.compile(r"\bshutdown\s+/", re.IGNORECASE),
         re.compile(r"\btaskkill\s+/f\s+/im", re.IGNORECASE),
-        re.compile(r"\.\.\\", re.IGNORECASE),
+        re.compile(r"\.\.[/\\]", re.IGNORECASE),
         re.compile(r"\brm\s+-rf\s+/", re.IGNORECASE),
         re.compile(r"\bcd\s+[A-Z]:\\Windows", re.IGNORECASE),
         re.compile(r"\bicacls\s+.*\s+/deny", re.IGNORECASE),
@@ -90,7 +90,8 @@ class SandboxGuard:
 
         clean["USERPROFILE"] = str(self._workspace)
 
-        if "PATH" in clean:
+        # Only filter PATH in strict mode — guard mode keeps system tools accessible (I2 fix)
+        if self._mode == "strict" and "PATH" in clean:
             path_parts = clean["PATH"].split(";")
             filtered = [
                 p for p in path_parts

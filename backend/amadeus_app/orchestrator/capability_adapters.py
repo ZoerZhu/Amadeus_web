@@ -1198,7 +1198,8 @@ async def _shell_exec(args: dict[str, Any], context: CapabilityExecutionContext)
     # === SandboxGuard check end ===
 
     try:
-        sanitized_env = guard.sanitize_env()
+        # Skip env sanitization when sandbox is off (I2 fix)
+        sanitized_env = guard.sanitize_env() if sandbox_mode != "off" else None
         proc = await asyncio.create_subprocess_shell(
             command,
             stdout=asyncio.subprocess.PIPE,

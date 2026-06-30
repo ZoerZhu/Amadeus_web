@@ -255,6 +255,39 @@ class AgentLoopRunner:
             workspace_path=workspace_path,
         )
 
+        # If this is an ask_user question with an answer, inject it as a tool result
+        perm_payload = permission.get("payload") or {}
+        if perm_payload.get("questionType") == "ask_user" and "answer" in perm_payload:
+            # Find the last tool_call event for ask_user to get its tool_call_id
+            tool_call_id = ""
+            tool_args: dict[str, Any] = {}
+            for event in reversed(events):
+                if event.get("kind") == "tool_call" and event.get("name") == "ask_user":
+                    payload = event.get("payload") or {}
+                    tool_call_id = str(payload.get("toolCallId") or "")
+                    tool_args = payload.get("arguments") or {}
+                    break
+            if tool_call_id:
+                # Inject the assistant message with the tool_call
+                loop_ctx.messages.append({
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [{
+                        "id": tool_call_id,
+                        "type": "function",
+                        "function": {
+                            "name": "ask_user",
+                            "arguments": json.dumps(tool_args, ensure_ascii=False),
+                        },
+                    }],
+                })
+                # Inject the tool result with the user's answer
+                loop_ctx.messages.append({
+                    "role": "tool",
+                    "tool_call_id": tool_call_id,
+                    "content": str(perm_payload["answer"]),
+                })
+
         try:
             await orchestrator_storage.update_task_status(storage, permission["taskId"], status="running")
             await _emit(

@@ -78,6 +78,7 @@ class AgentLoopRunner:
     ) -> None:
         self.capability_registry = capability_registry or default_capability_registry
         self.tool_executor = ToolExecutor(runner=self, cache=ToolCache())
+        self._file_trackers: dict[str, FileChangeTracker] = {}
 
     async def run(
         self,
@@ -114,18 +115,17 @@ class AgentLoopRunner:
             emit_event=_emit,
         )
 
-        # Initialize file change tracker
-        file_tracker = FileChangeTracker(storage, workspace_path, task_id)
-        await file_tracker.initialize()
+        # Initialize a task-scoped file change tracker.
+        file_tracker = await self._tracker_for_task(
+            storage=storage,
+            task_id=task_id,
+            workspace_path=workspace_path,
+            task_context=None,
+        )
         context.metadata["file_tracker"] = file_tracker
-        self._current_file_tracker = file_tracker
+        self._file_trackers[task_id] = file_tracker
 
-        # Persist git baseline ref to task context for later rollback (C1 fix)
-        if file_tracker.is_git_repo and file_tracker.git_baseline_ref:
-            task_record = await orchestrator_storage.get_task(storage, task_id)
-            task_ctx = dict(task_record.get("context") or {}) if task_record else {}
-            task_ctx["git_baseline_ref"] = file_tracker.git_baseline_ref
-            await orchestrator_storage.update_task_context(storage, task_id, task_ctx)
+        await self._persist_tracker_baseline(storage=storage, task_id=task_id, file_tracker=file_tracker)
 
         try:
             # Reset the task-level tool result cache so entries never leak across tasks.
@@ -197,6 +197,7 @@ class AgentLoopRunner:
                     started=started,
                     budget=budget,
                     emit=_emit,
+                    context=context,
                 )
 
         except AgentLoopPermissionBlocked as blocked:
@@ -210,7 +211,8 @@ class AgentLoopRunner:
             )
             await orchestrator_storage.update_task_status(storage, task_id, status="paused")
         except Exception as error:  # noqa: BLE001
-            self._current_file_tracker = None
+            await self._collect_file_changes(storage=storage, task_id=task_id, context=context, emit=_emit)
+            self._file_trackers.pop(task_id, None)
             await _emit(
                 kind="error",
                 role="coordinator",
@@ -263,9 +265,14 @@ class AgentLoopRunner:
             emit_event=_emit,
         )
 
-        # Restore the file change tracker if it survived from run() (I1 fix)
-        if hasattr(self, "_current_file_tracker") and self._current_file_tracker:
-            context.metadata["file_tracker"] = self._current_file_tracker
+        file_tracker = await self._tracker_for_task(
+            storage=storage,
+            task_id=permission["taskId"],
+            workspace_path=workspace_path,
+            task_context=task.get("context") if isinstance(task.get("context"), dict) else {},
+        )
+        context.metadata["file_tracker"] = file_tracker
+        self._file_trackers[permission["taskId"]] = file_tracker
 
         events = await orchestrator_storage.list_events(storage, permission["taskId"])
         loop_ctx = self._rebuild_context_from_events(
@@ -336,6 +343,7 @@ class AgentLoopRunner:
                     started=started,
                     budget=budget,
                     emit=_emit,
+                    context=context,
                 )
         except AgentLoopPermissionBlocked as blocked:
             await _emit(
@@ -348,6 +356,7 @@ class AgentLoopRunner:
             )
             await orchestrator_storage.update_task_status(storage, permission["taskId"], status="paused")
         except Exception as error:  # noqa: BLE001
+            await self._collect_file_changes(storage=storage, task_id=permission["taskId"], context=context, emit=_emit)
             await _emit(
                 kind="error",
                 role="coordinator",
@@ -377,7 +386,11 @@ class AgentLoopRunner:
         task_ctx = task.get("context") if isinstance(task.get("context"), dict) else {}
         persisted_ref = task_ctx.get("git_baseline_ref") if isinstance(task_ctx, dict) else None
         if persisted_ref:
-            tracker.restore_baseline(persisted_ref)
+            tracker.restore_baseline(
+                str(persisted_ref),
+                dirty_paths=task_ctx.get("git_baseline_dirty_paths") or [],
+                untracked_paths=task_ctx.get("git_baseline_untracked_paths") or [],
+            )
         else:
             await tracker.initialize()
 
@@ -397,6 +410,39 @@ class AgentLoopRunner:
             payload=result,
         )
         return result
+
+    async def _tracker_for_task(
+        self,
+        *,
+        storage,
+        task_id: str,
+        workspace_path: str,
+        task_context: dict[str, Any] | None,
+    ) -> FileChangeTracker:
+        existing = self._file_trackers.get(task_id)
+        if existing is not None:
+            return existing
+
+        tracker = FileChangeTracker(storage, workspace_path, task_id)
+        task_ctx = task_context if isinstance(task_context, dict) else {}
+        persisted_ref = task_ctx.get("git_baseline_ref")
+        if persisted_ref:
+            tracker.restore_baseline(
+                str(persisted_ref),
+                dirty_paths=task_ctx.get("git_baseline_dirty_paths") or [],
+                untracked_paths=task_ctx.get("git_baseline_untracked_paths") or [],
+            )
+        else:
+            await tracker.initialize()
+        return tracker
+
+    async def _persist_tracker_baseline(self, *, storage, task_id: str, file_tracker: FileChangeTracker) -> None:
+        if not file_tracker.is_git_repo or not file_tracker.git_baseline_ref:
+            return
+        task_record = await orchestrator_storage.get_task(storage, task_id)
+        task_ctx = dict(task_record.get("context") or {}) if task_record else {}
+        task_ctx.update(file_tracker.baseline_state())
+        await orchestrator_storage.update_task_context(storage, task_id, task_ctx)
 
     async def _run_loop(
         self,
@@ -1062,7 +1108,7 @@ class AgentLoopRunner:
         )
 
     async def _finish_task(
-        self, *, storage, task_id: str, started: float, budget: AgentLoopBudget, emit
+        self, *, storage, task_id: str, started: float, budget: AgentLoopBudget, emit, context=None
     ) -> None:
         elapsed = int(time.monotonic() - started)
         final_answer = await self._build_final_answer(
@@ -1076,24 +1122,7 @@ class AgentLoopRunner:
             summary=final_answer["summary"],
             payload=final_answer,
         )
-        # Collect git diff if workspace is a git repo
-        if hasattr(self, "_current_file_tracker") and self._current_file_tracker:
-            file_tracker = self._current_file_tracker
-            if file_tracker.is_git_repo:
-                try:
-                    changes = await file_tracker.collect_git_diff()
-                    if changes:
-                        await emit(
-                            kind="artifact",
-                            role="coder",
-                            name="file_changes",
-                            status="done",
-                            summary=f"Tracked {len(changes)} file change(s).",
-                            payload={"changeCount": len(changes)},
-                        )
-                except Exception:  # noqa: BLE001
-                    pass
-            self._current_file_tracker = None
+        await self._collect_file_changes(storage=storage, task_id=task_id, context=context, emit=emit)
         await emit(
             kind="done",
             role="summarizer",
@@ -1115,6 +1144,42 @@ class AgentLoopRunner:
                 "toolCalls": budget.tool_calls,
             },
         )
+
+    async def _collect_file_changes(self, *, storage, task_id: str, context, emit) -> None:
+        file_tracker = None
+        if context is not None and isinstance(getattr(context, "metadata", None), dict):
+            candidate = context.metadata.get("file_tracker")
+            if isinstance(candidate, FileChangeTracker):
+                file_tracker = candidate
+        if file_tracker is None:
+            file_tracker = self._file_trackers.get(task_id)
+        if file_tracker is None:
+            task = await orchestrator_storage.get_task(storage, task_id)
+            if task is not None:
+                settings = OrchestratorSettings.model_validate(task.get("settings") or {})
+                workspace_path = str(task.get("workspacePath") or settings.default_workspace or ".")
+                file_tracker = await self._tracker_for_task(
+                    storage=storage,
+                    task_id=task_id,
+                    workspace_path=workspace_path,
+                    task_context=task.get("context") if isinstance(task.get("context"), dict) else {},
+                )
+
+        if file_tracker is not None and file_tracker.is_git_repo:
+            try:
+                changes = await file_tracker.collect_git_diff()
+                if changes:
+                    await emit(
+                        kind="artifact",
+                        role="coder",
+                        name="file_changes",
+                        status="done",
+                        summary=f"Tracked {len(changes)} file change(s).",
+                        payload={"changeCount": len(changes)},
+                    )
+            except Exception:  # noqa: BLE001
+                pass
+        self._file_trackers.pop(task_id, None)
 
     async def _build_final_answer(
         self, *, storage, task_id: str, elapsed: int, budget: AgentLoopBudget

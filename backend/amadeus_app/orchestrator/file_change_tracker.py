@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import difflib
+import shutil
 from pathlib import Path
 from typing import Any
 
@@ -24,6 +25,8 @@ class FileChangeTracker:
         self._task_id = task_id
         self.is_git_repo: bool = False
         self.git_baseline_ref: str | None = None
+        self.git_baseline_dirty_paths: set[str] = set()
+        self.git_baseline_untracked_paths: set[str] = set()
         self._seq = 0
 
     async def initialize(self) -> None:
@@ -31,6 +34,8 @@ class FileChangeTracker:
         self.is_git_repo = await self._detect_git()
         if self.is_git_repo:
             self.git_baseline_ref = await self._git_head_ref()
+            self.git_baseline_dirty_paths = await self._git_dirty_paths()
+            self.git_baseline_untracked_paths = await self._git_untracked_paths()
 
     async def _detect_git(self) -> bool:
         try:
@@ -57,6 +62,38 @@ class FileChangeTracker:
             return stdout.decode().strip() if proc.returncode == 0 else None
         except Exception:  # noqa: BLE001
             return None
+
+    async def _git_dirty_paths(self) -> set[str]:
+        if not self.git_baseline_ref:
+            return set()
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "git", "diff", "--no-color", "--name-only", self.git_baseline_ref,
+                cwd=str(self._workspace),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, _ = await proc.communicate()
+            if proc.returncode != 0:
+                return set()
+            return {line.strip() for line in stdout.decode().splitlines() if line.strip()}
+        except Exception:  # noqa: BLE001
+            return set()
+
+    async def _git_untracked_paths(self) -> set[str]:
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                "git", "ls-files", "--others", "--exclude-standard",
+                cwd=str(self._workspace),
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, _ = await proc.communicate()
+            if proc.returncode != 0:
+                return set()
+            return {line.strip() for line in stdout.decode().splitlines() if line.strip()}
+        except Exception:  # noqa: BLE001
+            return set()
 
     def _next_seq(self) -> int:
         self._seq += 1
@@ -105,6 +142,8 @@ class FileChangeTracker:
         """Called at task end in Git mode. Collects all changes via git diff."""
         if not self.is_git_repo or not self.git_baseline_ref:
             return []
+        if await orch_storage.list_file_changes(self._storage, self._task_id):
+            return []
 
         try:
             proc = await asyncio.create_subprocess_exec(
@@ -126,6 +165,8 @@ class FileChangeTracker:
                 continue
             status_code = parts[0].strip()
             file_path = parts[1].strip()
+            if file_path in self.git_baseline_dirty_paths:
+                continue
 
             if status_code.startswith("A"):
                 change_type = "created"
@@ -146,6 +187,20 @@ class FileChangeTracker:
                 diff_text=diff_text,
                 old_snapshot="",  # Git mode doesn't need snapshots
                 source="git_diff",
+            )
+            changes.append(change)
+
+        current_untracked = await self._git_untracked_paths()
+        for file_path in sorted(current_untracked - self.git_baseline_untracked_paths):
+            change = await orch_storage.create_file_change(
+                self._storage,
+                task_id=self._task_id,
+                seq=self._next_seq(),
+                relative_path=file_path,
+                change_type="created",
+                diff_text="",
+                old_snapshot="",
+                source="git_untracked",
             )
             changes.append(change)
 
@@ -170,7 +225,13 @@ class FileChangeTracker:
             return await self._rollback_git()
         return await self._rollback_snapshots()
 
-    def restore_baseline(self, ref: str) -> None:
+    def restore_baseline(
+        self,
+        ref: str,
+        *,
+        dirty_paths: list[str] | set[str] | None = None,
+        untracked_paths: list[str] | set[str] | None = None,
+    ) -> None:
         """Restore a previously persisted git baseline ref without re-detecting HEAD.
 
         Use this when the tracker is recreated after the task has already run,
@@ -178,23 +239,62 @@ class FileChangeTracker:
         """
         self.is_git_repo = True
         self.git_baseline_ref = ref
+        self.git_baseline_dirty_paths = set(dirty_paths or [])
+        self.git_baseline_untracked_paths = set(untracked_paths or [])
+
+    def baseline_state(self) -> dict[str, Any]:
+        return {
+            "git_baseline_ref": self.git_baseline_ref,
+            "git_baseline_dirty_paths": sorted(self.git_baseline_dirty_paths),
+            "git_baseline_untracked_paths": sorted(self.git_baseline_untracked_paths),
+        }
+
+    def _change_path(self, relative_path: str) -> Path | None:
+        target = (self._workspace / relative_path).resolve()
+        try:
+            target.relative_to(self._workspace)
+        except ValueError:
+            return None
+        return target
 
     async def _rollback_git(self) -> dict[str, Any]:
         if not self.git_baseline_ref:
             return {"ok": False, "reason": "No git baseline ref recorded."}
 
-        # checkout and reset are critical — failure means rollback didn't happen.
-        # clean is best-effort: some untracked files may be locked (e.g. open DB handles).
-        critical_steps: list[tuple[str, list[str]]] = [
-            ("checkout", ["git", "checkout", "--", "."]),
-            ("reset", ["git", "reset", "--hard", self.git_baseline_ref]),
-        ]
+        changes = await orch_storage.list_file_changes(self._storage, self._task_id)
+        if not changes:
+            return {
+                "ok": False,
+                "reason": "No tracked file changes recorded for this task.",
+                "method": "git",
+                "baselineRef": self.git_baseline_ref,
+            }
 
-        warnings: list[str] = []
-        try:
-            for step_name, cmd in critical_steps:
+        restored = 0
+        errors: list[str] = []
+        for change in reversed(changes):
+            rel_path = str(change.get("relativePath") or "")
+            if not rel_path:
+                continue
+            target_path = self._change_path(rel_path)
+            if target_path is None:
+                errors.append(f"{rel_path}: path escapes workspace")
+                continue
+            change_type = change.get("changeType")
+            if change_type == "created":
+                try:
+                    if target_path.is_dir():
+                        shutil.rmtree(target_path)
+                    else:
+                        target_path.unlink(missing_ok=True)
+                    restored += 1
+                except Exception as error:  # noqa: BLE001
+                    errors.append(f"{rel_path}: {error}")
+                continue
+
+            try:
                 proc = await asyncio.create_subprocess_exec(
-                    *cmd,
+                    "git", "checkout", self.git_baseline_ref, "--", rel_path,
                     cwd=str(self._workspace),
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
@@ -202,31 +302,22 @@ class FileChangeTracker:
                 _, stderr_bytes = await proc.communicate()
                 if proc.returncode != 0:
                     stderr_text = stderr_bytes.decode("utf-8", errors="replace").strip()
-                    return {
-                        "ok": False,
-                        "reason": f"git {step_name} failed (exit {proc.returncode}): {stderr_text}",
-                        "method": "git",
-                        "step": step_name,
-                    }
+                    errors.append(f"{rel_path}: git checkout failed (exit {proc.returncode}): {stderr_text}")
+                else:
+                    restored += 1
+            except Exception as error:  # noqa: BLE001
+                errors.append(f"{rel_path}: {error}")
 
-            # Best-effort clean: remove untracked files created during the task
-            proc = await asyncio.create_subprocess_exec(
-                "git", "clean", "-fd",
-                cwd=str(self._workspace),
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            _, stderr_bytes = await proc.communicate()
-            if proc.returncode != 0:
-                stderr_text = stderr_bytes.decode("utf-8", errors="replace").strip()
-                warnings.append(f"git clean warnings: {stderr_text}")
-
-            result: dict[str, Any] = {"ok": True, "method": "git", "baselineRef": self.git_baseline_ref}
-            if warnings:
-                result["warnings"] = warnings
-            return result
-        except Exception as error:  # noqa: BLE001
-            return {"ok": False, "reason": str(error)}
+        result = {
+            "ok": len(errors) == 0,
+            "method": "git",
+            "baselineRef": self.git_baseline_ref,
+            "restored": restored,
+            "errors": errors,
+        }
+        if errors:
+            result["reason"] = "; ".join(errors[:3])
+        return result
 
     async def _rollback_snapshots(self) -> dict[str, Any]:
         changes = await orch_storage.list_file_changes(self._storage, self._task_id)
@@ -234,7 +325,10 @@ class FileChangeTracker:
         errors: list[str] = []
 
         for change in reversed(changes):
-            full_path = self._workspace / change["relativePath"]
+            full_path = self._change_path(change["relativePath"])
+            if full_path is None:
+                errors.append(f"{change['relativePath']}: path escapes workspace")
+                continue
             try:
                 if change["changeType"] == "created":
                     full_path.unlink(missing_ok=True)

@@ -265,15 +265,81 @@ class TestFileChangeTracker:
         assert (tmp_path / "base.txt").read_text() == "base"
         assert not (tmp_path / "new.txt").exists()
 
+    @pytest.mark.asyncio
+    async def test_rollback_git_preserves_preexisting_untracked_file(self, tmp_path):
+        import subprocess
+        from backend.amadeus_app.orchestrator.file_change_tracker import FileChangeTracker
+
+        subprocess.run(["git", "init"], cwd=str(tmp_path), capture_output=True)
+        subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=str(tmp_path), capture_output=True)
+        subprocess.run(["git", "config", "user.name", "Test"], cwd=str(tmp_path), capture_output=True)
+        (tmp_path / "base.txt").write_text("base")
+        subprocess.run(["git", "add", "."], cwd=str(tmp_path), capture_output=True)
+        subprocess.run(["git", "commit", "-m", "init"], cwd=str(tmp_path), capture_output=True)
+        (tmp_path / "keep.txt").write_text("preexisting user file")
+
+        db_path = tmp_path.parent / (tmp_path.name + "_db") / "test.db"
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        storage = SQLiteStorage(str(db_path))
+        await storage.connect()
+        task = await orch_storage.create_task(
+            storage, user_id="u", title="t", prompt="p",
+            workspace_path=str(tmp_path), conversation_id=None,
+            active_skill_ids=[], settings={},
+        )
+
+        tracker = FileChangeTracker(storage, str(tmp_path), task["id"])
+        await tracker.initialize()
+        (tmp_path / "new.txt").write_text("new file by task")
+        changes = await tracker.collect_git_diff()
+        assert any(change["relativePath"] == "new.txt" for change in changes)
+
+        result = await tracker.rollback()
+        assert result["ok"] is True
+        assert (tmp_path / "keep.txt").read_text() == "preexisting user file"
+        assert not (tmp_path / "new.txt").exists()
+
+    @pytest.mark.asyncio
+    async def test_rollback_git_preserves_preexisting_dirty_tracked_file(self, tmp_path):
+        import subprocess
+        from backend.amadeus_app.orchestrator.file_change_tracker import FileChangeTracker
+
+        subprocess.run(["git", "init"], cwd=str(tmp_path), capture_output=True)
+        subprocess.run(["git", "config", "user.email", "test@test.com"], cwd=str(tmp_path), capture_output=True)
+        subprocess.run(["git", "config", "user.name", "Test"], cwd=str(tmp_path), capture_output=True)
+        (tmp_path / "base.txt").write_text("base")
+        subprocess.run(["git", "add", "."], cwd=str(tmp_path), capture_output=True)
+        subprocess.run(["git", "commit", "-m", "init"], cwd=str(tmp_path), capture_output=True)
+        (tmp_path / "base.txt").write_text("user dirty before task")
+
+        db_path = tmp_path.parent / (tmp_path.name + "_db") / "test.db"
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        storage = SQLiteStorage(str(db_path))
+        await storage.connect()
+        task = await orch_storage.create_task(
+            storage, user_id="u", title="t", prompt="p",
+            workspace_path=str(tmp_path), conversation_id=None,
+            active_skill_ids=[], settings={},
+        )
+
+        tracker = FileChangeTracker(storage, str(tmp_path), task["id"])
+        await tracker.initialize()
+        (tmp_path / "new.txt").write_text("new file by task")
+        await tracker.collect_git_diff()
+
+        result = await tracker.rollback()
+        assert result["ok"] is True
+        assert (tmp_path / "base.txt").read_text() == "user dirty before task"
+        assert not (tmp_path / "new.txt").exists()
+
 
 class TestAgentLoopTrackerIntegration:
     @pytest.mark.asyncio
     async def test_runner_creates_tracker_on_run(self, tmp_path):
         """Verify that AgentLoopRunner creates a FileChangeTracker instance."""
         from backend.amadeus_app.orchestrator.agent_loop_runner import AgentLoopRunner
-        runner = AgentLoopRunner.__new__(AgentLoopRunner)
-        assert hasattr(runner, "_file_tracker") or hasattr(runner, "_current_file_tracker") or True
-        # Full integration test requires mocking the model — structural check here
+        runner = AgentLoopRunner()
+        assert isinstance(runner._file_trackers, dict)
 
 
 class TestFileWriteTracking:
@@ -419,7 +485,7 @@ class TestC1RollbackBaselineRef:
             ["git", "rev-parse", "HEAD"], cwd=str(tmp_path), capture_output=True, text=True
         ).stdout.strip()
 
-        # Place DB outside the git workspace to avoid locked-file conflicts with git clean
+        # Place DB outside the git workspace so rollback only touches task files.
         db_path = tmp_path.parent / (tmp_path.name + "_db") / "test.db"
         db_path.parent.mkdir(parents=True, exist_ok=True)
         storage = SQLiteStorage(str(db_path))
@@ -441,6 +507,10 @@ class TestC1RollbackBaselineRef:
         (tmp_path / "file.txt").write_text("modified by agent")
         subprocess.run(["git", "add", "."], cwd=str(tmp_path), capture_output=True)
         subprocess.run(["git", "commit", "-m", "agent change"], cwd=str(tmp_path), capture_output=True)
+
+        tracker = FileChangeTracker(storage, str(tmp_path), task_id)
+        tracker.restore_baseline(baseline)
+        await tracker.collect_git_diff()
 
         # Mark task as done
         await orch_storage.update_task_status(storage, task_id, status="done", finished=True)
@@ -482,6 +552,16 @@ class TestI4GitRollbackReturnCodeCheck:
             workspace_path=str(tmp_path), conversation_id=None,
             active_skill_ids=[], settings={},
         )
+        await orch_storage.create_file_change(
+            storage,
+            task_id=task["id"],
+            seq=1,
+            relative_path="file.txt",
+            change_type="modified",
+            diff_text="",
+            old_snapshot="",
+            source="git_diff",
+        )
 
         tracker = FileChangeTracker(storage, str(tmp_path), task["id"])
         # Set an invalid baseline ref that doesn't exist
@@ -492,27 +572,24 @@ class TestI4GitRollbackReturnCodeCheck:
         assert "failed" in result["reason"].lower()
 
 
-class TestI1ResumeTrackerInjection:
-    """I1 regression: resume_from_permission must inject the file tracker into context."""
+class TestI1TaskScopedTracker:
+    """I1 regression: AgentLoopRunner must not use a single shared tracker."""
 
-    def test_runner_has_current_file_tracker_attribute(self):
-        """Structural check: AgentLoopRunner should support _current_file_tracker."""
-        from backend.amadeus_app.orchestrator.agent_loop_runner import AgentLoopRunner
-        from backend.amadeus_app.orchestrator.file_change_tracker import FileChangeTracker
-
-        runner = AgentLoopRunner.__new__(AgentLoopRunner)
-        # Simulate that run() set the tracker
-        runner._current_file_tracker = "tracker-instance"
-
-        # The fix condition: hasattr checks and truthiness
-        assert hasattr(runner, "_current_file_tracker")
-        assert runner._current_file_tracker is not None
-        assert bool(runner._current_file_tracker)
-
-    def test_runner_without_tracker_does_not_inject(self):
-        """When no tracker exists (e.g. after failure), resume should not inject."""
+    def test_runner_has_task_scoped_tracker_map(self):
         from backend.amadeus_app.orchestrator.agent_loop_runner import AgentLoopRunner
 
-        runner = AgentLoopRunner.__new__(AgentLoopRunner)
-        # _current_file_tracker not set — should evaluate to falsy
-        assert not getattr(runner, "_current_file_tracker", None)
+        runner = AgentLoopRunner()
+
+        assert hasattr(runner, "_file_trackers")
+        assert isinstance(runner._file_trackers, dict)
+        assert not hasattr(runner, "_current_file_tracker")
+
+    def test_task_scoped_tracker_map_keeps_tasks_separate(self):
+        from backend.amadeus_app.orchestrator.agent_loop_runner import AgentLoopRunner
+
+        runner = AgentLoopRunner()
+        runner._file_trackers["task-a"] = "tracker-a"
+        runner._file_trackers["task-b"] = "tracker-b"
+
+        assert runner._file_trackers["task-a"] == "tracker-a"
+        assert runner._file_trackers["task-b"] == "tracker-b"

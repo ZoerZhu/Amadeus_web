@@ -130,9 +130,13 @@ class PathGuard:
             raise ValueError(f"write denied for suffix: '{path.suffix}'")
 
     def relative_to_workspace(self, path: Path) -> str:
-        """Return path relative to workspace (forward slashes), or absolute str."""
+        """Return path relative to workspace (forward slashes), or absolute str.
+
+        For external paths, returns the resolved absolute path with forward
+        slashes so ``FileChangeTracker`` can resolve it back during rollback.
+        """
         try:
             rel = path.resolve().relative_to(self._workspace)
             return str(rel).replace("\\", "/")
         except ValueError:
-            return str(path)
+            return str(path.resolve()).replace("\\", "/")

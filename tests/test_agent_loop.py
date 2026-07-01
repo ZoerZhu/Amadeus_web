@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import sqlite3
 import tempfile
 
 import pytest
@@ -339,6 +340,65 @@ def test_orchestrator_runner_falls_back_to_planner_when_disabled():
     assert runner._should_use_agent_loop(settings) is False
 
 
+def test_file_list_observation_includes_entries():
+    runner = AgentLoopRunner()
+    observation = runner._compress_observation(
+        "file_list",
+        "已列出工作区。",
+        {
+            "entries": [
+                {"name": "README.md", "path": "E:/repo/README.md", "type": "file", "sizeBytes": 1200},
+                {"name": "src", "path": "E:/repo/src", "type": "directory", "sizeBytes": 0},
+            ],
+            "truncated": False,
+        },
+        True,
+    )
+
+    assert "README.md" in observation
+    assert "src" in observation
+    assert "entries:" in observation
+
+
+def test_codebase_review_correction_after_repeated_file_list():
+    runner = AgentLoopRunner()
+    loop_ctx = AgentLoopContext(
+        system_prompt="system",
+        messages=[
+            {"role": "user", "content": "阅读并理解工作目录下的项目，并做个介绍"},
+            {"role": "tool", "name": "file_list", "content": "Tool file_list: listed"},
+            {"role": "tool", "name": "file_list", "content": "Tool file_list: listed again"},
+        ],
+    )
+
+    assert runner._needs_codebase_review_correction(
+        loop_ctx=loop_ctx,
+        prompt="阅读并理解工作目录下的项目，并做个介绍",
+    ) is True
+
+
+def test_codebase_review_finish_requires_file_read_or_search():
+    runner = AgentLoopRunner()
+    prompt = "阅读并理解工作目录下的项目，并做个介绍"
+    list_only_ctx = AgentLoopContext(
+        system_prompt="system",
+        messages=[
+            {"role": "user", "content": prompt},
+            {"role": "tool", "name": "file_list", "content": "Tool file_list: listed"},
+        ],
+    )
+    read_ctx = AgentLoopContext(
+        system_prompt="system",
+        messages=[
+            {"role": "user", "content": prompt},
+            {"role": "tool", "name": "file_read", "content": "README content"},
+        ],
+    )
+
+    assert runner._finish_needs_more_codebase_context(loop_ctx=list_only_ctx, prompt=prompt) is True
+    assert runner._finish_needs_more_codebase_context(loop_ctx=read_ctx, prompt=prompt) is False
+
+
 # ---------------------------------------------------------------------------
 # Task 12: Agent loop integration tests
 # ---------------------------------------------------------------------------
@@ -356,6 +416,121 @@ async def agent_storage():
         await store.init_schema()
         yield store
         await store.close()
+
+
+@pytest.mark.asyncio
+async def test_storage_migrates_old_orchestrator_event_kind_check():
+    old_event_kinds = (
+        "'message','status','plan','step','tool','mcp','browser','artifact',"
+        "'question','sampling','opencode_routing','error','done'"
+    )
+    now = "2026-01-01T00:00:00+00:00"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        db_path = os.path.join(tmp, "old_agent_loop.db")
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.executescript(
+                f"""
+                CREATE TABLE orchestrator_tasks (
+                    id              TEXT PRIMARY KEY,
+                    user_id         TEXT NOT NULL,
+                    title           TEXT NOT NULL DEFAULT '',
+                    prompt          TEXT NOT NULL DEFAULT '',
+                    workspace_path  TEXT NOT NULL DEFAULT '',
+                    conversation_id TEXT,
+                    status          TEXT NOT NULL DEFAULT 'created'
+                                    CHECK (status IN ('created','running','paused','cancelled','done','failed','rolled_back')),
+                    active_skill_ids TEXT NOT NULL DEFAULT '[]',
+                    settings_json   TEXT NOT NULL DEFAULT '{{}}',
+                    context_json    TEXT NOT NULL DEFAULT '{{}}',
+                    budget_json     TEXT NOT NULL DEFAULT '{{}}',
+                    error           TEXT NOT NULL DEFAULT '',
+                    created_at      TEXT NOT NULL,
+                    updated_at      TEXT NOT NULL,
+                    finished_at     TEXT
+                );
+
+                CREATE TABLE orchestrator_ledger_events (
+                    task_id         TEXT NOT NULL REFERENCES orchestrator_tasks(id) ON DELETE CASCADE,
+                    seq             INTEGER NOT NULL,
+                    kind            TEXT NOT NULL CHECK (kind IN ({old_event_kinds})),
+                    role            TEXT NOT NULL DEFAULT '',
+                    name            TEXT NOT NULL DEFAULT '',
+                    status          TEXT NOT NULL DEFAULT '',
+                    summary         TEXT NOT NULL DEFAULT '',
+                    payload_json    TEXT NOT NULL DEFAULT '{{}}',
+                    artifact_ids_json TEXT NOT NULL DEFAULT '[]',
+                    created_at      TEXT NOT NULL,
+                    PRIMARY KEY (task_id, seq)
+                );
+                """
+            )
+            conn.execute(
+                """
+                INSERT INTO orchestrator_tasks
+                (id, user_id, title, prompt, workspace_path, conversation_id, status,
+                 active_skill_ids, settings_json, context_json, budget_json, error,
+                 created_at, updated_at, finished_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    "task-old-check",
+                    "test-user",
+                    "old check",
+                    "run agent loop",
+                    tmp,
+                    None,
+                    "running",
+                    "[]",
+                    "{}",
+                    "{}",
+                    "{}",
+                    "",
+                    now,
+                    now,
+                    None,
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO orchestrator_ledger_events
+                (task_id, seq, kind, role, name, status, summary, payload_json, artifact_ids_json, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                ("task-old-check", 1, "message", "user", "", "", "hello", "{}", "[]", now),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        store = SQLiteStorage(db_path)
+        await store.connect()
+        try:
+            await orch_storage.append_event(
+                store,
+                task_id="task-old-check",
+                kind="agent_thought_summary",
+                role="assistant",
+                name="thought",
+                summary="schema migrated",
+            )
+            events = await orch_storage.list_events(store, "task-old-check")
+            assert [event["kind"] for event in events] == ["message", "agent_thought_summary"]
+
+            def _schema(conn):
+                return conn.execute(
+                    """
+                    SELECT sql FROM sqlite_master
+                    WHERE type = 'table' AND name = 'orchestrator_ledger_events'
+                    """
+                ).fetchone()["sql"]
+
+            schema_sql = await store.run_in_thread(_schema)
+            assert "'agent_thought_summary'" in schema_sql
+            assert "'working_set'" in schema_sql
+        finally:
+            await store.close()
 
 
 @pytest.mark.asyncio
@@ -643,13 +818,15 @@ async def test_agent_loop_stops_on_max_rounds(agent_storage):
             await runner.run(storage=agent_storage, task_id=task["id"], request=request, settings=settings)
 
     stored_task = await orch_storage.get_task(agent_storage, task["id"])
-    assert stored_task["status"] == "done"
+    assert stored_task["status"] == "failed"
+    assert "Reached max rounds" in stored_task["error"]
     events = await orch_storage.list_events(agent_storage, task["id"])
     status_events = [
         e for e in events
         if e["kind"] == "status" and "ended" in (e.get("summary") or "").lower()
     ]
     assert len(status_events) > 0
+    assert any(e["kind"] == "error" and e["status"] == "failed" for e in events)
 
 
 @pytest.mark.asyncio
@@ -1740,8 +1917,11 @@ def test_read_only_tools_includes_file_list():
 
 def test_extract_read_paths_handles_file_list():
     from backend.amadeus_app.orchestrator.tool_executor import _extract_read_paths
-    assert _extract_read_paths("file_list", {"path": "src"}) == ["src"]
+    # Directories get trailing slash for prefix matching; files don't.
+    assert _extract_read_paths("file_list", {"path": "src"}) == ["src/"]
+    assert _extract_read_paths("file_list", {"path": "."}) == [""]
     assert _extract_read_paths("file_read", {"path": "a.py"}) == ["a.py"]
+    assert _extract_read_paths("code_search", {"path": "."}) == [""]
 
 
 # ---------------------------------------------------------------------------

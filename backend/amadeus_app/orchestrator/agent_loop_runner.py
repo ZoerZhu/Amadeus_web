@@ -42,6 +42,66 @@ class AgentLoopPermissionBlocked(RuntimeError):
         super().__init__(f"{capability} requires permission")
 
 
+CODEBASE_REVIEW_HINT = (
+    "You have only listed directories so far. For a codebase/project overview task, "
+    "you must now inspect actual project files. Use file_read on key files such as "
+    "README.md, package.json, pyproject.toml, requirements.txt, vite.config.*, "
+    "src/App.*, src/main.*, backend entry files, or use code_search for entry points. "
+    "Do not call file_list on the same path again unless you are entering a newly discovered subdirectory."
+)
+CODEBASE_FINISH_BLOCK_HINT = (
+    "Do not finish yet. This is a codebase/project overview task, but you have not read any actual files. "
+    "Use file_read or code_search first, then summarize architecture, entry points, dependencies, and key modules."
+)
+
+
+def _looks_like_codebase_review(prompt: str) -> bool:
+    text = prompt.lower()
+    codebase_markers = (
+        "项目",
+        "代码",
+        "代码库",
+        "工作目录",
+        "工程",
+        "project",
+        "codebase",
+        "repository",
+        "repo",
+        "workspace",
+    )
+    review_markers = (
+        "阅读",
+        "理解",
+        "介绍",
+        "分析",
+        "梳理",
+        "read",
+        "understand",
+        "overview",
+        "introduce",
+        "analyze",
+        "explain",
+    )
+    return any(marker in text for marker in codebase_markers) and any(marker in text for marker in review_markers)
+
+
+def _tool_usage(messages: list[dict[str, Any]]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for message in messages:
+        if message.get("role") != "tool":
+            continue
+        name = str(message.get("name") or "")
+        if not name:
+            continue
+        counts[name] = counts.get(name, 0) + 1
+    return counts
+
+
+def _has_codebase_read_context(messages: list[dict[str, Any]]) -> bool:
+    usage = _tool_usage(messages)
+    return usage.get("file_read", 0) > 0 or usage.get("code_search", 0) > 0
+
+
 @dataclass
 class AgentLoopBudget:
     max_rounds: int = 20
@@ -209,6 +269,32 @@ class AgentLoopRunner:
                     emit=_emit,
                     context=context,
                 )
+            else:
+                task = await orchestrator_storage.get_task(storage, task_id)
+                if task is not None and task.get("status") not in {"paused", "cancelled", "rolled_back", "done", "failed"}:
+                    reason = budget.remaining_reason() or "Agent loop stopped before completion."
+                    await self._collect_file_changes(storage=storage, task_id=task_id, context=context, emit=_emit)
+                    self._file_trackers.pop(task_id, None)
+                    await _emit(
+                        kind="error",
+                        role="coordinator",
+                        name="agent_loop",
+                        status="failed",
+                        summary=reason,
+                        payload={
+                            "rounds": budget.rounds,
+                            "toolCalls": budget.tool_calls,
+                            "elapsedSeconds": budget.elapsed(),
+                        },
+                    )
+                    await orchestrator_storage.update_task_status(
+                        storage, task_id, status="failed", error=reason, finished=True,
+                        budget={
+                            "elapsedSeconds": budget.elapsed(),
+                            "rounds": budget.rounds,
+                            "toolCalls": budget.tool_calls,
+                        },
+                    )
 
         except AgentLoopPermissionBlocked as blocked:
             await _emit(
@@ -309,6 +395,8 @@ class AgentLoopRunner:
                     root = str(Path(p).expanduser().resolve().parent)
                     if root not in authorized:
                         authorized.append(root)
+                    # Also register on the tracker so rollback can resolve external paths
+                    file_tracker.add_external_root(root)
 
         # If this is an ask_user question with an answer, inject it as a tool result
         perm_payload = permission.get("payload") or {}
@@ -374,6 +462,33 @@ class AgentLoopRunner:
                     emit=_emit,
                     context=context,
                 )
+            else:
+                task = await orchestrator_storage.get_task(storage, permission["taskId"])
+                if task is not None and task.get("status") not in {"paused", "cancelled", "rolled_back", "done", "failed"}:
+                    reason = budget.remaining_reason() or "Agent loop stopped before completion."
+                    await self._collect_file_changes(storage=storage, task_id=permission["taskId"], context=context, emit=_emit)
+                    self._file_trackers.pop(permission["taskId"], None)
+                    await _emit(
+                        kind="error",
+                        role="coordinator",
+                        name="agent_loop",
+                        status="failed",
+                        summary=reason,
+                        payload={
+                            "permissionId": permission_id,
+                            "rounds": budget.rounds,
+                            "toolCalls": budget.tool_calls,
+                            "elapsedSeconds": budget.elapsed(),
+                        },
+                    )
+                    await orchestrator_storage.update_task_status(
+                        storage, permission["taskId"], status="failed", error=reason, finished=True,
+                        budget={
+                            "elapsedSeconds": budget.elapsed(),
+                            "rounds": budget.rounds,
+                            "toolCalls": budget.tool_calls,
+                        },
+                    )
         except AgentLoopPermissionBlocked as blocked:
             await _emit(
                 kind="status",
@@ -515,6 +630,20 @@ class AgentLoopRunner:
                 return False
 
             budget.rounds += 1
+            loop_ctx.rounds = budget.rounds
+            if self._needs_codebase_review_correction(loop_ctx=loop_ctx, prompt=context.prompt):
+                loop_ctx.messages.append({
+                    "role": "user",
+                    "content": CODEBASE_REVIEW_HINT,
+                })
+                await emit(
+                    kind="status",
+                    role="coordinator",
+                    name="agent_loop",
+                    status="guidance",
+                    summary="已提示 Agent 读取关键项目文件，而不是继续重复列目录。",
+                    payload={"reason": "codebase_review_requires_file_read_or_code_search"},
+                )
 
             # Trim context to fit within token budget before calling the model
             max_context_tokens = int(task_model.get("maxContextTokens") or 120000)
@@ -572,6 +701,7 @@ class AgentLoopRunner:
             non_finish_calls = [tc for tc in tool_calls if tc["name"] != "finish"]
 
             budget.tool_calls += len(tool_calls)
+            loop_ctx.tool_calls = budget.tool_calls
             if budget.is_exhausted():
                 break
 
@@ -590,6 +720,20 @@ class AgentLoopRunner:
 
             # finish runs after other tools
             if finish_tc:
+                if self._finish_needs_more_codebase_context(loop_ctx=loop_ctx, prompt=context.prompt):
+                    loop_ctx.messages.append({
+                        "role": "user",
+                        "content": CODEBASE_FINISH_BLOCK_HINT,
+                    })
+                    await emit(
+                        kind="status",
+                        role="coordinator",
+                        name="agent_loop",
+                        status="guidance",
+                        summary="已阻止过早完成：项目理解任务需要先读取关键文件。",
+                        payload={"reason": "codebase_review_finish_requires_file_read_or_code_search"},
+                    )
+                    continue
                 tool_args = finish_tc.get("arguments", {})
                 await emit(
                     kind="message",
@@ -602,12 +746,13 @@ class AgentLoopRunner:
                 return True
 
         reason = budget.remaining_reason()
+        exhausted = bool(reason)
         await emit(
             kind="status",
             role="coordinator",
             name="agent_loop",
-            status="done",
-            summary=f"Agent loop ended: {reason}",
+            status="failed" if exhausted else "done",
+            summary=f"Agent loop ended: {reason}" if reason else "Agent loop ended.",
             payload={
                 "rounds": budget.rounds,
                 "toolCalls": budget.tool_calls,
@@ -615,7 +760,7 @@ class AgentLoopRunner:
                 "reason": reason,
             },
         )
-        return True
+        return not exhausted
 
     async def _call_model(
         self,
@@ -698,7 +843,7 @@ class AgentLoopRunner:
                                             status="streaming",
                                             summary=partial[:500],
                                             payload={
-                                                "round": loop_ctx.rounds + 1,
+                                                "round": loop_ctx.rounds,
                                                 "chunk": delta["content"],
                                                 "streaming": True,
                                             },
@@ -842,7 +987,7 @@ class AgentLoopRunner:
             payload={
                 "toolCallId": tool_call_id,
                 "arguments": tool_args,
-                "round": loop_ctx.rounds + 1,
+                "round": loop_ctx.rounds,
             },
         )
 
@@ -873,7 +1018,18 @@ class AgentLoopRunner:
                 )
                 return result
 
-        decision = gateway.decide(tool_name)
+        # Path-aware decision for file-write tools: code/config and cross-workspace
+        # writes require confirmation even in trust mode.
+        if tool_name in _FILE_OP_TOOLS:
+            decision = gateway.decide_for_write(
+                tool_name,
+                tool_args,
+                workspace_path=context.workspace_path,
+                read_external_paths=_read_external_paths(context),
+                authorized_write_paths=_authorized_write_paths(context),
+            )
+        else:
+            decision = gateway.decide(tool_name)
         is_approved = (
             approved_permission is not None
             and approved_permission.get("toolName") == tool_name
@@ -898,7 +1054,7 @@ class AgentLoopRunner:
                     "reason": decision.reason,
                     "commandPreview": str(tool_args.get("command") or "")[:200] if tool_name == "shell_exec" else "",
                     "workspacePath": context.workspace_path,
-                    "round": loop_ctx.rounds + 1,
+                    "round": loop_ctx.rounds,
                     **file_op_payload,
                 },
             )
@@ -963,7 +1119,7 @@ class AgentLoopRunner:
                     "reason": "Raw MCP tool requires confirmation.",
                     "commandPreview": "",
                     "workspacePath": context.workspace_path,
-                    "round": loop_ctx.rounds + 1,
+                    "round": loop_ctx.rounds,
                 },
             )
             await emit(
@@ -1064,13 +1220,46 @@ class AgentLoopRunner:
             "content": observation,
         })
 
+    def _needs_codebase_review_correction(self, *, loop_ctx: AgentLoopContext, prompt: str) -> bool:
+        if not _looks_like_codebase_review(prompt):
+            return False
+        if any(message.get("content") == CODEBASE_REVIEW_HINT for message in loop_ctx.messages):
+            return False
+        usage = _tool_usage(loop_ctx.messages)
+        return usage.get("file_list", 0) >= 2 and usage.get("file_read", 0) == 0 and usage.get("code_search", 0) == 0
+
+    def _finish_needs_more_codebase_context(self, *, loop_ctx: AgentLoopContext, prompt: str) -> bool:
+        if not _looks_like_codebase_review(prompt):
+            return False
+        return not _has_codebase_read_context(loop_ctx.messages)
+
     def _compress_observation(
         self, tool_name: str, summary: str, data: dict[str, Any], ok: bool
     ) -> str:
         """Compress tool result into a concise observation for the model."""
         if not ok:
+            detail = str(data.get("stderr") or data.get("error") or data.get("stdout") or "").strip()
+            if detail:
+                return f"Tool {tool_name} failed: {summary}\n{detail[:3000]}"
             return f"Tool {tool_name} failed: {summary}"
         parts = [f"Tool {tool_name}: {summary}"]
+        if tool_name == "file_list":
+            entries = data.get("entries")
+            if isinstance(entries, list):
+                rendered: list[str] = []
+                for item in entries[:80]:
+                    if not isinstance(item, dict):
+                        continue
+                    item_type = str(item.get("type") or "unknown")
+                    path = str(item.get("path") or item.get("name") or "")
+                    name = str(item.get("name") or Path(path).name or path)
+                    size = item.get("sizeBytes")
+                    size_part = f" ({size} bytes)" if item_type == "file" and isinstance(size, int) else ""
+                    rendered.append(f"- [{item_type}] {name}: {path}{size_part}")
+                if rendered:
+                    parts.append("entries:\n" + "\n".join(rendered))
+                if data.get("truncated"):
+                    parts.append(f"entries truncated; skipped={data.get('skipped', 0)}")
         for key in ("stdout", "content", "markdown", "results", "query"):
             value = data.get(key)
             if value is None:
@@ -1324,6 +1513,18 @@ def _json_preview(value: Any, limit: int = 2000) -> str:
 _FILE_OP_TOOLS = frozenset({
     "file_write", "file_append", "file_patch", "file_mkdir", "file_move", "file_delete",
 })
+
+
+def _read_external_paths(context: CapabilityExecutionContext) -> list[str]:
+    """Persistent user-configured external paths (read-only, not writable)."""
+    return list(getattr(context.settings, "allowed_external_paths", []) or [])
+
+
+def _authorized_write_paths(context: CapabilityExecutionContext) -> list[str]:
+    """Task-scoped external paths authorized for writing after user approval."""
+    if not context.metadata:
+        return []
+    return list(context.metadata.get("authorized_external_paths", []) or [])
 
 
 def _build_file_op_payload(

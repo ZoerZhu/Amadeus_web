@@ -616,7 +616,9 @@ async def test_integration_read_patch_rollback_flow(agent_storage, tmp_path):
             return {"content": "read file", "tool_calls": [
                 {"id": "c1", "name": "file_read", "arguments": {"path": "app.py"}},
             ], "tool_calls_raw": [], "finish_reason": "tool_calls"}
-        if step[0] == 2:
+        if step[0] in (2, 3):
+            # Step 2: initial patch attempt (blocked by code/config confirmation).
+            # Step 3: resume after approval — re-issue the same patch.
             return {"content": "patch file", "tool_calls": [
                 {"id": "c2", "name": "file_patch", "arguments": {
                     "path": "app.py", "oldText": "return 1", "newText": "return 2",
@@ -631,8 +633,20 @@ async def test_integration_read_patch_rollback_flow(agent_storage, tmp_path):
     settings = OrchestratorSettings(defaultWorkspace=str(tmp_path), trustMode=True, agentLoopEnabled=True)
     task = await orch_storage.create_task(agent_storage, user_id=DEFAULT_USER_ID, title="t", prompt=request.prompt, workspace_path=str(tmp_path), conversation_id=None, active_skill_ids=[], settings=settings.model_dump(by_alias=True), budget={})
 
+    # Initial run: file_patch on a .py file requires confirmation even in trust mode.
     with patch.object(runner, "_call_model", side_effect=mock_model):
         await runner.run(storage=agent_storage, task_id=task["id"], request=request, settings=settings)
+
+    detail = await orch_storage.get_detail(agent_storage, task["id"])
+    assert detail["task"]["status"] == "paused"
+    perms = await orch_storage.list_pending_permission_requests(agent_storage, task["id"])
+    assert len(perms) == 1
+    assert perms[0]["toolName"] == "file_patch"
+
+    # Approve the permission and resume.
+    await orch_storage.update_permission_request_status(agent_storage, perms[0]["id"], status="approved")
+    with patch.object(runner, "_call_model", side_effect=mock_model):
+        await runner.resume_from_permission(storage=agent_storage, permission_id=perms[0]["id"])
 
     assert f.read_text(encoding="utf-8") == "def foo():\n    return 2\n"
     detail = await orch_storage.get_detail(agent_storage, task["id"])
@@ -651,6 +665,7 @@ async def test_integration_read_patch_rollback_flow(agent_storage, tmp_path):
 @pytest.mark.asyncio
 async def test_file_delete_records_tracker_change(tmp_path: Path):
     """run_file_delete records a 'deleted' change with oldSnapshot for rollback."""
+    from backend.amadeus_app.orchestrator import storage as orch_storage
     from backend.amadeus_app.orchestrator import storage as orch_storage
     from backend.amadeus_app.orchestrator.file_change_tracker import FileChangeTracker
 
@@ -682,6 +697,7 @@ async def test_file_delete_records_tracker_change(tmp_path: Path):
 @pytest.mark.asyncio
 async def test_file_move_records_tracker_changes(tmp_path: Path):
     """run_file_move records 'deleted' for src and 'created' for dst."""
+    from backend.amadeus_app.orchestrator import storage as orch_storage
     from backend.amadeus_app.orchestrator import storage as orch_storage
     from backend.amadeus_app.orchestrator.file_change_tracker import FileChangeTracker
 
@@ -715,6 +731,7 @@ async def test_file_move_records_tracker_changes(tmp_path: Path):
 async def test_rollback_after_delete_restores_file(tmp_path: Path):
     """Rollback after run_file_delete restores the deleted file."""
     from backend.amadeus_app.orchestrator import storage as orch_storage
+    from backend.amadeus_app.orchestrator import storage as orch_storage
     from backend.amadeus_app.orchestrator.file_change_tracker import FileChangeTracker
 
     storage = SQLiteStorage(str(tmp_path / "test.db"))
@@ -744,6 +761,7 @@ async def test_rollback_after_delete_restores_file(tmp_path: Path):
 async def test_rollback_after_move_restores_source(tmp_path: Path):
     """Rollback after run_file_move restores the source file and removes destination."""
     from backend.amadeus_app.orchestrator import storage as orch_storage
+    from backend.amadeus_app.orchestrator import storage as orch_storage
     from backend.amadeus_app.orchestrator.file_change_tracker import FileChangeTracker
 
     storage = SQLiteStorage(str(tmp_path / "test.db"))
@@ -768,4 +786,438 @@ async def test_rollback_after_move_restores_source(tmp_path: Path):
     assert result["ok"] is True
     assert (tmp_path / "src.txt").read_text(encoding="utf-8") == "move-me-back"
     assert not (tmp_path / "dst.txt").exists()
+    await storage.close()
+
+
+
+# ---------------------------------------------------------------------------
+# P1/P2 review-fix tests: trustMode policy, code budget, cross-workspace,
+# code_search external, external rollback, mkdir rollback, cache invalidation
+# ---------------------------------------------------------------------------
+
+
+# --- P1 #1: decide_for_write path-aware risk classification ---
+
+
+def test_decide_for_write_allows_new_non_code_in_trust_mode(tmp_path: Path):
+    """New non-code file in workspace auto-approves when trustMode=true."""
+    from backend.amadeus_app.orchestrator.capabilities import CapabilityGateway
+
+    gw = CapabilityGateway(trust_mode=True)
+    decision = gw.decide_for_write(
+        "file_write",
+        {"path": "notes.txt"},
+        workspace_path=str(tmp_path),
+    )
+    assert decision.allowed is True
+    assert decision.risk == "confirm"
+
+
+def test_decide_for_write_blocks_code_in_trust_mode(tmp_path: Path):
+    """Code/config file write requires confirmation even when trustMode=true."""
+    from backend.amadeus_app.orchestrator.capabilities import CapabilityGateway
+
+    gw = CapabilityGateway(trust_mode=True)
+    for suffix in (".py", ".ts", ".json", ".toml"):
+        decision = gw.decide_for_write(
+            "file_write",
+            {"path": f"new_module{suffix}"},
+            workspace_path=str(tmp_path),
+        )
+        assert decision.allowed is False, f"{suffix} should require confirmation"
+        assert "code/config" in decision.reason
+
+
+def test_decide_for_write_blocks_existing_overwrite(tmp_path: Path):
+    """Overwriting an existing non-code file requires confirmation."""
+    from backend.amadeus_app.orchestrator.capabilities import CapabilityGateway
+
+    (tmp_path / "existing.txt").write_text("old", encoding="utf-8")
+    gw = CapabilityGateway(trust_mode=True)
+    decision = gw.decide_for_write(
+        "file_write",
+        {"path": "existing.txt"},
+        workspace_path=str(tmp_path),
+    )
+    assert decision.allowed is False
+    assert "existing" in decision.reason.lower()
+
+
+def test_decide_for_write_dangerous_tools_keep_classification(tmp_path: Path):
+    """file_delete/file_move keep their dangerous base classification."""
+    from backend.amadeus_app.orchestrator.capabilities import CapabilityGateway
+
+    gw = CapabilityGateway(trust_mode=True)
+    for tool in ("file_delete", "file_move"):
+        args = {"path": "trash.txt"} if tool == "file_delete" else {"src": "a", "dst": "b"}
+        decision = gw.decide_for_write(
+            tool, args, workspace_path=str(tmp_path),
+        )
+        assert decision.risk == "dangerous"
+
+
+# --- P1 #1: CodeChangeBudget enforcement in run_file_write/append/patch ---
+
+
+@pytest.mark.asyncio
+async def test_run_file_write_rejects_when_code_budget_exceeded(tmp_path: Path):
+    """run_file_write rejects .py writes once CodeChangeBudget is exceeded."""
+    budget = CodeChangeBudget(max_files=1, max_lines=5)
+    r1 = await run_file_write(
+        path="a.py", content="x\n" * 3, workspace_root=str(tmp_path),
+        code_change_budget=budget,
+    )
+    assert r1["ok"] is True
+    r2 = await run_file_write(
+        path="b.py", content="y\n", workspace_root=str(tmp_path),
+        code_change_budget=budget,
+    )
+    assert r2["ok"] is False
+    assert "budget" in r2["summary"].lower()
+
+
+@pytest.mark.asyncio
+async def test_run_file_append_rejects_when_code_budget_exceeded(tmp_path: Path):
+    """run_file_append rejects appends to .py files once budget is exceeded."""
+    budget = CodeChangeBudget(max_files=1, max_lines=2)
+    f = tmp_path / "log.py"
+    f.write_text("base\n", encoding="utf-8")
+    r1 = await run_file_append(
+        path="log.py", content="line1\n", workspace_root=str(tmp_path),
+        expected_hash=compute_sha256("base\n"), code_change_budget=budget,
+    )
+    assert r1["ok"] is True
+    r2 = await run_file_append(
+        path="log.py", content="x\n" * 5, workspace_root=str(tmp_path),
+        expected_hash=compute_sha256("base\nline1\n"), code_change_budget=budget,
+    )
+    assert r2["ok"] is False
+    assert "budget" in r2["summary"].lower()
+
+
+@pytest.mark.asyncio
+async def test_run_file_patch_rejects_when_code_budget_exceeded(tmp_path: Path):
+    """run_file_patch rejects patches to .py files once budget is exceeded."""
+    budget = CodeChangeBudget(max_files=1, max_lines=2)
+    f = tmp_path / "app.py"
+    f.write_text("def foo():\n    return 1\n", encoding="utf-8")
+    original_hash = compute_sha256("def foo():\n    return 1\n")
+    r1 = await run_file_patch(
+        path="app.py", old_text="return 1", new_text="return 2",
+        workspace_root=str(tmp_path), expected_hash=original_hash,
+        code_change_budget=budget,
+    )
+    assert r1["ok"] is True
+    new_hash = compute_sha256("def foo():\n    return 2\n")
+    r2 = await run_file_patch(
+        path="app.py", old_text="return 2",
+        new_text="x\n" * 10,
+        workspace_root=str(tmp_path), expected_hash=new_hash,
+        code_change_budget=budget,
+    )
+    assert r2["ok"] is False
+    assert "budget" in r2["summary"].lower()
+
+
+# --- P1 #2: cross-workspace write authorization via decide_for_write ---
+
+
+def test_decide_for_write_blocks_cross_workspace_unauthorized(tmp_path: Path):
+    """Unauthorized cross-workspace write requires confirmation (not auto-allowed)."""
+    from backend.amadeus_app.orchestrator.capabilities import CapabilityGateway
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    external = tmp_path / "external"
+    external.mkdir()
+    gw = CapabilityGateway(trust_mode=True)
+    decision = gw.decide_for_write(
+        "file_write",
+        {"path": str(external / "out.txt")},
+        workspace_path=str(workspace),
+        authorized_write_paths=[],
+    )
+    assert decision.allowed is False
+    assert "cross-workspace" in decision.reason or "authorization" in decision.reason
+
+
+def test_decide_for_write_allows_authorized_cross_workspace_in_trust_mode(tmp_path: Path):
+    """Authorized cross-workspace write is allowed when trustMode=true."""
+    from backend.amadeus_app.orchestrator.capabilities import CapabilityGateway
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    external = tmp_path / "external"
+    external.mkdir()
+    gw = CapabilityGateway(trust_mode=True)
+    decision = gw.decide_for_write(
+        "file_write",
+        {"path": str(external / "out.txt")},
+        workspace_path=str(workspace),
+        authorized_write_paths=[str(external)],
+    )
+    assert decision.allowed is True
+
+
+def test_decide_for_write_blocks_authorized_cross_workspace_no_trust(tmp_path: Path):
+    """Authorized cross-workspace write still requires confirmation when trustMode=false."""
+    from backend.amadeus_app.orchestrator.capabilities import CapabilityGateway
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    external = tmp_path / "external"
+    external.mkdir()
+    gw = CapabilityGateway(trust_mode=False)
+    decision = gw.decide_for_write(
+        "file_write",
+        {"path": str(external / "out.txt")},
+        workspace_path=str(workspace),
+        authorized_write_paths=[str(external)],
+    )
+    assert decision.allowed is False
+    assert "cross-workspace" in decision.reason
+
+
+# --- P1 #3: code_search supports authorized external paths ---
+
+
+@pytest.mark.asyncio
+async def test_code_search_finds_external_authorized_path(tmp_path: Path):
+    """code_search returns matches in authorized external paths."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    external = tmp_path / "external"
+    external.mkdir()
+    (external / "ext.py").write_text("def findme():\n    pass\n", encoding="utf-8")
+    result = await run_code_search(
+        query="findme",
+        workspace_root=str(workspace),
+        path=str(external),
+        allowed_external_paths=[str(external)],
+    )
+    assert len(result["results"]) == 1
+    assert result["results"][0]["path"].endswith("ext.py")
+
+
+@pytest.mark.asyncio
+async def test_code_search_adapter_resolves_external_path(tmp_path: Path):
+    """The code_search adapter uses PathGuard.resolve_read so external paths work."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    external = tmp_path / "external"
+    external.mkdir()
+    (external / "needle.py").write_text("needle_in_external\n", encoding="utf-8")
+    settings = OrchestratorSettings(defaultWorkspace=str(workspace), trustMode=True)
+    settings.allowed_external_paths = [str(external)]
+    ctx = CapabilityExecutionContext(
+        task_id="t", prompt="p", workspace_path=str(workspace),
+        settings=settings, metadata={}, storage=None, emit_event=None,
+    )
+    result = await default_capability_registry.execute(
+        "code_search", {"query": "needle_in_external", "path": str(external)}, ctx,
+    )
+    assert result["ok"] is True
+    assert len(result["data"]["results"]) == 1
+
+
+# --- P2 #4: external path rollback via FileChangeTracker + PathGuard ---
+
+
+def test_relative_to_workspace_returns_absolute_for_external(tmp_path: Path):
+    """PathGuard.relative_to_workspace returns absolute path for external files."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    external = tmp_path / "external"
+    external.mkdir()
+    guard = PathGuard(str(workspace), allowed_external_paths=[str(external)])
+    rel = guard.relative_to_workspace(external / "out.txt")
+    assert Path(rel).is_absolute()
+    assert "\\" not in rel
+
+
+@pytest.mark.asyncio
+async def test_file_change_tracker_external_path_rollback(tmp_path: Path):
+    """External file writes are rolled back when the external root is registered."""
+    from backend.amadeus_app.orchestrator import storage as orch_storage
+    from backend.amadeus_app.orchestrator.file_change_tracker import FileChangeTracker
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    external = tmp_path / "external"
+    external.mkdir()
+    storage = SQLiteStorage(str(tmp_path / "test.db"))
+    await storage.connect()
+    task = await orch_storage.create_task(
+        storage, user_id="u", title="t", prompt="p",
+        workspace_path=str(workspace), conversation_id=None,
+        active_skill_ids=[], settings={},
+    )
+    tracker = FileChangeTracker(storage, str(workspace), task["id"])
+    await tracker.initialize()
+    tracker.add_external_root(str(external))
+
+    external_file = external / "cross.txt"
+    await run_file_write(
+        path=str(external_file), content="external-content",
+        workspace_root=str(workspace),
+        allowed_external_paths=[str(external)],
+        file_tracker=tracker,
+    )
+    assert external_file.read_text(encoding="utf-8") == "external-content"
+
+    result = await tracker.rollback()
+    assert result["ok"] is True, f"rollback errors: {result.get('errors')}"
+    assert not external_file.exists()
+    await storage.close()
+
+
+# --- P2 #5: cache invalidation for file_list(.) and code_search(.) ---
+
+
+def test_cache_invalidation_root_scope_by_any_write():
+    """file_list(.) cache entries are invalidated by any write."""
+    from backend.amadeus_app.orchestrator.tool_executor import ToolCache
+
+    cache = ToolCache()
+    cache.set("file_list", {"path": "."}, {"ok": True, "data": {"entries": []}})
+    cache.set("code_search", {"path": "."}, {"ok": True, "data": {"results": []}})
+    removed = cache.invalidate_paths(["src/a.py"])
+    assert removed == 2
+    assert cache.get("file_list", {"path": "."}) is None
+    assert cache.get("code_search", {"path": "."}) is None
+
+
+def test_cache_invalidation_directory_prefix_match():
+    """file_list(src) cache entries are invalidated by writes under src/."""
+    from backend.amadeus_app.orchestrator.tool_executor import ToolCache
+
+    cache = ToolCache()
+    cache.set("file_list", {"path": "src"}, {"ok": True, "data": {"entries": []}})
+    removed = cache.invalidate_paths(["src/a.py"])
+    assert removed == 1
+    assert cache.get("file_list", {"path": "src"}) is None
+
+
+def test_cache_invalidation_file_exact_match_only():
+    """file_read(a.py) cache entries are invalidated only by writes to a.py."""
+    from backend.amadeus_app.orchestrator.tool_executor import ToolCache
+
+    cache = ToolCache()
+    cache.set("file_read", {"path": "a.py"}, {"ok": True, "data": {"content": "old"}})
+    removed = cache.invalidate_paths(["b.py"])
+    assert removed == 0
+    assert cache.get("file_read", {"path": "a.py"}) is not None
+    removed = cache.invalidate_paths(["a.py"])
+    assert removed == 1
+    assert cache.get("file_read", {"path": "a.py"}) is None
+
+
+# --- P2 #6: file_mkdir rollback ---
+
+
+@pytest.mark.asyncio
+async def test_file_mkdir_records_tracker_change(tmp_path: Path):
+    """run_file_mkdir records a mkdir change type for rollback."""
+    from backend.amadeus_app.orchestrator import storage as orch_storage
+    from backend.amadeus_app.orchestrator.file_change_tracker import FileChangeTracker
+
+    storage = SQLiteStorage(str(tmp_path / "test.db"))
+    await storage.connect()
+    task = await orch_storage.create_task(
+        storage, user_id="u", title="t", prompt="p",
+        workspace_path=str(tmp_path), conversation_id=None,
+        active_skill_ids=[], settings={},
+    )
+    tracker = FileChangeTracker.__new__(FileChangeTracker)
+    tracker._storage = storage
+    tracker._workspace = tmp_path.resolve()
+    tracker._task_id = task["id"]
+    tracker.is_git_repo = False
+    tracker.git_baseline_ref = None
+    tracker.git_baseline_dirty_paths = set()
+    tracker.git_baseline_untracked_paths = set()
+    tracker._seq = 0
+    tracker._backup_store = None
+    tracker._external_roots = []
+
+    await run_file_mkdir(
+        path="newdir", workspace_root=str(tmp_path), file_tracker=tracker,
+    )
+    changes = await orch_storage.list_file_changes(storage, task["id"])
+    assert len(changes) == 1
+    assert changes[0]["changeType"] == "mkdir"
+    assert changes[0]["relativePath"] == "newdir"
+    await storage.close()
+
+
+@pytest.mark.asyncio
+async def test_file_mkdir_rolls_back_removes_directory(tmp_path: Path):
+    """Rollback after run_file_mkdir removes the created directory."""
+    from backend.amadeus_app.orchestrator import storage as orch_storage
+    from backend.amadeus_app.orchestrator.file_change_tracker import FileChangeTracker
+
+    storage = SQLiteStorage(str(tmp_path / "test.db"))
+    await storage.connect()
+    task = await orch_storage.create_task(
+        storage, user_id="u", title="t", prompt="p",
+        workspace_path=str(tmp_path), conversation_id=None,
+        active_skill_ids=[], settings={},
+    )
+    tracker = FileChangeTracker.__new__(FileChangeTracker)
+    tracker._storage = storage
+    tracker._workspace = tmp_path.resolve()
+    tracker._task_id = task["id"]
+    tracker.is_git_repo = False
+    tracker.git_baseline_ref = None
+    tracker.git_baseline_dirty_paths = set()
+    tracker.git_baseline_untracked_paths = set()
+    tracker._seq = 0
+    tracker._backup_store = None
+    tracker._external_roots = []
+
+    new_dir = tmp_path / "rollback_dir"
+    await run_file_mkdir(
+        path="rollback_dir", workspace_root=str(tmp_path), file_tracker=tracker,
+    )
+    assert new_dir.is_dir()
+
+    result = await tracker.rollback()
+    assert result["ok"] is True, f"rollback errors: {result.get('errors')}"
+    assert not new_dir.exists()
+    await storage.close()
+
+
+@pytest.mark.asyncio
+async def test_file_mkdir_rolls_back_nested_directory(tmp_path: Path):
+    """Rollback removes nested directories created by file_mkdir (deepest first)."""
+    from backend.amadeus_app.orchestrator import storage as orch_storage
+    from backend.amadeus_app.orchestrator.file_change_tracker import FileChangeTracker
+
+    storage = SQLiteStorage(str(tmp_path / "test.db"))
+    await storage.connect()
+    task = await orch_storage.create_task(
+        storage, user_id="u", title="t", prompt="p",
+        workspace_path=str(tmp_path), conversation_id=None,
+        active_skill_ids=[], settings={},
+    )
+    tracker = FileChangeTracker.__new__(FileChangeTracker)
+    tracker._storage = storage
+    tracker._workspace = tmp_path.resolve()
+    tracker._task_id = task["id"]
+    tracker.is_git_repo = False
+    tracker.git_baseline_ref = None
+    tracker.git_baseline_dirty_paths = set()
+    tracker.git_baseline_untracked_paths = set()
+    tracker._seq = 0
+    tracker._backup_store = None
+    tracker._external_roots = []
+
+    await run_file_mkdir(
+        path="a/b/c", workspace_root=str(tmp_path), file_tracker=tracker,
+    )
+    assert (tmp_path / "a" / "b" / "c").is_dir()
+
+    result = await tracker.rollback()
+    assert result["ok"] is True, f"rollback errors: {result.get('errors')}"
+    assert not (tmp_path / "a").exists()
     await storage.close()

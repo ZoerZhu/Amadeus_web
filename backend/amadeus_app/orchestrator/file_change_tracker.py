@@ -19,7 +19,14 @@ class FileChangeTracker:
 
     MAX_SNAPSHOT_SIZE = 1_048_576  # 1MB
 
-    def __init__(self, storage, workspace_path: str, task_id: str) -> None:
+    def __init__(
+        self,
+        storage,
+        workspace_path: str,
+        task_id: str,
+        *,
+        external_roots: list[str] | None = None,
+    ) -> None:
         self._storage = storage
         self._workspace = Path(workspace_path or ".").expanduser().resolve()
         self._task_id = task_id
@@ -29,6 +36,19 @@ class FileChangeTracker:
         self.git_baseline_untracked_paths: set[str] = set()
         self._seq = 0
         self._backup_store: Any = None
+        self._external_roots: list[Path] = [
+            Path(p).expanduser().resolve()
+            for p in (external_roots or [])
+            if p
+        ]
+
+    def add_external_root(self, path: str) -> None:
+        """Add an external root authorized for this task (for rollback)."""
+        if not path:
+            return
+        root = Path(path).expanduser().resolve()
+        if root not in self._external_roots:
+            self._external_roots.append(root)
 
     def attach_backup_store(self, store: Any) -> None:
         """Attach a FileBackupStore so rollback can restore deleted/moved files."""
@@ -210,6 +230,25 @@ class FileChangeTracker:
         """Record a file patch (alias for record_write with file_patch source)."""
         return await self.record_write(rel_path, old_content, new_content, source=source)
 
+    async def record_mkdir(
+        self,
+        rel_path: str,
+        source: str = "file_mkdir",
+    ) -> dict[str, Any] | None:
+        """Record a directory creation (non-git mode) so rollback can remove it."""
+        if self.is_git_repo:
+            return None
+        return await orch_storage.create_file_change(
+            self._storage,
+            task_id=self._task_id,
+            seq=self._next_seq(),
+            relative_path=rel_path,
+            change_type="mkdir",
+            diff_text="",
+            old_snapshot="",
+            source=source,
+        )
+
     async def collect_git_diff(self) -> list[dict[str, Any]]:
         """Called at task end in Git mode. Collects all changes via git diff."""
         if not self.is_git_repo or not self.git_baseline_ref:
@@ -322,6 +361,20 @@ class FileChangeTracker:
         }
 
     def _change_path(self, relative_path: str) -> Path | None:
+        # External paths: stored as absolute forward-slash strings.
+        if Path(relative_path).is_absolute():
+            try:
+                target = Path(relative_path).resolve()
+            except OSError:
+                return None
+            for root in self._external_roots:
+                try:
+                    target.relative_to(root)
+                    return target
+                except ValueError:
+                    continue
+            return None
+        # Workspace-relative paths
         target = (self._workspace / relative_path).resolve()
         try:
             target.relative_to(self._workspace)
@@ -391,6 +444,41 @@ class FileChangeTracker:
             result["reason"] = "; ".join(errors[:3])
         return result
 
+    def _rmdir_empty_chain(self, start_path: Path) -> int:
+        """Remove ``start_path`` and any now-empty parent directories up to
+        (but not including) the workspace root or an external root.
+
+        Returns the number of directories removed. ``rmdir`` only succeeds on
+        empty directories, so pre-existing content is naturally preserved.
+        """
+        workspace = self._workspace.resolve()
+        roots = [workspace]
+        for root in self._external_roots:
+            try:
+                roots.append(Path(root).resolve())
+            except Exception:  # noqa: BLE001
+                pass
+
+        removed = 0
+        current = start_path.resolve()
+        while True:
+            if current in roots or current == current.parent:
+                break
+            try:
+                current.rmdir()
+            except OSError:
+                break
+            removed += 1
+            current = current.parent
+            try:
+                resolved_parent = current.resolve()
+            except Exception:  # noqa: BLE001
+                break
+            if resolved_parent in roots:
+                break
+            current = resolved_parent
+        return removed
+
     async def _rollback_snapshots(self) -> dict[str, Any]:
         changes = await orch_storage.list_file_changes(self._storage, self._task_id)
         restored = 0
@@ -403,7 +491,17 @@ class FileChangeTracker:
                 continue
             try:
                 if change["changeType"] == "created":
-                    full_path.unlink(missing_ok=True)
+                    if full_path.is_dir():
+                        shutil.rmtree(full_path, ignore_errors=True)
+                    else:
+                        full_path.unlink(missing_ok=True)
+                    restored += 1
+                elif change["changeType"] == "mkdir":
+                    # Remove the created directory if empty (files rolled back first)
+                    if full_path.is_dir():
+                        removed = self._rmdir_empty_chain(full_path)
+                        if removed:
+                            restored += removed
                     restored += 1
                 elif change["changeType"] == "modified" and change["oldSnapshot"]:
                     full_path.parent.mkdir(parents=True, exist_ok=True)

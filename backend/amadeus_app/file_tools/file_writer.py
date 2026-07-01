@@ -103,6 +103,7 @@ async def run_file_write(
     allowed_external_paths: list[str] | None = None,
     file_tracker: Any = None,
     backup_store: FileBackupStore | None = None,
+    code_change_budget: CodeChangeBudget | None = None,
     source: str = "file_write",
 ) -> dict[str, Any]:
     """Write content to a file. Overwrites require a matching expectedHash."""
@@ -113,6 +114,8 @@ async def run_file_write(
         guard.ensure_writable_suffix(target)
     except ValueError as error:
         return {"ok": False, "summary": str(error), "data": {}}
+
+    rel_path = guard.relative_to_workspace(target)
 
     old_content = None
     if target.exists():
@@ -135,10 +138,26 @@ async def run_file_write(
         if backup_store:
             backup_store.backup(target)
 
+    # Enforce code-change budget for code/config files written by the main Agent
+    if code_change_budget and code_change_budget.is_code(target):
+        if old_content is None:
+            added_lines = len(content.splitlines())
+        else:
+            added_lines = max(0, len(content.splitlines()) - len(old_content.splitlines()))
+        if code_change_budget.would_exceed(rel_path, added_lines):
+            return {
+                "ok": False,
+                "summary": (
+                    f"Code change budget exceeded ({code_change_budget.max_files} files / "
+                    f"{code_change_budget.max_lines} lines). Delegate complex changes to code_agent."
+                ),
+                "data": {"path": str(target)},
+            }
+        code_change_budget.record(rel_path, added_lines)
+
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(content, encoding=encoding)
     new_hash = compute_sha256(content)
-    rel_path = guard.relative_to_workspace(target)
     diff_summary = _diff_summary(old_content, content)
 
     if file_tracker:
@@ -165,6 +184,7 @@ async def run_file_append(
     allowed_external_paths: list[str] | None = None,
     file_tracker: Any = None,
     backup_store: FileBackupStore | None = None,
+    code_change_budget: CodeChangeBudget | None = None,
     source: str = "file_append",
 ) -> dict[str, Any]:
     """Append content to a file. Existing files require expectedHash."""
@@ -175,6 +195,8 @@ async def run_file_append(
         guard.ensure_writable_suffix(target)
     except ValueError as error:
         return {"ok": False, "summary": str(error), "data": {}}
+
+    rel_path = guard.relative_to_workspace(target)
 
     old_content = ""
     if target.exists():
@@ -198,10 +220,24 @@ async def run_file_append(
             backup_store.backup(target)
 
     new_content = old_content + content
+
+    # Enforce code-change budget for code/config files appended by the main Agent
+    if code_change_budget and code_change_budget.is_code(target):
+        added_lines = max(0, len(new_content.splitlines()) - len(old_content.splitlines()))
+        if code_change_budget.would_exceed(rel_path, added_lines):
+            return {
+                "ok": False,
+                "summary": (
+                    f"Code change budget exceeded ({code_change_budget.max_files} files / "
+                    f"{code_change_budget.max_lines} lines). Delegate complex changes to code_agent."
+                ),
+                "data": {"path": str(target)},
+            }
+        code_change_budget.record(rel_path, added_lines)
+
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(new_content, encoding=encoding)
     new_hash = compute_sha256(new_content)
-    rel_path = guard.relative_to_workspace(target)
     diff_summary = _diff_summary(old_content if old_content else None, new_content)
 
     if file_tracker:
@@ -233,8 +269,14 @@ async def run_file_mkdir(
         guard.ensure_not_denied(target)
     except ValueError as error:
         return {"ok": False, "summary": str(error), "data": {}}
+    already_existed = target.exists()
     target.mkdir(parents=True, exist_ok=True)
     rel_path = guard.relative_to_workspace(target)
+    if file_tracker and not already_existed:
+        try:
+            await file_tracker.record_mkdir(rel_path, source=source)
+        except Exception:  # noqa: BLE001
+            pass
     return {
         "ok": True,
         "summary": f"已创建目录 {target.name}。",

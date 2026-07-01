@@ -344,7 +344,8 @@ export function TaskWorkspace({
 
   const effectiveActiveId = selectedTaskId ?? activeId;
   const canSend = input.trim().length > 0 && !running && !uploadBusy;
-  const activeRunning = taskDetail?.status === "running" || taskDetail?.status === "paused" || running;
+  const activeWaitingForPermission = status === "paused" || taskDetail?.status === "paused" || permissions.length > 0;
+  const activeRunning = status === "running" || status === "connecting" || taskDetail?.status === "running" || running;
 
   const setTaskList = useCallback(
     (next: OrchestratorTaskSummary[]) => {
@@ -469,12 +470,28 @@ export function TaskWorkspace({
           void refreshActiveDetail().catch(() => undefined);
         } else if (event.kind === "status") {
           setStatus(event.status || event.summary || "running");
+          if (event.status === "paused") {
+            setRunning(false);
+            void refreshPermissions().catch(() => undefined);
+            void refreshActiveDetail().catch(() => undefined);
+          }
         }
       },
       onError: (message) => setError(message)
     });
     return unsubscribe;
   }, [effectiveActiveId, refreshActiveDetail, refreshPermissions, refreshTasks, streamVersion]);
+
+  useEffect(() => {
+    if (!effectiveActiveId || (!activeRunning && !activeWaitingForPermission)) {
+      return;
+    }
+    void refreshPermissions().catch(() => undefined);
+    const timer = window.setInterval(() => {
+      void refreshPermissions().catch(() => undefined);
+    }, 2000);
+    return () => window.clearInterval(timer);
+  }, [activeRunning, activeWaitingForPermission, effectiveActiveId, refreshPermissions]);
 
   useEffect(() => {
     eventsRef.current?.scrollTo({ top: eventsRef.current.scrollHeight, behavior: running ? "auto" : "smooth" });

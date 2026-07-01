@@ -99,10 +99,22 @@ def _is_cross_workspace(path_text: str, context: CapabilityExecutionContext) -> 
 
 
 def _external_paths(context: CapabilityExecutionContext) -> list[str]:
+    """Combined external paths for READ tools (persistent + task-scoped)."""
     allowed = list(getattr(context.settings, "allowed_external_paths", []) or [])
     if context.metadata:
         allowed += context.metadata.get("authorized_external_paths", [])
     return allowed
+
+
+def _write_external_paths(context: CapabilityExecutionContext) -> list[str]:
+    """Task-scoped external paths authorized for WRITES only.
+
+    Persistent ``allowedExternalPaths`` is read-only; writes require explicit
+    task-scoped authorization (added after user approves a cross-workspace write).
+    """
+    if not context.metadata:
+        return []
+    return list(context.metadata.get("authorized_external_paths", []) or [])
 
 
 def _file_tracker(context: CapabilityExecutionContext):
@@ -177,9 +189,10 @@ async def _file_write(args: dict[str, Any], context: CapabilityExecutionContext)
         workspace_root=context.workspace_path,
         expected_hash=args.get("expectedHash"),
         encoding=str(args.get("encoding") or "utf-8"),
-        allowed_external_paths=_external_paths(context),
+        allowed_external_paths=_write_external_paths(context),
         file_tracker=_file_tracker(context),
         backup_store=_backup_store(context),
+        code_change_budget=_code_budget(context),
         source="file_write",
     )
 
@@ -191,9 +204,10 @@ async def _file_append(args: dict[str, Any], context: CapabilityExecutionContext
         workspace_root=context.workspace_path,
         expected_hash=args.get("expectedHash"),
         encoding=str(args.get("encoding") or "utf-8"),
-        allowed_external_paths=_external_paths(context),
+        allowed_external_paths=_write_external_paths(context),
         file_tracker=_file_tracker(context),
         backup_store=_backup_store(context),
+        code_change_budget=_code_budget(context),
         source="file_append",
     )
 
@@ -206,7 +220,7 @@ async def _file_patch(args: dict[str, Any], context: CapabilityExecutionContext)
         workspace_root=context.workspace_path,
         expected_hash=str(args.get("expectedHash") or ""),
         encoding=str(args.get("encoding") or "utf-8"),
-        allowed_external_paths=_external_paths(context),
+        allowed_external_paths=_write_external_paths(context),
         file_tracker=_file_tracker(context),
         backup_store=_backup_store(context),
         code_change_budget=_code_budget(context),
@@ -218,7 +232,7 @@ async def _file_mkdir(args: dict[str, Any], context: CapabilityExecutionContext)
     return await run_file_mkdir(
         path=str(args.get("path") or ""),
         workspace_root=context.workspace_path,
-        allowed_external_paths=_external_paths(context),
+        allowed_external_paths=_write_external_paths(context),
         file_tracker=_file_tracker(context),
         source="file_mkdir",
     )
@@ -229,7 +243,7 @@ async def _file_move(args: dict[str, Any], context: CapabilityExecutionContext) 
         src=str(args.get("src") or ""),
         dst=str(args.get("dst") or ""),
         workspace_root=context.workspace_path,
-        allowed_external_paths=_external_paths(context),
+        allowed_external_paths=_write_external_paths(context),
         file_tracker=_file_tracker(context),
         backup_store=_backup_store(context),
         source="file_move",
@@ -240,7 +254,7 @@ async def _file_delete(args: dict[str, Any], context: CapabilityExecutionContext
     return await run_file_delete(
         path=str(args.get("path") or ""),
         workspace_root=context.workspace_path,
-        allowed_external_paths=_external_paths(context),
+        allowed_external_paths=_write_external_paths(context),
         file_tracker=_file_tracker(context),
         backup_store=_backup_store(context),
         source="file_delete",
@@ -252,7 +266,12 @@ async def _code_search(args: dict[str, Any], context: CapabilityExecutionContext
     if not query:
         return {"ok": False, "summary": "code_search requires query.", "data": {}}
     raw_path = str(args.get("path") or args.get("directory") or ".").strip() or "."
-    root_path = _resolve_workspace_child(context.workspace_path, raw_path)
+    # Use PathGuard so authorized external paths are searchable (same as file_read).
+    guard = _guard_for(context)
+    try:
+        root_path = guard.resolve_read(raw_path)
+    except ValueError as error:
+        return {"ok": False, "summary": str(error), "data": {}}
     max_results = _positive_int(args.get("maxResults") or args.get("limit"), default=50)
     attempts: list[dict[str, Any]] = []
     if not bool(args.get("forceBuiltin")):

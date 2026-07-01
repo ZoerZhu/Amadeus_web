@@ -10,6 +10,31 @@ from uuid import UUID, uuid4
 
 
 DEFAULT_USER_ID = "local-user"
+AGENT_EVENT_KINDS = (
+    "message",
+    "status",
+    "plan",
+    "step",
+    "tool",
+    "mcp",
+    "browser",
+    "artifact",
+    "question",
+    "sampling",
+    "opencode_routing",
+    "error",
+    "done",
+    "agent_thought_summary",
+    "tool_call",
+    "tool_result",
+    "command",
+    "working_set",
+)
+
+
+def _event_kind_schema_is_current(schema_sql: str | None) -> bool:
+    sql = schema_sql or ""
+    return all(f"'{kind}'" in sql for kind in AGENT_EVENT_KINDS)
 
 
 def _decode_json(value: Any) -> dict[str, Any]:
@@ -512,7 +537,7 @@ class SQLiteStorage:
                 seq             INTEGER NOT NULL,
                 relative_path   TEXT NOT NULL,
                 change_type     TEXT NOT NULL DEFAULT 'modified'
-                                CHECK (change_type IN ('modified', 'created', 'deleted')),
+                                CHECK (change_type IN ('modified', 'created', 'deleted', 'mkdir')),
                 diff_text       TEXT NOT NULL DEFAULT '',
                 old_snapshot    TEXT NOT NULL DEFAULT '',
                 source          TEXT NOT NULL DEFAULT 'file_write',
@@ -555,13 +580,52 @@ class SQLiteStorage:
             conn.execute(
                 "ALTER TABLE orchestrator_permission_requests ADD COLUMN question_type TEXT NOT NULL DEFAULT ''"
             )
+        legacy_event_schema = conn.execute(
+            """
+            SELECT sql FROM sqlite_master
+            WHERE type = 'table' AND name = 'agent_task_events'
+            """
+        ).fetchone()
+        if legacy_event_schema and not _event_kind_schema_is_current(str(legacy_event_schema["sql"] or "")):
+            conn.executescript(
+                """
+                ALTER TABLE agent_task_events RENAME TO agent_task_events_old;
+
+                CREATE TABLE agent_task_events (
+                    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+                    task_id         TEXT NOT NULL REFERENCES agent_tasks(id) ON DELETE CASCADE,
+                    seq             INTEGER NOT NULL,
+                    kind            TEXT NOT NULL
+                                    CHECK (kind IN ('message','status','plan','step','tool','mcp','browser','artifact','question','sampling','opencode_routing','error','done','agent_thought_summary','tool_call','tool_result','command','working_set')),
+                    role            TEXT NOT NULL DEFAULT '',
+                    name            TEXT NOT NULL DEFAULT '',
+                    status          TEXT NOT NULL DEFAULT '',
+                    summary         TEXT NOT NULL DEFAULT '',
+                    payload         TEXT NOT NULL DEFAULT '{}',
+                    artifact_ids    TEXT NOT NULL DEFAULT '[]',
+                    created_at      TEXT NOT NULL,
+                    UNIQUE (task_id, seq)
+                );
+
+                INSERT INTO agent_task_events
+                (id, task_id, seq, kind, role, name, status, summary, payload, artifact_ids, created_at)
+                SELECT id, task_id, seq, kind, role, name, status, summary, payload, artifact_ids, created_at
+                FROM agent_task_events_old;
+
+                DROP TABLE agent_task_events_old;
+
+                CREATE INDEX IF NOT EXISTS agent_task_events_task_seq_idx
+                    ON agent_task_events (task_id, seq ASC);
+                """
+            )
+
         ledger_schema = conn.execute(
             """
             SELECT sql FROM sqlite_master
             WHERE type = 'table' AND name = 'orchestrator_ledger_events'
             """
         ).fetchone()
-        if ledger_schema and "'message'" not in str(ledger_schema["sql"] or ""):
+        if ledger_schema and not _event_kind_schema_is_current(str(ledger_schema["sql"] or "")):
             conn.executescript(
                 """
                 ALTER TABLE orchestrator_ledger_events RENAME TO orchestrator_ledger_events_old;
@@ -590,6 +654,42 @@ class SQLiteStorage:
 
                 CREATE INDEX IF NOT EXISTS orchestrator_ledger_task_seq_idx
                     ON orchestrator_ledger_events (task_id, seq ASC);
+                """
+            )
+
+        file_changes_schema = conn.execute(
+            """
+            SELECT sql FROM sqlite_master
+            WHERE type = 'table' AND name = 'orchestrator_file_changes'
+            """
+        ).fetchone()
+        if file_changes_schema and "'mkdir'" not in str(file_changes_schema["sql"] or ""):
+            conn.executescript(
+                """
+                ALTER TABLE orchestrator_file_changes RENAME TO orchestrator_file_changes_old;
+
+                CREATE TABLE orchestrator_file_changes (
+                    id              TEXT PRIMARY KEY,
+                    task_id         TEXT NOT NULL REFERENCES orchestrator_tasks(id) ON DELETE CASCADE,
+                    seq             INTEGER NOT NULL,
+                    relative_path   TEXT NOT NULL,
+                    change_type     TEXT NOT NULL DEFAULT 'modified'
+                                    CHECK (change_type IN ('modified', 'created', 'deleted', 'mkdir')),
+                    diff_text       TEXT NOT NULL DEFAULT '',
+                    old_snapshot    TEXT NOT NULL DEFAULT '',
+                    source          TEXT NOT NULL DEFAULT 'file_write',
+                    created_at      TEXT NOT NULL
+                );
+
+                INSERT INTO orchestrator_file_changes
+                (id, task_id, seq, relative_path, change_type, diff_text, old_snapshot, source, created_at)
+                SELECT id, task_id, seq, relative_path, change_type, diff_text, old_snapshot, source, created_at
+                FROM orchestrator_file_changes_old;
+
+                DROP TABLE orchestrator_file_changes_old;
+
+                CREATE INDEX IF NOT EXISTS orchestrator_file_changes_task_idx
+                    ON orchestrator_file_changes (task_id, seq ASC);
                 """
             )
 

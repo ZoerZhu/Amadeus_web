@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 from .domain import CapabilityDefinition, CapabilityRisk
@@ -78,6 +79,104 @@ class CapabilityGateway:
             return CapabilityDecision(name=name, risk=risk, allowed=True, reason="trustMode allows confirm capability")
         return CapabilityDecision(name=name, risk=risk, allowed=False, reason=f"{risk} capability requires approval")
 
+    def decide_for_write(
+        self,
+        name: str,
+        tool_args: dict[str, Any],
+        *,
+        workspace_path: str,
+        read_external_paths: list[str] | None = None,
+        authorized_write_paths: list[str] | None = None,
+    ) -> CapabilityDecision:
+        """Path-aware decision for file-write tools.
+
+        Enforces the design: "only new non-code files auto-approve in trust mode;
+        code/config writes and cross-workspace writes require confirmation."
+
+        - Cross-workspace writes: always require confirmation (even in trust mode).
+          If the path is already in ``authorized_write_paths`` (task-scoped), it is
+          allowed in trust mode.
+        - Code/config writes (new or existing): always require confirmation.
+        - Existing-file overwrites: always require confirmation.
+        - New non-code files: fall back to ``decide()`` (auto-approve in trust mode).
+        """
+        # Dangerous tools (file_delete, file_move) keep their base classification.
+        base_risk = self.classify(name)
+        if base_risk == "dangerous":
+            return self.decide(name)
+
+        path_text = str(
+            tool_args.get("path")
+            or tool_args.get("src")
+            or tool_args.get("dst")
+            or ""
+        )
+        if not path_text:
+            return self.decide(name)
+
+        workspace_root = Path(workspace_path or ".").expanduser().resolve()
+        candidate = Path(path_text).expanduser()
+        if not candidate.is_absolute():
+            candidate = workspace_root / candidate
+        try:
+            resolved = candidate.resolve()
+        except OSError:
+            return self.decide(name)
+
+        is_external = not _is_within(resolved, workspace_root)
+
+        if is_external:
+            # Cross-workspace write: check task-scoped authorization
+            authorized = [
+                Path(p).expanduser().resolve()
+                for p in (authorized_write_paths or [])
+                if p
+            ]
+            is_authorized = any(
+                _is_within(resolved, root) or _is_within(root, resolved)
+                for root in authorized
+            )
+            if not is_authorized:
+                return CapabilityDecision(
+                    name=name,
+                    risk="confirm",
+                    allowed=False,
+                    reason="cross-workspace write requires authorization",
+                )
+            # Authorized cross-workspace write: still requires confirmation unless trust mode
+            if self.trust_mode:
+                return CapabilityDecision(
+                    name=name,
+                    risk="confirm",
+                    allowed=True,
+                    reason="trustMode allows authorized cross-workspace write",
+                )
+            return CapabilityDecision(
+                name=name,
+                risk="confirm",
+                allowed=False,
+                reason="cross-workspace write requires confirmation",
+            )
+
+        # Workspace-internal write: check code/config suffix and existing files
+        if _is_code_or_config(resolved):
+            return CapabilityDecision(
+                name=name,
+                risk="confirm",
+                allowed=False,
+                reason="code/config file write requires confirmation",
+            )
+        if resolved.exists():
+            return CapabilityDecision(
+                name=name,
+                risk="confirm",
+                allowed=False,
+                reason="overwriting existing file requires confirmation",
+            )
+
+        # New non-code file in workspace: fall back to default policy
+        return self.decide(name)
+
 
 def capability_catalog() -> list[CapabilityDefinition]:
     return [
@@ -103,6 +202,29 @@ def capability_catalog() -> list[CapabilityDefinition]:
         CapabilityDefinition(name="desktop_screenshot", description="Capture a desktop screenshot for visual context. Only available in Electron environment with screenshot enabled.", risk="safe", workerRoles=["researcher"]),
         CapabilityDefinition(name="ask_user", description="Ask the user a question and wait for their answer. Use when you need clarification or a decision before proceeding.", risk="safe", workerRoles=["coordinator", "coder", "writer"]),
     ]
+
+
+_CODE_CONFIG_SUFFIXES = frozenset({
+    ".py", ".pyi", ".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs",
+    ".json", ".yaml", ".yml", ".toml", ".ini", ".cfg", ".sh", ".ps1",
+    ".bat", ".cmd", ".env", ".vue", ".svelte", ".go", ".rs", ".java",
+    ".c", ".cpp", ".h", ".hpp", ".cs", ".rb", ".php",
+})
+
+
+def _is_within(child: Path, parent: Path) -> bool:
+    try:
+        child.relative_to(parent)
+        return True
+    except ValueError:
+        return False
+
+
+def _is_code_or_config(path: Path) -> bool:
+    name = path.name
+    if name == ".env" or name.startswith(".env."):
+        return True
+    return path.suffix.lower() in _CODE_CONFIG_SUFFIXES
 
 
 def prompt_requires_code_agent(prompt: str) -> bool:

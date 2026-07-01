@@ -57,12 +57,16 @@ class ToolCache:
         if not paths:
             return 0
         keys_to_remove: set[str] = set()
-        for path in paths:
-            # Exact match
+        for raw_path in paths:
+            path = raw_path.replace("\\", "/")
+            # Exact match (file reads index the exact file path)
             keys_to_remove.update(self._path_index.get(path, set()))
-            # Directory prefix match (write src/a.py → also invalidate src/ scope)
+            # Directory prefix match: write src/a.py → invalidate src/ scope
             for indexed_path, key_set in self._path_index.items():
-                if indexed_path.endswith("/") and path.startswith(indexed_path):
+                # Root scope ("") is invalidated by any write
+                if indexed_path == "":
+                    keys_to_remove.update(key_set)
+                elif indexed_path.endswith("/") and path.startswith(indexed_path):
                     keys_to_remove.update(key_set)
         for key in keys_to_remove:
             self._entries.pop(key, None)
@@ -84,19 +88,37 @@ class ToolCache:
         return {"hits": self._hits, "misses": self._misses}
 
 
+def _normalize_read_path(path: str) -> str:
+    """Normalize a read-tool path for cache indexing.
+
+    - "." or "" → "" (workspace root; any write invalidates it)
+    - "src" → "src/" (directory; prefix-matches "src/a.py")
+    - "src/a.py" → "src/a.py" (file; exact match)
+    All paths use forward slashes.
+    """
+    path = path.strip().replace("\\", "/")
+    if not path or path == ".":
+        return ""
+    # Directory paths get a trailing slash for prefix matching
+    if not path.endswith("/"):
+        # Heuristic: no suffix means directory; if it has a suffix, it's a file
+        # (Path("src").suffix == "" → directory; Path("src/a.py").suffix == ".py" → file)
+        from pathlib import PurePosixPath
+        if not PurePosixPath(path).suffix:
+            path = path + "/"
+    return path
+
+
 def _extract_read_paths(tool_name: str, tool_args: dict[str, Any]) -> list[str]:
     """Extract paths that a read tool touches, for path-based cache invalidation."""
     if tool_name in ("file_read", "file_list"):
         path = str(tool_args.get("path") or "")
-        return [path] if path else []
+        return [_normalize_read_path(path)] if path else [""]
     if tool_name == "code_search":
         path = str(tool_args.get("path") or "")
         if not path:
-            return []
-        # Normalize directory scopes to trailing slash for prefix matching
-        if not path.endswith("/"):
-            path = path + "/"
-        return [path]
+            return [""]
+        return [_normalize_read_path(path)]
     # web_search and others: no path index
     return []
 
@@ -232,7 +254,7 @@ class ToolExecutor:
                 payload={
                     "toolCallId": tool_call_id,
                     "arguments": tool_args,
-                    "round": loop_ctx.rounds + 1,
+                    "round": loop_ctx.rounds,
                     "cached": True,
                 },
             )

@@ -639,10 +639,10 @@ export function streamOrchestratorTaskEvents(options: {
         break;
       }
       buffer += decoder.decode(value, { stream: true });
-      buffer = drainSseBuffer<OrchestratorTaskEvent>(buffer, options.onEvent);
+      buffer = drainSseDataBuffer<OrchestratorTaskEvent>(buffer, options.onEvent);
     }
     buffer += decoder.decode();
-    drainSseBuffer<OrchestratorTaskEvent>(buffer, options.onEvent, true);
+    drainSseDataBuffer<OrchestratorTaskEvent>(buffer, options.onEvent, true);
   })();
 
   readerPromise.catch((error) => {
@@ -714,10 +714,10 @@ export async function streamOrchestratorTask(options: {
       break;
     }
     buffer += decoder.decode(value, { stream: true });
-    buffer = drainSseBuffer<OrchestratorTaskEvent>(buffer, options.onEvent);
+    buffer = drainSseDataBuffer<OrchestratorTaskEvent>(buffer, options.onEvent);
   }
   buffer += decoder.decode();
-  drainSseBuffer<OrchestratorTaskEvent>(buffer, options.onEvent, true);
+  drainSseDataBuffer<OrchestratorTaskEvent>(buffer, options.onEvent, true);
   return taskId;
 }
 
@@ -994,6 +994,43 @@ function emitSseBlock<TEvent>(block: string, onEvent: (event: TEvent) => void): 
     onEvent({ event, payload: JSON.parse(dataLines.join("\n")) } as TEvent);
   } catch {
     return;
+  }
+}
+
+function drainSseDataBuffer<TEvent>(
+  input: string,
+  onEvent: (event: TEvent) => void,
+  flush = false
+): string {
+  let buffer = input.replace(/\r\n/g, "\n");
+  while (true) {
+    const boundary = buffer.indexOf("\n\n");
+    if (boundary < 0) {
+      break;
+    }
+    const block = buffer.slice(0, boundary);
+    buffer = buffer.slice(boundary + 2);
+    emitSseDataBlock<TEvent>(block, onEvent);
+  }
+  if (flush && buffer.trim()) {
+    emitSseDataBlock<TEvent>(buffer, onEvent);
+    return "";
+  }
+  return buffer;
+}
+
+function emitSseDataBlock<TEvent>(block: string, onEvent: (event: TEvent) => void): void {
+  const dataLines = block
+    .split("\n")
+    .filter((line) => line.startsWith("data:"))
+    .map((line) => line.slice(5).trimStart());
+
+  if (dataLines.length === 0) {
+    return;
+  }
+  const event = parseSsePayload<TEvent>(dataLines.join("\n"));
+  if (event) {
+    onEvent(event);
   }
 }
 
